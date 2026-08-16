@@ -1,23 +1,23 @@
 # NFT Firewall V2 Build Status
 
-Status values: `NOT STARTED`, `ACTIVE`, `BLOCKED`, `PASS`, `FAIL`.
+Status values are `NOT STARTED`, `ACTIVE`, `BLOCKED`, `PASS`, and `FAIL`.
 
 | Phase | Status | Evidence / note |
 | --- | --- | --- |
-| P0 host baseline | PASS | `../test-results/host-baseline/`; Debian 13, kernel 6.12.94, initial tools were absent. |
-| P1 V1 inventory | PASS | Frozen checkout, commit, source and SHA256 manifests under `../test-results/v1-inventory/`. |
-| P2 V1 invariant extraction | PASS | `docs/V1_FEATURE_PARITY.md`, `docs/V1_SECURITY_INVARIANTS.md`. |
-| P3 architecture | ACTIVE | `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`. |
-| P4 Go foundation | NOT STARTED | |
-| P5 policy/compiler | NOT STARTED | |
-| P6 nft backend | NOT STARTED | Host netlink is sandbox-restricted; syntax tests remain possible. |
-| P7 state/reconciliation | NOT STARTED | |
-| P8 WireGuard | NOT STARTED | No real config present. |
-| P9 dynamic blocks | NOT STARTED | |
-| P10 Docker/integrations | NOT STARTED | Docker absent. |
-| P11 CLI/API/web | NOT STARTED | |
-| P12 packaging | NOT STARTED | |
-| P13 namespace acceptance | NOT STARTED | Capability availability must be tested before claiming PASS. |
-| P14 host acceptance | NOT STARTED | Must not mutate management path without independent rollback. |
-| P15 security audit | NOT STARTED | |
-| P16 release | NOT STARTED | |
+| P0 host baseline | PASS | `../HOST_BASELINE.md`, sanitized raw results under `../test-results/host-baseline/` |
+| P1 V1 inventory | PASS | Frozen commit, source manifest, SHA256 manifest, tests/comments index under `../test-results/v1-inventory/` |
+| P2 V1 invariant extraction | PASS | `docs/V1_FEATURE_PARITY.md`, `docs/V1_SECURITY_INVARIANTS.md` |
+| P3 architecture | PASS | `docs/ARCHITECTURE.md`, `docs/DECISIONS.md`, `docs/PACKAGES.md` |
+| P4 Go foundation | PASS | Three static command binaries, pinned modules, strict local API |
+| P5 policy/compiler | PASS | Typed deterministic policy, plan/explain, IPv4/IPv6 default-deny tests |
+| P6 nft backend | PASS | JSON inspection, owned-only atomic check/apply, runtime sets, fingerprint tests |
+| P7 state/reconciliation | PASS | SQLite migrations/backup, generations, safe rollback, drift auto-repair |
+| P8 WireGuard | PASS | Bounded endpoints, health/control, simulated and external provider acceptance |
+| P9 dynamic blocks | PASS | Provenance union, source-scoped removal, expiry and kernel lease tests |
+| P10 Docker/integrations | PASS | Hardened observer, feed/GeoIP bounds, lifecycle and real Docker VPN tests |
+| P11 CLI/API/web | PASS | Required commands, strict peer/schema limits, read-only dashboard, chaos tests |
+| P12 packaging | ACTIVE | Source installer and Debian packages pass inspection; final tagged archive pending |
+| P13 namespace acceptance | PASS | Full IPv4/IPv6 kill-switch, active-flow, drift, boot snapshot, DNAT suite; zero leaks |
+| P14 host acceptance | PASS | Independent emergency timer, SSH-preserving safe apply, commit/crash/timeout rollback, zero leaks |
+| P15 security audit | ACTIVE | Findings repaired; final exact-commit static/vulnerability/secret rerun pending |
+| P16 release | ACTIVE | Documentation/tooling complete; final tag, deterministic artifacts, and archive checks pending |

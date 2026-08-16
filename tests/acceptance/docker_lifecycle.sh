@@ -35,7 +35,7 @@ trap cleanup EXIT
 
 [[ -f /etc/docker/daemon.json && ! -L /etc/docker/daemon.json ]] || { echo "FAIL: Docker daemon config is unsafe"; exit 1; }
 [[ $(stat -c '%a:%u:%g' /etc/docker/daemon.json) == 600:0:0 ]] || { echo "FAIL: Docker daemon config permissions are unsafe"; exit 1; }
-jq -e '.iptables == false and .ip6tables == false' /etc/docker/daemon.json >/dev/null || { echo "FAIL: Docker firewall ownership is enabled"; exit 1; }
+jq -e '.iptables == false and .ip6tables == false and ."ip-forward" == false and ."ip-masq" == false and ."userland-proxy" == false' /etc/docker/daemon.json >/dev/null || { echo "FAIL: Docker firewall/routing/proxy ownership is enabled"; exit 1; }
 
 docker image inspect alpine:3.22 >/dev/null 2>&1 || docker pull --quiet alpine:3.22 >/dev/null
 nft_before=$(nft -j list ruleset | jq -S '.nftables | map(select(.metainfo? | not))' | sha256sum | awk '{print $1}')

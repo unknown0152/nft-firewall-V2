@@ -147,19 +147,31 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, control bool) {
 	reader := bufio.NewReader(io.LimitReader(conn, MaxRequestBytes+1))
 	frame, err := reader.ReadBytes('\n')
 	if err != nil && err != io.EOF {
+		if control {
+			s.securityEvent(ctx, "privileged_request_rejected", "invalid request frame")
+		}
 		writeResponse(conn, Response{Error: "invalid request frame: " + err.Error()})
 		return
 	}
 	if len(frame) == 0 || len(frame) > MaxRequestBytes {
+		if control {
+			s.securityEvent(ctx, "privileged_request_rejected", "invalid request frame size")
+		}
 		writeResponse(conn, Response{Error: "invalid request frame size"})
 		return
 	}
 	req, err := decodeRequest(bytes.NewReader(frame))
 	if err != nil {
+		if control {
+			s.securityEvent(ctx, "privileged_request_rejected", "request JSON rejected")
+		}
 		writeResponse(conn, Response{Error: "invalid request: " + err.Error()})
 		return
 	}
 	if req.Op == "" {
+		if control {
+			s.securityEvent(ctx, "privileged_request_rejected", "missing operation")
+		}
 		writeResponse(conn, Response{Error: "missing op"})
 		return
 	}

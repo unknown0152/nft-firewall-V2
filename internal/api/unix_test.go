@@ -1,9 +1,12 @@
 package api
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"errors"
+	"io"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -130,6 +133,58 @@ func TestOperationSpecificRequestSchema(t *testing.T) {
 	}
 }
 func (testHandler) Control(_ context.Context, r Request) (any, error) { return r.Op, nil }
+
+type auditingHandler struct {
+	testHandler
+	events chan string
+}
+
+func (h auditingHandler) SecurityEvent(_ context.Context, event, detail string) {
+	h.events <- event + ":" + detail
+}
+
+func TestMalformedPrivilegedRequestIsAuditedWithoutContent(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root peer is required to reach privileged request decoding")
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	dir := t.TempDir()
+	handler := auditingHandler{events: make(chan string, 1)}
+	server := &Server{Handler: handler, StatusPath: filepath.Join(dir, "status.sock"), ControlPath: filepath.Join(dir, "control.sock")}
+	go func() { _ = server.Serve(ctx) }()
+	deadline := time.Now().Add(time.Second)
+	for {
+		if _, err := os.Stat(server.ControlPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("control socket did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	conn, err := net.Dial("unix", server.ControlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	secretLikeInput := "{not-valid-json-and-must-not-be-audited}\n"
+	if _, err := io.WriteString(conn, secretLikeInput); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := bufio.NewReader(conn).ReadString('\n'); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case event := <-handler.events:
+		if event != "privileged_request_rejected:request JSON rejected" || strings.Contains(event, "not-valid") {
+			t.Fatalf("unexpected or content-leaking audit event: %q", event)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("malformed privileged request was not audited")
+	}
+}
+
 func TestUnixStatusAndControl(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()

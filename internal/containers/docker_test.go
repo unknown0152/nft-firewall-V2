@@ -30,7 +30,8 @@ printf '%s\n' '[{"IPAM":{"Config":[{"Subnet":"172.19.0.0/16"},{"Subnet":"fd00:19
 func TestObserverRequiresDockerFirewallOwnershipDisabled(t *testing.T) {
 	dir := t.TempDir()
 	path := filepath.Join(dir, "daemon.json")
-	if err := os.WriteFile(path, []byte(`{"iptables":false,"ip6tables":false}`), 0o600); err != nil {
+	safe := `{"iptables":false,"ip6tables":false,"ip-forward":false,"ip-masq":false,"userland-proxy":false}`
+	if err := os.WriteFile(path, []byte(safe), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	o := Observer{DaemonConfig: path}
@@ -38,12 +39,18 @@ func TestObserverRequiresDockerFirewallOwnershipDisabled(t *testing.T) {
 	if err != nil || !ok {
 		t.Fatalf("safe Docker configuration rejected: ok=%t err=%v", ok, err)
 	}
-	if err := os.WriteFile(path, []byte(`{"iptables":true,"ip6tables":false}`), 0o600); err != nil {
-		t.Fatal(err)
+	unsafe := []string{
+		`{"iptables":true,"ip6tables":false,"ip-forward":false,"ip-masq":false,"userland-proxy":false}`,
+		`{"iptables":false,"ip6tables":false,"ip-forward":false,"ip-masq":false}`,
 	}
-	ok, _, err = o.FirewallPolicy()
-	if err != nil || ok {
-		t.Fatalf("unsafe Docker firewall ownership accepted: ok=%t err=%v", ok, err)
+	for _, body := range unsafe {
+		if err := os.WriteFile(path, []byte(body), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		ok, _, err = o.FirewallPolicy()
+		if err != nil || ok {
+			t.Fatalf("unsafe Docker ownership accepted: ok=%t err=%v config=%s", ok, err, body)
+		}
 	}
 }
 

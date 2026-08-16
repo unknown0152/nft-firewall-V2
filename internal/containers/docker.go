@@ -79,10 +79,12 @@ func (o Observer) FirewallPolicy() (bool, string, error) {
 	if err := json.Unmarshal(b, &d); err != nil {
 		return false, "Docker daemon config is malformed", err
 	}
-	if d["iptables"] != false || d["ip6tables"] != false {
-		return false, "Docker can manage firewall rules; iptables and ip6tables must be false", nil
+	for _, option := range []string{"iptables", "ip6tables", "ip-forward", "ip-masq", "userland-proxy"} {
+		if d[option] != false {
+			return false, fmt.Sprintf("Docker option %s must be explicitly false", option), nil
+		}
 	}
-	return true, "Docker iptables=false and ip6tables=false", nil
+	return true, "Docker firewall, forwarding, masquerade, and userland proxy ownership disabled", nil
 }
 func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 	bin := o.DockerBinary
