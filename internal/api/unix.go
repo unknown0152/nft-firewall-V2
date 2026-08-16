@@ -198,6 +198,9 @@ func (s *Server) securityEvent(ctx context.Context, event, detail string) {
 }
 
 func validateRequest(r Request, control bool) error {
+	if len(r.Address) > 128 || len(r.Source) > 129 || len(r.Reason) > 1024 || len(r.Op) > 64 {
+		return errors.New("request field exceeds its size limit")
+	}
 	if !control && r.Op != "status" {
 		return errors.New("status socket is read-only")
 	}
@@ -293,12 +296,12 @@ func prepareSocketPath(path string) error {
 		return errors.New("socket parent must not be group/other writable")
 	}
 	parentStat, ok := parentInfo.Sys().(*syscall.Stat_t)
-	if !ok || parentStat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(parentStat.Uid) != int64(os.Geteuid()) {
 		return errors.New("socket parent must be owned by the service user")
 	}
 	if fi, err := os.Lstat(abs); err == nil {
 		stat, ok := fi.Sys().(*syscall.Stat_t)
-		if fi.Mode()&os.ModeSymlink != 0 || fi.Mode()&os.ModeSocket == 0 || !ok || stat.Uid != uint32(os.Geteuid()) {
+		if fi.Mode()&os.ModeSymlink != 0 || fi.Mode()&os.ModeSocket == 0 || !ok || int64(stat.Uid) != int64(os.Geteuid()) {
 			return errors.New("existing socket path is not an owned socket")
 		}
 		if err := os.Remove(abs); err != nil {

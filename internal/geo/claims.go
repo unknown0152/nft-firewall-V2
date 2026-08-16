@@ -28,7 +28,7 @@ func LoadCIDRs(path string, max int) ([]string, error) {
 		return nil, fmt.Errorf("GeoIP source must not be group/other writable")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
 		return nil, fmt.Errorf("GeoIP source has unsafe ownership")
 	}
 	abs, err := filepath.Abs(path)
@@ -44,13 +44,13 @@ func LoadCIDRs(path string, max int) ([]string, error) {
 		return nil, fmt.Errorf("GeoIP source parent is unsafe")
 	}
 	parentStat, ok := parent.Sys().(*syscall.Stat_t)
-	if !ok || parentStat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(parentStat.Uid) != int64(os.Geteuid()) {
 		return nil, fmt.Errorf("GeoIP source parent has unsafe ownership")
 	}
 	if info.Size() > 64<<20 {
 		return nil, fmt.Errorf("GeoIP source exceeds 64 MiB")
 	}
-	f, err := os.Open(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}

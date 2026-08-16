@@ -1,7 +1,6 @@
 [Unit]
 Description=NFT Firewall V2 early boot enforcement restore
 Documentation=file:/usr/share/doc/nft-firewall-v2/RECOVERY.md
-DefaultDependencies=no
 After=local-fs.target
 Before=network-pre.target nftfwd.service
 ConditionPathExists=/var/lib/nftfw/enforcement-enabled

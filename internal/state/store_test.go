@@ -177,6 +177,28 @@ func TestMigrationAndCorruptDatabase(t *testing.T) {
 	}
 }
 
+func TestPermanentAllowAndReservedIntegrationSourceFailClosed(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	claim := Claim{Address: "203.0.113.8/32", Family: "ipv4", Source: "allow", Reason: "lease", Actor: "admin"}
+	if _, err := s.AddClaim(ctx, claim); err == nil {
+		t.Fatal("permanent allow claim accepted")
+	}
+	if _, err := s.ReplaceSourceClaims(ctx, "allow", "forged", "integration", []string{"203.0.113.8/32"}); err == nil {
+		t.Fatal("integration replaced reserved allow provenance")
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO claims(address,family,source,reason,actor,created_at,expires_at) VALUES(?,?,?,?,?,?,NULL)`, "203.0.113.8/32", "ipv4", "allow", "corrupt", "unknown", time.Now().UTC().Format(time.RFC3339Nano)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Claims(ctx, time.Now().UTC()); err == nil {
+		t.Fatal("persisted permanent allow claim was trusted")
+	}
+}
+
 func TestOpenRejectsNewerSchemaAndDSNFilename(t *testing.T) {
 	dir := t.TempDir()
 	if store, err := Open(context.Background(), filepath.Join(dir, "state.db?mode=memory")); err == nil {
@@ -198,6 +220,41 @@ func TestOpenRejectsNewerSchemaAndDSNFilename(t *testing.T) {
 	if store, err := Open(context.Background(), path); err == nil {
 		store.Close()
 		t.Fatal("newer state schema accepted")
+	}
+}
+
+func TestNegativeGenerationReferenceFailsClosed(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	script := "table inet nftfw_filter { }\n"
+	if err := s.SaveGeneration(ctx, 1, testChecksum(script), script, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Close(); err != nil {
+		t.Fatal(err)
+	}
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`PRAGMA foreign_keys=OFF; UPDATE generations SET previous_id=-1 WHERE id=1`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	s, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.Pending(ctx); err == nil {
+		t.Fatal("negative previous generation reference was accepted")
 	}
 }
 

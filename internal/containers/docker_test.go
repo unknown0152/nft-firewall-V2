@@ -11,6 +11,10 @@ func writeDockerFixture(t *testing.T, name string) string {
 	t.Helper()
 	path := filepath.Join(t.TempDir(), "docker")
 	script := `#!/bin/sh
+if [ "$1" != --host ] || [ "$2" != unix:///var/run/docker.sock ]; then
+  exit 99
+fi
+shift 2
 if [ "$1" = network ] && [ "$2" = ls ]; then
   printf '%s\n' '` + name + `'
   exit 0

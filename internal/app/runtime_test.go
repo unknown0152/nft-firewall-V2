@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -48,17 +49,22 @@ func TestClaimSetsEnforceConfiguredMemberLimit(t *testing.T) {
 	}
 }
 
-func TestEffectiveTrustedUsesKernelExpiryAndPermanentDominates(t *testing.T) {
+func TestEffectiveTrustedUsesKernelExpiryAndRejectsPermanentAccess(t *testing.T) {
 	now := time.Now().UTC()
 	expires := now.Add(90*time.Second + time.Nanosecond)
+	later := now.Add(120 * time.Second)
 	claims := []state.Claim{
 		{Address: "192.0.2.1/32", Family: "ipv4", Source: "allow", ExpiresAt: &expires},
 		{Address: "192.0.2.2/32", Family: "ipv4", Source: "allow", ExpiresAt: &expires},
-		{Address: "192.0.2.2/32", Family: "ipv4", Source: "allow/operator"},
+		{Address: "192.0.2.2/32", Family: "ipv4", Source: "allow/operator", ExpiresAt: &later},
 	}
-	elements := effectiveTrusted(claims, "ipv4", now)
-	if len(elements) != 2 || elements[0].TimeoutSeconds != 91 || elements[1].TimeoutSeconds != 0 {
+	elements, err := effectiveTrusted(claims, "ipv4", now)
+	if err != nil || len(elements) != 2 || elements[0].TimeoutSeconds != 91 || elements[1].TimeoutSeconds != 120 {
 		t.Fatalf("unexpected trusted lease encoding: %#v", elements)
+	}
+	claims = append(claims, state.Claim{ID: 9, Address: "192.0.2.3/32", Family: "ipv4", Source: "allow"})
+	if _, err := effectiveTrusted(claims, "ipv4", now); err == nil {
+		t.Fatal("permanent trusted lease reached nftables encoding")
 	}
 }
 
@@ -78,5 +84,55 @@ func TestAllowLeaseRequiresExplicitTrustedServices(t *testing.T) {
 	runtime := &Runtime{}
 	if _, err := runtime.Control(context.Background(), api.Request{Op: "allow-add", Address: "203.0.113.8/32"}); err == nil {
 		t.Fatal("temporary access accepted without runtime.trusted_services")
+	}
+}
+
+func TestOpenQuietDoesNotWriteConfigurationAudit(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	configPath := filepath.Join(dir, "nftfw.toml")
+	databasePath := filepath.Join(dir, "state.db")
+	text := `[system]
+ipv6_mode = "disabled"
+strict_vpn = true
+[[interfaces]]
+name = "eth0"
+role = "uplink"
+[[interfaces]]
+name = "wg0"
+role = "vpn"
+[wireguard]
+interface = "wg0"
+endpoint_port = 51820
+fwmark = "0xca6c"
+tcp_mss = 1360
+handshake_timeout_seconds = 180
+[runtime]
+max_block_claims = 100
+max_set_members = 100
+safe_apply_timeout_seconds = 90
+[state]
+directory = "` + dir + `"
+database = "` + databasePath + `"
+[integrations]
+docker_enabled = false
+threat_feed = false
+geoip = false
+notifications = false
+`
+	if err := os.WriteFile(configPath, []byte(text), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime, err := OpenQuiet(ctx, configPath, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	events, err := runtime.Store.RecentAudit(ctx, 10)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(events) != 0 {
+		t.Fatalf("quiet rollback open wrote audit events: %#v", events)
 	}
 }

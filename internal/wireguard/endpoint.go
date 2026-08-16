@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"os"
@@ -62,7 +63,7 @@ func (r *Resolver) Resolve(ctx context.Context, host string) ([]string, error) {
 	result := []string{}
 	for _, a := range addrs {
 		ip, err := netip.ParseAddr(a.String())
-		if err != nil {
+		if err != nil || !usableEndpointAddress(ip) {
 			continue
 		}
 		s := ip.String()
@@ -114,7 +115,10 @@ func (r *Resolver) record(host string, addrs []string) ([]string, error) {
 		maxStale = 24 * time.Hour
 	}
 	for _, a := range old {
-		if !seen[a.Address] && recent < keep && len(merged) < max && now.Sub(a.SeenAt) <= maxStale {
+		ip, parseErr := netip.ParseAddr(a.Address)
+		validTime := !a.SeenAt.IsZero() && !a.SeenAt.After(now.Add(5*time.Minute)) && now.Sub(a.SeenAt) <= maxStale
+		if parseErr == nil && usableEndpointAddress(ip) && validTime && !seen[ip.String()] && recent < keep && len(merged) < max {
+			a.Address = ip.String()
 			merged = append(merged, a)
 			seen[a.Address] = true
 			recent++
@@ -149,7 +153,7 @@ func (r *Resolver) cached(host string, keep int, cause error) ([]string, error) 
 		if len(result) >= max {
 			break
 		}
-		if ip, err := netip.ParseAddr(e.Address); err == nil && now.Sub(e.SeenAt) <= maxStale {
+		if ip, err := netip.ParseAddr(e.Address); err == nil && usableEndpointAddress(ip) && !e.SeenAt.IsZero() && !e.SeenAt.After(now.Add(5*time.Minute)) && now.Sub(e.SeenAt) <= maxStale {
 			result = append(result, ip.String())
 		}
 	}
@@ -157,6 +161,10 @@ func (r *Resolver) cached(host string, keep int, cause error) ([]string, error) 
 		return result, fmt.Errorf("%w; using %d cached endpoint(s)", cause, len(result))
 	}
 	return nil, cause
+}
+
+func usableEndpointAddress(address netip.Addr) bool {
+	return address.IsValid() && address.IsGlobalUnicast() && !address.IsUnspecified() && !address.IsMulticast() && !address.IsLoopback() && !address.IsLinkLocalUnicast()
 }
 
 func cachedAddresses(entries []CachedIP) []string {
@@ -177,11 +185,16 @@ func (r *Resolver) loadLocked() Cache {
 		return empty
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
 		return empty
 	}
-	b, err := os.ReadFile(r.CachePath)
+	f, err := os.OpenFile(r.CachePath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
+		return empty
+	}
+	b, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+	closeErr := f.Close()
+	if err != nil || closeErr != nil || len(b) > 1<<20 {
 		return empty
 	}
 	var c Cache

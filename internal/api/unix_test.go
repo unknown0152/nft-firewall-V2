@@ -107,6 +107,7 @@ func TestOperationSpecificRequestSchema(t *testing.T) {
 		{Op: "apply", Safe: true, Unsafe: true},
 		{Op: "claims", Limit: 1001},
 		{Op: "claims", Offset: -1},
+		{Op: "block-add", Address: "203.0.113.1", Source: "manual", Reason: strings.Repeat("x", 1025)},
 	} {
 		if err := validateRequest(req, true); err == nil {
 			t.Fatalf("invalid request accepted: %#v", req)

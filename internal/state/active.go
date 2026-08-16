@@ -123,7 +123,7 @@ func secureActiveDirectory(directory string) (string, error) {
 		return "", errors.New("active state directory has unsafe permissions")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
 		return "", errors.New("active state directory has unsafe ownership")
 	}
 	return abs, nil
@@ -138,10 +138,19 @@ func secureActiveFile(path string, max int64) ([]byte, error) {
 		return nil, errors.New("file type, permissions, or size is unsafe")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
 		return nil, errors.New("file ownership is unsafe")
 	}
-	return os.ReadFile(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	data, readErr := io.ReadAll(io.LimitReader(f, max+1))
+	closeErr := f.Close()
+	if readErr != nil || closeErr != nil || int64(len(data)) > max {
+		return nil, errors.New("active state file bounded read failed")
+	}
+	return data, nil
 }
 
 func validScriptChecksum(script, checksum string) bool {

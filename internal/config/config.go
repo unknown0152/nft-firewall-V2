@@ -5,6 +5,7 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net"
 	"net/netip"
 	"net/url"
@@ -146,11 +147,35 @@ func Load(path string) (Config, error) {
 	if err := secureConfigPath(path); err != nil {
 		return Config{}, err
 	}
-	b, err := os.ReadFile(path)
+	b, err := readConfigFile(path)
 	if err != nil {
 		return Config{}, fmt.Errorf("read config: %w", err)
 	}
 	return Decode(b)
+}
+
+func readConfigFile(path string) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil || !info.Mode().IsRegular() || info.Size() > 1<<20 || info.Mode().Perm()&0o022 != 0 {
+		return nil, errors.New("configuration changed to an unsafe file while opening")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
+		return nil, errors.New("configuration changed ownership while opening")
+	}
+	b, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+	if err != nil {
+		return nil, err
+	}
+	if len(b) > 1<<20 {
+		return nil, errors.New("configuration exceeds 1 MiB")
+	}
+	return b, nil
 }
 
 // Decode is the pure configuration parser used by validation tooling and
@@ -196,7 +221,7 @@ func secureConfigPath(path string) error {
 		return fmt.Errorf("configuration is writable by group/other (%#o)", info.Mode().Perm())
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
 		return errors.New("configuration must be owned by the current service user")
 	}
 	abs, err := filepath.Abs(path)
@@ -216,7 +241,7 @@ func secureConfigPath(path string) error {
 		return errors.New("configuration parent must not be group/other writable")
 	}
 	pstat, ok := p.Sys().(*syscall.Stat_t)
-	if !ok || pstat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(pstat.Uid) != int64(os.Geteuid()) {
 		return errors.New("configuration parent must be owned by the current service user")
 	}
 	if abs == "/etc/nftfw/nftfw.toml" || strings.HasPrefix(abs, "/etc/nftfw/") {

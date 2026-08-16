@@ -26,6 +26,7 @@ type Manager struct {
 	Now         func() time.Time
 	HealthCheck func(context.Context) error
 	SafeGuard   func(context.Context) error
+	PostRestore func(context.Context) error
 	mu          sync.Mutex
 }
 
@@ -131,7 +132,24 @@ func (m *Manager) restore(ctx context.Context, previous *state.Generation) error
 	if err := m.Backend.Apply(ctx, script); err != nil {
 		return err
 	}
-	return m.recordFingerprint(ctx, previous.ID)
+	if err := m.recordFingerprint(ctx, previous.ID); err != nil {
+		return err
+	}
+	return m.restoreRuntimeOrDeny(ctx)
+}
+
+func (m *Manager) restoreRuntimeOrDeny(ctx context.Context) error {
+	if m.PostRestore == nil {
+		return nil
+	}
+	if err := m.PostRestore(ctx); err != nil {
+		_ = m.Store.Audit(ctx, "system", "runtime_state_restore_failed", "emergency default-deny policy requested")
+		if denyErr := m.Backend.Apply(ctx, nft.EmergencyDenyScript); denyErr != nil {
+			return fmt.Errorf("restore runtime state: %w; emergency deny also failed: %v", err, denyErr)
+		}
+		return fmt.Errorf("restore runtime state: %w; emergency default-deny policy installed", err)
+	}
+	return nil
 }
 
 func (m *Manager) recordFingerprint(ctx context.Context, id uint64) error {
@@ -274,6 +292,11 @@ func (m *Manager) rollbackLocked(ctx context.Context, id uint64) error {
 		m.restoreCommittedAfterFailedRollback(ctx, g)
 		return err
 	}
+	if previous != nil {
+		if err := m.restoreRuntimeOrDeny(ctx); err != nil {
+			return err
+		}
+	}
 	if err := m.Store.MarkRolledBack(ctx, id); err != nil {
 		m.restoreCommittedAfterFailedRollback(ctx, g)
 		return err
@@ -299,6 +322,7 @@ func (m *Manager) restoreCommittedAfterFailedRollback(ctx context.Context, g *st
 	}
 	_ = m.Store.PublishActive(script, g.Checksum)
 	_ = m.Backend.Apply(ctx, script)
+	_ = m.restoreRuntimeOrDeny(ctx)
 }
 
 func (m *Manager) RollbackExpired(ctx context.Context) (bool, error) {
@@ -429,6 +453,9 @@ func (m *Manager) Reconcile(ctx context.Context, repair bool) (Drift, error) {
 		if err := m.recordFingerprint(ctx, g.ID); err != nil {
 			return d, err
 		}
+		if err := m.restoreRuntimeOrDeny(ctx); err != nil {
+			return d, err
+		}
 		d.Repaired = true
 		_ = m.Store.Audit(ctx, "system", "drift_repaired", d.Detail)
 	} else if d.Missing {
@@ -455,7 +482,7 @@ func (m *Manager) acquireProcessLock() (func(), error) {
 	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return nil, err
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("open controller lock: %w", err)
 	}
@@ -465,7 +492,7 @@ func (m *Manager) acquireProcessLock() (func(), error) {
 		return nil, errors.New("controller lock is not a regular file")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
 		file.Close()
 		return nil, errors.New("controller lock has unsafe ownership")
 	}
@@ -507,6 +534,9 @@ func scan(row interface{ Scan(...any) error }) (*state.Generation, error) {
 		}
 	}
 	if prev.Valid {
+		if prev.Int64 <= 0 {
+			return nil, errors.New("generation has an invalid previous generation reference")
+		}
 		v := uint64(prev.Int64)
 		g.PreviousID = &v
 	}

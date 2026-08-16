@@ -44,6 +44,9 @@ func (s Service) AddAllow(ctx context.Context, address, reason, actor string, ex
 	if s.Store == nil {
 		return 0, fmt.Errorf("allow claim store is unavailable")
 	}
+	if expires == nil {
+		return 0, fmt.Errorf("temporary access requires an expiry")
+	}
 	p, err := netip.ParsePrefix(address)
 	if err != nil {
 		a, parseErr := netip.ParseAddr(address)

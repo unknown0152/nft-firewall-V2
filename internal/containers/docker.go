@@ -27,6 +27,8 @@ type Observer struct {
 	DaemonConfig string
 }
 
+const localDockerHost = "unix:///var/run/docker.sock"
+
 var dockerName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
 func (o Observer) FirewallPolicy() (bool, string, error) {
@@ -45,7 +47,7 @@ func (o Observer) FirewallPolicy() (bool, string, error) {
 		return false, "Docker daemon config must be bounded and not group/other writable", errors.New("unsafe daemon config permissions or size")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
 		return false, "Docker daemon config must be owned by the service user", errors.New("unsafe daemon config ownership")
 	}
 	abs, err := filepath.Abs(path)
@@ -61,12 +63,17 @@ func (o Observer) FirewallPolicy() (bool, string, error) {
 		return false, "Docker daemon config parent is unsafe", errors.New("unsafe daemon config parent")
 	}
 	parentStat, ok := parent.Sys().(*syscall.Stat_t)
-	if !ok || parentStat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(parentStat.Uid) != int64(os.Geteuid()) {
 		return false, "Docker daemon config parent has unsafe ownership", errors.New("unsafe daemon config parent ownership")
 	}
-	b, err := os.ReadFile(path)
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return false, "Docker daemon config unavailable; Docker firewall ownership is unknown", err
+	}
+	b, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
+	closeErr := f.Close()
+	if err != nil || closeErr != nil || len(b) > 1<<20 {
+		return false, "Docker daemon config could not be read safely", errors.New("bounded Docker daemon config read failed")
 	}
 	var d map[string]any
 	if err := json.Unmarshal(b, &d); err != nil {
@@ -84,7 +91,7 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	out, err := boundedOutput(ctx, 128<<10, bin, "network", "ls", "--format", "{{.Name}}")
+	out, err := boundedOutput(ctx, 128<<10, bin, "--host", localDockerHost, "network", "ls", "--format", "{{.Name}}")
 	if err != nil {
 		return nil, err
 	}
@@ -97,7 +104,7 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 		if !dockerName.MatchString(name) {
 			return nil, fmt.Errorf("docker returned unsafe network name %q", name)
 		}
-		raw, err := boundedOutput(ctx, 1<<20, bin, "network", "inspect", "--", name)
+		raw, err := boundedOutput(ctx, 1<<20, bin, "--host", localDockerHost, "network", "inspect", "--", name)
 		if err != nil {
 			return nil, fmt.Errorf("inspect Docker network %s: %w", name, err)
 		}

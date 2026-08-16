@@ -10,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -95,17 +96,25 @@ func run(args []string) error {
 		}
 		_ = rt.Store.Audit(context.Background(), "operator", "firewall_plan_generated", fmt.Sprintf("generation=%d checksum=%s", a.Generation, a.Checksum))
 		current := "none"
+		currentSummary := compiler.ScriptSummary{Policies: map[string]string{}, Sets: map[string][]string{}}
 		if g, currentErr := rt.Store.LastKnownGood(context.Background()); currentErr == nil {
 			current = strconv.FormatUint(g.ID, 10)
+			if currentScript, readErr := rt.Store.ReadGenerationScript(g); readErr == nil {
+				currentSummary = compiler.SummarizeScript(currentScript)
+			}
 		}
+		proposedSummary := compiler.SummarizeScript(a.Script)
+		policyChanges := diffPolicies(currentSummary.Policies, proposedSummary.Policies)
+		natChanges := diffNames(currentSummary.NAT, proposedSummary.NAT)
+		setChanges := summarizeSetChanges(currentSummary.Sets, proposedSummary.Sets)
 		if has(args, "--json") {
-			result := map[string]any{"current_generation": current, "proposed_generation": a.Generation, "checksum": a.Checksum, "kernel_validation": "PASS", "management_path": "NOT PROVEN", "zones": len(rt.Config.Zones), "policies": len(rt.Config.Policies)}
+			result := map[string]any{"current_generation": current, "proposed_generation": a.Generation, "checksum": a.Checksum, "policy_changes": policyChanges, "nat_changes": natChanges, "runtime_set_snapshot": setChanges, "kernel_validation": "PASS", "management_path": "NOT PROVEN", "zones": len(rt.Config.Zones), "policies": len(rt.Config.Policies), "ipv6_mode": proposedSummary.IPv6Mode}
 			if has(args, "--show-nft") {
 				result["nft_transaction"] = a.Script
 			}
 			return printJSONOr(result, true)
 		}
-		fmt.Printf("Current generation: %s\nProposed generation: %d\nChecksum: %s\n\nPolicy summary:\nZones: %d\nPolicies: %d\n\nSecurity invariants:\n[PASS] owned tables only\n[PASS] input default deny\n[PASS] forward default deny\n[PASS] output VPN egress pin\n[PASS] IPv6 mode explicit\n[NOT PROVEN] management reachability depends on declared policy\n\nKernel validation:\n[PASS] nft --check\n", current, a.Generation, a.Checksum, len(rt.Config.Zones), len(rt.Config.Policies))
+		fmt.Printf("Current generation: %s\nProposed generation: %d\nChecksum: %s\n\nPolicy changes:\n%s\n\nNAT changes:\n%s\n\nRuntime set snapshot:\n%s\n\nPolicy summary:\nZones: %d\nPolicies: %d\nIPv6 mode: %s\n\nSecurity invariants:\n[PASS] owned tables only\n[PASS] input default deny\n[PASS] forward default deny\n[PASS] output VPN egress pin\n[PASS] IPv6 mode explicit\n[NOT PROVEN] management reachability depends on declared policy\n\nKernel validation:\n[PASS] nft --check\n", current, a.Generation, a.Checksum, displayChanges(policyChanges), displayChanges(natChanges), displaySetChanges(setChanges), len(rt.Config.Zones), len(rt.Config.Policies), proposedSummary.IPv6Mode)
 		if has(args, "--show-nft") {
 			fmt.Printf("\nCompiled nft transaction:\n%s", a.Script)
 		}
@@ -211,6 +220,79 @@ func run(args []string) error {
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func diffPolicies(current, proposed map[string]string) []string {
+	var changes []string
+	for name, action := range proposed {
+		if old, ok := current[name]; !ok {
+			changes = append(changes, "+ "+action+" "+name)
+		} else if old != action {
+			changes = append(changes, "~ "+name+" "+old+" -> "+action)
+		}
+	}
+	for name, action := range current {
+		if _, ok := proposed[name]; !ok {
+			changes = append(changes, "- "+action+" "+name)
+		}
+	}
+	sort.Strings(changes)
+	return changes
+}
+
+func diffNames(current, proposed []string) []string {
+	old, next := map[string]bool{}, map[string]bool{}
+	for _, name := range current {
+		old[name] = true
+	}
+	for _, name := range proposed {
+		next[name] = true
+		if !old[name] {
+			old[name] = false
+		}
+	}
+	var changes []string
+	for name := range next {
+		if !old[name] {
+			changes = append(changes, "+ "+name)
+		}
+	}
+	for name := range old {
+		if !next[name] {
+			changes = append(changes, "- "+name)
+		}
+	}
+	sort.Strings(changes)
+	return changes
+}
+
+func summarizeSetChanges(current, proposed map[string][]string) map[string]string {
+	names := []string{"blocked_v4", "blocked_v6", "wg_bootstrap_v4", "wg_bootstrap_v6", "docker_nets", "docker_nets6"}
+	result := make(map[string]string, len(names))
+	for _, name := range names {
+		result[name] = fmt.Sprintf("%d -> %d", len(current[name]), len(proposed[name]))
+	}
+	return result
+}
+
+func displayChanges(changes []string) string {
+	if len(changes) == 0 {
+		return "= no semantic changes"
+	}
+	return strings.Join(changes, "\n")
+}
+
+func displaySetChanges(changes map[string]string) string {
+	names := make([]string, 0, len(changes))
+	for name := range changes {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	lines := make([]string, 0, len(names))
+	for _, name := range names {
+		lines = append(lines, name+": "+changes[name])
+	}
+	return strings.Join(lines, "\n")
 }
 
 func stateCommand(args []string) error {
@@ -446,7 +528,7 @@ func secureExistingDirectory(path string) error {
 		return errors.New("path must be a directory and not group/other writable")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
 		return errors.New("path must be owned by the current service user")
 	}
 	return nil
@@ -548,12 +630,29 @@ func explain(path string, args []string) error {
 	if err != nil {
 		return err
 	}
-	d := e.Explain(policy.Query{From: *from, To: *to, Protocol: *proto, Port: *port})
+	databasePath := c.State.Database
+	if override := os.Getenv("NFTFW_STATE_DB"); override != "" {
+		databasePath = override
+	}
+	store, err := state.Open(context.Background(), databasePath)
+	if err != nil {
+		return fmt.Errorf("effective-state explanation requires valid operational state: %w", err)
+	}
+	defer store.Close()
+	claims, err := store.Claims(context.Background(), time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	runtime := policy.RuntimeContext{
+		BlockedPrefixes: append(state.EffectiveAddresses(claims, "ipv4"), state.EffectiveAddresses(claims, "ipv6")...),
+		TrustedPrefixes: append(state.EffectiveAddressesFrom(claims, "ipv4", "allow"), state.EffectiveAddressesFrom(claims, "ipv6", "allow")...),
+	}
+	d := e.ExplainEffective(policy.Query{From: *from, To: *to, Protocol: *proto, Port: *port}, runtime)
 	fmt.Printf("%s\n\nSource: %s\nSource zone: %s\nDestination: %s\n", strings.ToUpper(d.Action), *from, d.SourceZone, *to)
 	if d.Matched != nil {
-		fmt.Printf("Matched policy: %s\nCompiled object: nftfw-policy:%s\nReason: %s\n", d.Matched.Name, d.Matched.Name, d.Reason)
+		fmt.Printf("Matched policy: %s\nCompiled object: %s\nReason: %s\n", d.Matched.Name, d.Rule, d.Reason)
 	} else {
-		fmt.Printf("Reason: %s\n", d.Reason)
+		fmt.Printf("Compiled object: %s\nReason: %s\n", d.Rule, d.Reason)
 	}
 	return nil
 }

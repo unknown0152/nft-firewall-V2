@@ -39,6 +39,16 @@ type Runtime struct {
 }
 
 func Open(ctx context.Context, configPath string, runner nft.Runner) (*Runtime, error) {
+	return open(ctx, configPath, runner, true)
+}
+
+// OpenQuiet is used by the frequent independent rollback check. It avoids a
+// configuration-loaded audit row for every no-op timer invocation.
+func OpenQuiet(ctx context.Context, configPath string, runner nft.Runner) (*Runtime, error) {
+	return open(ctx, configPath, runner, false)
+}
+
+func open(ctx context.Context, configPath string, runner nft.Runner, auditConfiguration bool) (*Runtime, error) {
 	c, err := config.Load(configPath)
 	if err != nil {
 		return nil, err
@@ -70,8 +80,12 @@ func Open(ctx context.Context, configPath string, runner nft.Runner) (*Runtime, 
 	}
 	resolver := &wireguard.Resolver{CachePath: filepath.Join(st.Dir, "wg-endpoints.json"), KeepRecent: c.WireGuard.KeepRecent, Max: 64, MaxStale: 24 * time.Hour}
 	controller := &wireguard.Controller{}
-	_ = st.Audit(ctx, "system", "configuration_loaded", fmt.Sprintf("ipv6=%s zones=%d policies=%d", c.System.IPv6Mode, len(c.Zones), len(c.Policies)))
-	return &Runtime{Config: c, Effective: e, Store: st, Backend: be, Manager: m, EndpointResolver: resolver, WGController: controller}, nil
+	runtime := &Runtime{Config: c, Effective: e, Store: st, Backend: be, Manager: m, EndpointResolver: resolver, WGController: controller}
+	m.PostRestore = runtime.RestoreRuntimeState
+	if auditConfiguration {
+		_ = st.Audit(ctx, "system", "configuration_loaded", fmt.Sprintf("ipv6=%s zones=%d policies=%d", c.System.IPv6Mode, len(c.Zones), len(c.Policies)))
+	}
+	return runtime, nil
 }
 func (r *Runtime) Close() error {
 	if r == nil || r.Store == nil {
@@ -114,11 +128,19 @@ type runtimeClaimSets struct {
 }
 
 func (r *Runtime) claimSets(claims []state.Claim, now time.Time) (runtimeClaimSets, error) {
+	trustedV4, err := effectiveTrusted(claims, "ipv4", now)
+	if err != nil {
+		return runtimeClaimSets{}, err
+	}
+	trustedV6, err := effectiveTrusted(claims, "ipv6", now)
+	if err != nil {
+		return runtimeClaimSets{}, err
+	}
 	sets := runtimeClaimSets{
 		blockedV4: state.EffectiveAddresses(claims, "ipv4"),
 		blockedV6: state.EffectiveAddresses(claims, "ipv6"),
-		trustedV4: effectiveTrusted(claims, "ipv4", now),
-		trustedV6: effectiveTrusted(claims, "ipv6", now),
+		trustedV4: trustedV4,
+		trustedV6: trustedV6,
 	}
 	counts := map[string]int{
 		"blocked_v4": len(sets.blockedV4), "blocked_v6": len(sets.blockedV6),
@@ -132,20 +154,20 @@ func (r *Runtime) claimSets(claims []state.Claim, now time.Time) (runtimeClaimSe
 	return sets, nil
 }
 
-func effectiveTrusted(claims []state.Claim, family string, now time.Time) []nft.TimedElement {
+func effectiveTrusted(claims []state.Claim, family string, now time.Time) ([]nft.TimedElement, error) {
 	type lease struct {
-		permanent bool
-		expires   time.Time
+		expires time.Time
 	}
 	byAddress := map[string]lease{}
 	for _, claim := range claims {
 		if claim.Family != family || claim.Source != "allow" && !strings.HasPrefix(claim.Source, "allow/") {
 			continue
 		}
-		current := byAddress[claim.Address]
 		if claim.ExpiresAt == nil {
-			current.permanent = true
-		} else if claim.ExpiresAt.After(current.expires) {
+			return nil, fmt.Errorf("temporary access claim %d has no expiry", claim.ID)
+		}
+		current := byAddress[claim.Address]
+		if claim.ExpiresAt.After(current.expires) {
 			current.expires = claim.ExpiresAt.UTC()
 		}
 		byAddress[claim.Address] = current
@@ -153,17 +175,15 @@ func effectiveTrusted(claims []state.Claim, family string, now time.Time) []nft.
 	result := make([]nft.TimedElement, 0, len(byAddress))
 	for address, lease := range byAddress {
 		element := nft.TimedElement{Prefix: address}
-		if !lease.permanent {
-			remaining := lease.expires.Sub(now)
-			if remaining <= 0 {
-				continue
-			}
-			element.TimeoutSeconds = int64((remaining + time.Second - 1) / time.Second)
+		remaining := lease.expires.Sub(now)
+		if remaining <= 0 {
+			continue
 		}
+		element.TimeoutSeconds = int64((remaining + time.Second - 1) / time.Second)
 		result = append(result, element)
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].Prefix < result[j].Prefix })
-	return result
+	return result, nil
 }
 
 func (r *Runtime) bootstrapEndpoints(ctx context.Context) ([]string, []string, string, error) {
@@ -484,6 +504,22 @@ func (r *Runtime) RefreshContainerSets(ctx context.Context) (bool, error) {
 		_ = r.Store.SetIntegrationState(ctx, "docker", "healthy", len(v4)+len(v6), true)
 	}
 	return true, nil
+}
+
+// RestoreRuntimeState repopulates every mutable set after a generation
+// restore. Callers install emergency deny if any component cannot be restored.
+func (r *Runtime) RestoreRuntimeState(ctx context.Context) error {
+	var failures []error
+	if _, err := r.RefreshClaimSets(ctx); err != nil {
+		failures = append(failures, fmt.Errorf("claims: %w", err))
+	}
+	if _, err := r.RefreshEndpoints(ctx); err != nil {
+		failures = append(failures, fmt.Errorf("WireGuard endpoints: %w", err))
+	}
+	if _, err := r.RefreshContainerSets(ctx); err != nil {
+		failures = append(failures, fmt.Errorf("container networks: %w", err))
+	}
+	return errors.Join(failures...)
 }
 
 func (r *Runtime) RefreshIntegrations(ctx context.Context) error {

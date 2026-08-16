@@ -68,3 +68,32 @@ func TestExplicitDenyPrecedesAllowDeterministically(t *testing.T) {
 		t.Fatalf("deny precedence not reflected by explanation: %#v", d)
 	}
 }
+
+func TestExplainEffectiveMatchesRuntimePrecedenceAndIPv6Mode(t *testing.T) {
+	c := config.Defaults()
+	c.Interfaces = []config.Interface{{Name: "eth0", Role: "uplink"}, {Name: "wg0", Role: "vpn"}}
+	c.Zones = []config.Zone{{Name: "lan", Networks: []string{"192.168.1.0/24"}}}
+	c.Services = []config.Service{{Name: "ssh", Protocol: "tcp", Ports: []int{22}}}
+	c.Runtime.TrustedServices = []string{"ssh"}
+	c.Policies = []config.Policy{
+		{Name: "deny-ssh", From: "any", To: "host", Service: "ssh", Action: "deny"},
+		{Name: "allow-ssh", From: "lan", To: "host", Service: "ssh", Action: "allow"},
+	}
+	e, err := Compile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	query := Query{From: "192.168.1.8", To: "host", Protocol: "tcp", Port: 22}
+	decision := e.ExplainEffective(query, RuntimeContext{BlockedPrefixes: []string{"192.168.1.0/24"}, TrustedPrefixes: []string{"192.168.1.8/32"}})
+	if decision.Action != "deny" || decision.Rule != "nftfw:block-source" {
+		t.Fatalf("block did not precede temporary trust: %#v", decision)
+	}
+	decision = e.ExplainEffective(query, RuntimeContext{TrustedPrefixes: []string{"192.168.1.8/32"}})
+	if decision.Action != "allow" || decision.Rule != "nftfw:trusted-services" {
+		t.Fatalf("temporary trust did not match compiler precedence: %#v", decision)
+	}
+	decision = e.ExplainEffective(Query{From: "2001:db8::8", To: "host", Protocol: "tcp", Port: 22}, RuntimeContext{})
+	if decision.Action != "deny" || decision.Rule != "nftfw:ipv6-mode-disabled" {
+		t.Fatalf("disabled IPv6 mode was not explained: %#v", decision)
+	}
+}

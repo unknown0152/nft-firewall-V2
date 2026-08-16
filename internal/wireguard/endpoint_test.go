@@ -80,3 +80,21 @@ func TestEndpointCacheRejectsSymlinkAndOversize(t *testing.T) {
 		t.Fatal("oversized endpoint cache accepted")
 	}
 }
+
+func TestEndpointResolverRejectsUnusableAnswersAndFutureCache(t *testing.T) {
+	dir := t.TempDir()
+	lookup := &fakeLookup{answers: [][]net.IP{{net.ParseIP("127.0.0.1"), net.ParseIP("0.0.0.0"), net.ParseIP("224.0.0.1")}}}
+	r := &Resolver{Resolver: lookup, CachePath: filepath.Join(dir, "endpoints.json"), MaxStale: time.Hour}
+	if got, err := r.Resolve(context.Background(), "vpn.example.test"); err == nil || len(got) != 0 {
+		t.Fatalf("unusable DNS endpoint answer accepted: got=%v err=%v", got, err)
+	}
+	future := time.Now().UTC().Add(24 * time.Hour).Format(time.RFC3339Nano)
+	cache := `{"hosts":{"vpn.example.test":[{"address":"203.0.113.8","seen_at":"` + future + `"}]}}`
+	if err := os.WriteFile(r.CachePath, []byte(cache), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	r.Resolver = &fakeLookup{err: errors.New("dns unavailable")}
+	if got, err := r.Resolve(context.Background(), "vpn.example.test"); err == nil || len(got) != 0 {
+		t.Fatalf("future-dated endpoint cache accepted: got=%v err=%v", got, err)
+	}
+}

@@ -59,6 +59,8 @@ func TestSafeApplyCommitAndTimeoutRollback(t *testing.T) {
 	ctx := context.Background()
 	m, s, _ := newManager(t)
 	defer s.Close()
+	restores := 0
+	m.PostRestore = func(context.Context) error { restores++; return nil }
 	if _, err := m.Apply(ctx, artifact(1), false); err != nil {
 		t.Fatal(err)
 	}
@@ -77,12 +79,34 @@ func TestSafeApplyCommitAndTimeoutRollback(t *testing.T) {
 	if !ok {
 		t.Fatal("expired candidate not rolled back")
 	}
+	if restores != 1 {
+		t.Fatalf("rollback restored generation without runtime state: calls=%d", restores)
+	}
 	g, err := s.LastKnownGood(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if g.ID != 1 {
 		t.Fatalf("last known good changed: %d", g.ID)
+	}
+}
+
+func TestReconcileRestoresRuntimeStateAndFailsClosedOnError(t *testing.T) {
+	ctx := context.Background()
+	m, store, _ := newManager(t)
+	defer store.Close()
+	if _, err := m.Apply(ctx, artifact(1), false); err != nil {
+		t.Fatal(err)
+	}
+	restores := 0
+	m.PostRestore = func(context.Context) error { restores++; return nil }
+	drift, err := m.Reconcile(ctx, true)
+	if err != nil || !drift.Repaired || restores != 1 {
+		t.Fatalf("reconcile did not restore runtime state: drift=%#v calls=%d err=%v", drift, restores, err)
+	}
+	m.PostRestore = func(context.Context) error { return errors.New("synthetic runtime failure") }
+	if _, err := m.Reconcile(ctx, true); err == nil || !strings.Contains(err.Error(), "emergency default-deny") {
+		t.Fatalf("runtime restore failure did not fail closed: %v", err)
 	}
 }
 func TestSafeApplyCommit(t *testing.T) {

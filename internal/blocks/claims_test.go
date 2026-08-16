@@ -24,8 +24,12 @@ func TestBlockCannotClaimAllowProvenance(t *testing.T) {
 	if _, err := service.Add(context.Background(), "203.0.113.9", "allow", "ambiguous", "admin", nil); err == nil {
 		t.Fatal("block request accepted reserved allow provenance")
 	}
-	if _, err := service.AddAllow(context.Background(), "203.0.113.9", "lease", "admin", nil); err != nil {
+	expires := time.Now().UTC().Add(time.Minute)
+	if _, err := service.AddAllow(context.Background(), "203.0.113.9", "lease", "admin", &expires); err != nil {
 		t.Fatal(err)
+	}
+	if _, err := service.AddAllow(context.Background(), "203.0.113.10", "permanent", "admin", nil); err == nil {
+		t.Fatal("permanent temporary-access claim accepted")
 	}
 }
 
@@ -115,7 +119,8 @@ func TestTypedOperatorRemovalDoesNotCrossAllowAndBlockClaims(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	allowID, err := service.AddAllow(ctx, "203.0.113.11", "allow", "admin", nil)
+	expires := time.Now().UTC().Add(time.Minute)
+	allowID, err := service.AddAllow(ctx, "203.0.113.11", "allow", "admin", &expires)
 	if err != nil {
 		t.Fatal(err)
 	}

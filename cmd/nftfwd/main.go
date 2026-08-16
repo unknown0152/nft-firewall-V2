@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -41,10 +42,30 @@ func main() {
 		return
 	}
 	if *expired {
+		rt, runtimeErr := app.OpenQuiet(ctx, *config, nil)
+		if runtimeErr == nil && filepath.Clean(rt.Store.Path) == filepath.Clean(*stateDB) {
+			defer rt.Close()
+			ok, err := rt.RollbackExpired(ctx)
+			if err != nil {
+				fmt.Fprintln(os.Stderr, "nftfwd rollback:", err)
+				os.Exit(1)
+			}
+			if ok {
+				fmt.Println("expired generation rolled back")
+			}
+			return
+		}
+		if rt != nil {
+			_ = rt.Close()
+		}
 		st, err := state.Open(ctx, *stateDB)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "nftfwd rollback:", err)
-			os.Exit(1)
+			if fallbackErr := restoreRollbackFallback(ctx, filepath.Dir(*stateDB), nft.New(nil)); fallbackErr != nil {
+				fmt.Fprintln(os.Stderr, "nftfwd rollback: state unavailable and fallback failed:", fallbackErr)
+				os.Exit(1)
+			}
+			fmt.Fprintln(os.Stderr, "nftfwd rollback: state unavailable; restored the independent committed fallback")
+			return
 		}
 		defer st.Close()
 		manager := &reconcile.Manager{Backend: nft.New(nil), Store: st}
@@ -76,19 +97,9 @@ func main() {
 		os.Exit(1)
 	}
 	if existing["inet/"+nft.FilterTable] {
-		refreshes := []struct {
-			name string
-			run  func(context.Context) (bool, error)
-		}{
-			{name: "runtime claims", run: rt.RefreshClaimSets},
-			{name: "WireGuard endpoints", run: rt.RefreshEndpoints},
-			{name: "container networks", run: rt.RefreshContainerSets},
-		}
-		for _, refresh := range refreshes {
-			if _, refreshErr := refresh.run(ctx); refreshErr != nil {
-				fmt.Fprintf(os.Stderr, "nftfwd: startup %s reconciliation failed: %v\n", refresh.name, refreshErr)
-				os.Exit(1)
-			}
+		if refreshErr := rt.RestoreRuntimeState(ctx); refreshErr != nil {
+			fmt.Fprintln(os.Stderr, "nftfwd: startup runtime-state reconciliation failed:", refreshErr)
+			os.Exit(1)
 		}
 	}
 	server := &api.Server{Handler: rt, StatusPath: *status, ControlPath: *control}
@@ -100,6 +111,20 @@ func main() {
 		fmt.Fprintln(os.Stderr, "nftfwd:", err)
 		os.Exit(1)
 	}
+}
+
+func restoreRollbackFallback(ctx context.Context, directory string, backend *nft.Backend) error {
+	script, enabled, err := state.LoadActiveSnapshot(directory)
+	if err != nil {
+		if applyErr := backend.Apply(ctx, nft.EmergencyDenyScript); applyErr != nil {
+			return fmt.Errorf("invalid active snapshot and emergency deny failed: %w", applyErr)
+		}
+		return nil
+	}
+	if !enabled {
+		return backend.DestroyOwned(ctx)
+	}
+	return backend.Apply(ctx, script)
 }
 
 func restoreAtBoot(ctx context.Context, directory string) error {

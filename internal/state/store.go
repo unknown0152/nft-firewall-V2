@@ -8,6 +8,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -31,6 +32,7 @@ type Store struct {
 const currentSchemaVersion = 3
 
 var databaseNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+var claimSourcePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,63}(/[a-zA-Z0-9_.-]{1,64})?$`)
 
 type Generation struct {
 	ID               uint64
@@ -134,7 +136,7 @@ func prepareStatePath(path string) (string, error) {
 		return "", errors.New("state directory must be a directory and not group/other writable")
 	}
 	parentStat, ok := parentInfo.Sys().(*syscall.Stat_t)
-	if !ok || parentStat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(parentStat.Uid) != int64(os.Geteuid()) {
 		return "", errors.New("state directory must be owned by the current service user")
 	}
 	databaseExists := false
@@ -149,7 +151,7 @@ func prepareStatePath(path string) (string, error) {
 				return "", fmt.Errorf("state file %s must be regular and non-symlink", filepath.Base(candidate))
 			}
 			stat, valid := info.Sys().(*syscall.Stat_t)
-			if !valid || stat.Uid != uint32(os.Geteuid()) {
+			if !valid || int64(stat.Uid) != int64(os.Geteuid()) {
 				return "", fmt.Errorf("state file %s has unsafe ownership", filepath.Base(candidate))
 			}
 		} else if !errors.Is(statErr, os.ErrNotExist) {
@@ -159,7 +161,7 @@ func prepareStatePath(path string) (string, error) {
 	marker := filepath.Join(parent, activeMarkerName)
 	if markerInfo, markerErr := os.Lstat(marker); markerErr == nil {
 		markerStat, valid := markerInfo.Sys().(*syscall.Stat_t)
-		if markerInfo.Mode()&os.ModeSymlink != 0 || !markerInfo.Mode().IsRegular() || markerInfo.Mode().Perm()&0o077 != 0 || !valid || markerStat.Uid != uint32(os.Geteuid()) {
+		if markerInfo.Mode()&os.ModeSymlink != 0 || !markerInfo.Mode().IsRegular() || markerInfo.Mode().Perm()&0o077 != 0 || !valid || int64(markerStat.Uid) != int64(os.Geteuid()) {
 			return "", errors.New("enforcement marker has unsafe type, permissions, or ownership")
 		}
 		if !databaseExists || databaseSize == 0 {
@@ -168,7 +170,7 @@ func prepareStatePath(path string) (string, error) {
 	} else if !errors.Is(markerErr, os.ErrNotExist) {
 		return "", fmt.Errorf("stat enforcement marker: %w", markerErr)
 	}
-	f, err := os.OpenFile(abs, os.O_CREATE|os.O_RDWR, 0o600)
+	f, err := os.OpenFile(abs, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return "", fmt.Errorf("create state database: %w", err)
 	}
@@ -438,6 +440,9 @@ func scanGeneration(row interface{ Scan(...any) error }) (*Generation, error) {
 		g.RollbackDeadline = &t
 	}
 	if previous.Valid {
+		if previous.Int64 <= 0 {
+			return nil, errors.New("generation has an invalid previous generation reference")
+		}
 		v := uint64(previous.Int64)
 		g.PreviousID = &v
 	}
@@ -461,12 +466,17 @@ func (s *Store) ReadScript(g *Generation) (string, error) {
 		return "", errors.New("generation script has unsafe type or permissions")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
 		return "", errors.New("generation script has unsafe ownership")
 	}
-	b, err := os.ReadFile(abs)
+	f, err := os.OpenFile(abs, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return "", err
+	}
+	b, err := io.ReadAll(io.LimitReader(f, maxActiveSnapshot+1))
+	closeErr := f.Close()
+	if err != nil || closeErr != nil || len(b) > maxActiveSnapshot {
+		return "", errors.New("generation script bounded read failed")
 	}
 	want, err := hex.DecodeString(g.Checksum)
 	if err != nil || len(want) != sha256.Size {
@@ -507,11 +517,8 @@ func (s *Store) AddClaimBounded(ctx context.Context, c Claim, max int) (int64, e
 	if err := ValidateClaim(c.Address, c.Family); err != nil {
 		return 0, err
 	}
-	if c.Source == "" || c.Actor == "" {
-		return 0, errors.New("claim source and actor are required")
-	}
-	if len(c.Source) > 129 || len(c.Actor) > 128 || len(c.Reason) > 1024 {
-		return 0, errors.New("claim source, actor, or reason exceeds its size limit")
+	if err := validateClaimMetadata(c); err != nil {
+		return 0, err
 	}
 	if c.Reason == "" {
 		c.Reason = "unspecified"
@@ -610,6 +617,9 @@ func (s *Store) ReplaceSourceClaimsBounded(ctx context.Context, source, reason, 
 	}
 	if len(source) > 129 || len(actor) > 128 || len(reason) > 1024 {
 		return 0, errors.New("claim source, actor, or reason exceeds its size limit")
+	}
+	if !claimSourcePattern.MatchString(source) || isAllowSource(source) {
+		return 0, errors.New("integration claim source is invalid or reserved for temporary access")
 	}
 	if reason == "" {
 		reason = "integration"
@@ -729,6 +739,9 @@ func scanClaims(rows claimRows) ([]Claim, error) {
 		if err := ValidateClaim(c.Address, c.Family); err != nil {
 			return nil, fmt.Errorf("invalid persisted claim %d: %w", c.ID, err)
 		}
+		if err := validateClaimMetadata(c); err != nil {
+			return nil, fmt.Errorf("invalid persisted claim %d: %w", c.ID, err)
+		}
 		result = append(result, c)
 	}
 	return result, rows.Err()
@@ -794,6 +807,19 @@ func ValidateClaim(address, family string) error {
 	return nil
 }
 
+func validateClaimMetadata(c Claim) error {
+	if !claimSourcePattern.MatchString(c.Source) || c.Actor == "" {
+		return errors.New("claim source or actor is invalid")
+	}
+	if len(c.Actor) > 128 || len(c.Reason) > 1024 {
+		return errors.New("claim actor or reason exceeds its size limit")
+	}
+	if isAllowSource(c.Source) && c.ExpiresAt == nil {
+		return errors.New("temporary access claim requires an expiry")
+	}
+	return nil
+}
+
 func isAllowSource(source string) bool {
 	return source == "allow" || strings.HasPrefix(source, "allow/")
 }
@@ -811,6 +837,9 @@ func (s *Store) PurgeExpiredClaims(ctx context.Context, now time.Time) (int64, e
 }
 
 func (s *Store) Audit(ctx context.Context, actor, event, detail string) error {
+	if actor == "" || event == "" || len(actor) > 128 || len(event) > 128 {
+		return errors.New("audit actor or event is invalid")
+	}
 	if len(detail) > 4096 {
 		detail = detail[:4096]
 	}
@@ -941,7 +970,7 @@ func (s *Store) Backup(ctx context.Context, destination string) error {
 		return errors.New("backup directory is group/other writable")
 	}
 	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || stat.Uid != uint32(os.Geteuid()) {
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
 		return errors.New("backup directory has unsafe ownership")
 	}
 	if _, err := os.Lstat(abs); err == nil {
