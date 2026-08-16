@@ -63,6 +63,28 @@ func TestLoadValidatesTopology(t *testing.T) {
 	if c.WireGuard.TCPMSS != 1360 {
 		t.Fatalf("unexpected default TCP MSS: %d", c.WireGuard.TCPMSS)
 	}
+	if c.Runtime.SafeApplySeconds != 90 {
+		t.Fatalf("unexpected default safe-apply timeout: %d", c.Runtime.SafeApplySeconds)
+	}
+}
+
+func TestValidateSafeApplyTimeoutBounds(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, seconds := range []int{29, 601} {
+		c.Runtime.SafeApplySeconds = seconds
+		if err := Validate(c); err == nil {
+			t.Fatalf("unsafe safe-apply timeout %d accepted", seconds)
+		}
+	}
+	for _, seconds := range []int{30, 600} {
+		c.Runtime.SafeApplySeconds = seconds
+		if err := Validate(c); err != nil {
+			t.Fatalf("safe-apply timeout %d rejected: %v", seconds, err)
+		}
+	}
 }
 
 func TestValidateRejectsUnsafeTCPMSS(t *testing.T) {

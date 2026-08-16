@@ -91,8 +91,9 @@ type WireGuardConfig struct {
 }
 
 type RuntimeConfig struct {
-	MaxBlockClaims int `toml:"max_block_claims"`
-	MaxSetMembers  int `toml:"max_set_members"`
+	MaxBlockClaims   int `toml:"max_block_claims"`
+	MaxSetMembers    int `toml:"max_set_members"`
+	SafeApplySeconds int `toml:"safe_apply_timeout_seconds"`
 }
 
 type StateConfig struct {
@@ -134,7 +135,7 @@ func Defaults() Config {
 	return Config{
 		System:    SystemConfig{IPv6Mode: "disabled", StrictVPN: true},
 		WireGuard: WireGuardConfig{Interface: "wg0", EndpointPort: 51820, Fwmark: "0xca6c", KeepRecent: 2, TCPMSS: 1360, HandshakeSecond: 180},
-		Runtime:   RuntimeConfig{MaxBlockClaims: 100000, MaxSetMembers: 65536},
+		Runtime:   RuntimeConfig{MaxBlockClaims: 100000, MaxSetMembers: 65536, SafeApplySeconds: 90},
 		State:     StateConfig{Directory: "/var/lib/nftfw", Database: "/var/lib/nftfw/state.db"},
 	}
 }
@@ -248,6 +249,9 @@ func Validate(c Config) error {
 	}
 	if c.Runtime.MaxSetMembers <= 0 || c.Runtime.MaxSetMembers > 1000000 {
 		return fmt.Errorf("runtime.max_set_members must be 1..1000000")
+	}
+	if c.Runtime.SafeApplySeconds < 30 || c.Runtime.SafeApplySeconds > 600 {
+		return fmt.Errorf("runtime.safe_apply_timeout_seconds must be 30..600")
 	}
 	if !filepath.IsAbs(c.State.Directory) || filepath.Clean(c.State.Directory) == "/" {
 		return errors.New("state.directory must be an absolute non-root directory")

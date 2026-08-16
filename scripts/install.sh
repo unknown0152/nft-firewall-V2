@@ -18,7 +18,8 @@ for binary in nftfw nftfwd nftfw-web; do
     [[ "$actual" == "$expected" ]] || { echo "Checksum mismatch for $binary-linux-$ARCH" >&2; exit 1; }
 done
 
-install -d -m 0750 "$BIN_DIR" "$CONF_DIR" "$STATE_DIR"
+install -d -o root -g root -m 0755 "$BIN_DIR"
+install -d -m 0750 "$CONF_DIR" "$STATE_DIR"
 if ! getent group nftfw >/dev/null; then groupadd --system nftfw; fi
 if ! getent group nftfw-web >/dev/null; then groupadd --system nftfw-web; fi
 if ! id nftfw-web >/dev/null 2>&1; then useradd --system --gid nftfw-web --home-dir /var/empty --shell /usr/sbin/nologin nftfw-web; fi
@@ -38,8 +39,10 @@ install -o root -g root -m 0644 "$ROOT_DIR/packaging/systemd/nftfw-web.service" 
 install -o root -g root -m 0644 "$ROOT_DIR/packaging/systemd/nftfw-rollback.service" /etc/systemd/system/nftfw-rollback.service
 install -o root -g root -m 0644 "$ROOT_DIR/packaging/systemd/nftfw-rollback.timer" /etc/systemd/system/nftfw-rollback.timer
 systemctl daemon-reload
-systemctl enable --now nftfw-rollback.timer
-systemctl enable --now nftfwd.service
-systemctl enable --now nftfw-web.service
+systemctl reset-failed nftfwd.service nftfw-web.service nftfw-rollback.service 2>/dev/null || true
+systemctl enable nftfwd.service nftfw-rollback.timer nftfw-web.service
+systemctl restart nftfwd.service
+systemctl restart nftfw-rollback.timer
+systemctl restart nftfw-web.service
 echo "NFT Firewall V2 installed. Validate with: nftfw config validate && nftfw plan"
 echo "No firewall policy was applied by this installer."

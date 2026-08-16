@@ -54,7 +54,7 @@ func Open(ctx context.Context, configPath string, runner nft.Runner) (*Runtime, 
 		return nil, err
 	}
 	be := nft.New(runner)
-	m := &reconcile.Manager{Backend: be, Store: st, SafeTTL: 90 * time.Second}
+	m := &reconcile.Manager{Backend: be, Store: st, SafeTTL: time.Duration(c.Runtime.SafeApplySeconds) * time.Second}
 	m.SafeGuard = recovery.SystemdGuard{}.Verify
 	m.HealthCheck = func(checkCtx context.Context) error {
 		ok, detail, checkErr := be.Integrity(checkCtx)

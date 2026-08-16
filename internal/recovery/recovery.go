@@ -18,16 +18,21 @@ func (c Controller) RollbackExpired(ctx context.Context) (bool, error) {
 }
 
 type SystemdGuard struct {
-	Unit string
-	Run  func(context.Context, ...string) error
+	Timer   string
+	Service string
+	Run     func(context.Context, ...string) error
 }
 
 // Verify refuses safe apply unless a separately scheduled rollback path is
 // both enabled for boot and active now.
 func (g SystemdGuard) Verify(ctx context.Context) error {
-	unit := g.Unit
-	if unit == "" {
-		unit = "nftfw-rollback.timer"
+	timer := g.Timer
+	if timer == "" {
+		timer = "nftfw-rollback.timer"
+	}
+	service := g.Service
+	if service == "" {
+		service = "nftfw-rollback.service"
 	}
 	run := g.Run
 	if run == nil {
@@ -35,11 +40,17 @@ func (g SystemdGuard) Verify(ctx context.Context) error {
 			return exec.CommandContext(ctx, "systemctl", args...).Run()
 		}
 	}
-	if err := run(ctx, "is-enabled", "--quiet", unit); err != nil {
+	if err := run(ctx, "is-enabled", "--quiet", timer); err != nil {
 		return errors.New("independent rollback timer is not enabled")
 	}
-	if err := run(ctx, "is-active", "--quiet", unit); err != nil {
+	if err := run(ctx, "is-active", "--quiet", timer); err != nil {
 		return errors.New("independent rollback timer is not active")
+	}
+	// A timer can remain active while its service is unexecutable or its
+	// sandbox refers to a missing path. Starting the no-op service before a
+	// candidate exists proves the independent process can actually run.
+	if err := run(ctx, "start", "--quiet", service); err != nil {
+		return errors.New("independent rollback service failed its preflight")
 	}
 	return nil
 }

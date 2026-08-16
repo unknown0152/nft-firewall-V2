@@ -1,5 +1,6 @@
 [Unit]
 Description=Check NFT Firewall V2 safe-apply deadline
+After=nftfwd.service
 
 [Timer]
 OnBootSec=15s

@@ -23,6 +23,6 @@ MemoryDenyWriteExecute=yes
 RestrictNamespaces=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-ReadWritePaths=/var/lib/nftfw /run/nftfw
+ReadWritePaths=/var/lib/nftfw
 CapabilityBoundingSet=CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_ADMIN

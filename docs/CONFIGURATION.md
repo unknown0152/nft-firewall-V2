@@ -17,7 +17,7 @@ Sections:
   destination service.
 - `wireguard`: interface, endpoint, fwmark, bounded bootstrap addresses/cache,
   and a bidirectional container TCP MSS clamp (`tcp_mss`, default `1360`).
-- `runtime`: claim and nft set size limits.
+- `runtime`: claim/set limits and the bounded safe-apply timeout (30-600 seconds).
 - `state`: SQLite paths.
 - `integrations`: explicit optional feature switches.
 

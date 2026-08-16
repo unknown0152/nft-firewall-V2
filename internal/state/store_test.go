@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 )
@@ -220,5 +221,36 @@ func TestOpenRejectsSymlinkedStatePaths(t *testing.T) {
 	if store, err := Open(context.Background(), dbLink); err == nil {
 		store.Close()
 		t.Fatal("symlinked state database accepted")
+	}
+}
+
+func TestConcurrentDatabaseOpenWaitsForWALLock(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(t.TempDir(), "state.db")
+	initial, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := initial.Close(); err != nil {
+		t.Fatal(err)
+	}
+	var wait sync.WaitGroup
+	errorsSeen := make(chan error, 8)
+	for range 8 {
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			store, openErr := Open(ctx, path)
+			if openErr != nil {
+				errorsSeen <- openErr
+				return
+			}
+			_ = store.Close()
+		}()
+	}
+	wait.Wait()
+	close(errorsSeen)
+	for openErr := range errorsSeen {
+		t.Errorf("concurrent state open failed: %v", openErr)
 	}
 }

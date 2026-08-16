@@ -6,6 +6,10 @@ if [[ ${EUID:-$(id -u)} -ne 0 ]]; then echo "BLOCKED: real WireGuard acceptance 
 for tool in ip nft wg wg-quick curl getent tcpdump timeout awk stat; do
     command -v "$tool" >/dev/null || { echo "BLOCKED: missing $tool"; exit 77; }
 done
+docker_mode=${NFTFW_DOCKER_ACCEPTANCE:-0}
+if [[ "$docker_mode" == 1 ]]; then
+    command -v docker >/dev/null || { echo "BLOCKED: Docker acceptance requested but docker is missing"; exit 77; }
+fi
 [[ -f "$config" && ! -L "$config" ]] || { echo "BLOCKED: WireGuard fixture is absent or unsafe"; exit 77; }
 [[ "$(stat -c '%a:%u:%g' "$config")" = 600:0:0 ]] || { echo "BLOCKED: WireGuard fixture must be root:root mode 0600"; exit 77; }
 wg-quick strip "$config" >/dev/null || { echo "FAIL: WireGuard fixture did not parse"; exit 1; }
@@ -19,6 +23,7 @@ nat_table="nftfw_accept_$suffix"
 lab_tmp=$(mktemp -d /tmp/nftfw-real.XXXXXX)
 daemon_pid=""
 capture_pid=""
+docker_container=""
 old_forward=$(sysctl -n net.ipv4.ip_forward)
 cleanup() {
     set +e
@@ -26,6 +31,7 @@ cleanup() {
     [[ -n "$daemon_pid" ]] && kill "$daemon_pid" 2>/dev/null
     [[ -n "$daemon_pid" ]] && wait "$daemon_pid" 2>/dev/null
     ip netns del "$ctr_ns" 2>/dev/null
+    [[ -n "$docker_container" ]] && docker rm -f "$docker_container" >/dev/null 2>&1
     ip netns del "$vpn_ns" 2>/dev/null
     ip link del "$host_if" 2>/dev/null
     nft delete table ip "$nat_table" 2>/dev/null
@@ -83,7 +89,16 @@ for address in "${tunnel_addresses[@]}"; do [[ "$address" == *:* ]] && has_ipv6=
 uplink=$(ip -4 route show default | awk '{ print $5 }')
 [[ "$uplink" =~ ^[A-Za-z0-9_.-]{1,15}$ ]] || { echo "FAIL: could not identify host uplink"; exit 1; }
 ip netns add "$vpn_ns"
-ip netns add "$ctr_ns"
+if [[ "$docker_mode" == 1 ]]; then
+    docker_container="nftfw-real-$suffix"
+    docker run -d --name "$docker_container" --network none alpine:3.22 sleep 600 >/dev/null
+    docker_pid=$(docker inspect --format '{{.State.Pid}}' "$docker_container")
+    [[ "$docker_pid" =~ ^[0-9]+$ && "$docker_pid" -gt 1 ]] || { echo "FAIL: Docker test container has no network namespace"; exit 1; }
+    mkdir -p /run/netns
+    ln -s "/proc/$docker_pid/ns/net" "/run/netns/$ctr_ns"
+else
+    ip netns add "$ctr_ns"
+fi
 ip link add "$host_if" type veth peer name "$ns_if"
 ip link set "$ns_if" netns "$vpn_ns"
 ip -n "$vpn_ns" link set "$ns_if" name uplink0
@@ -358,6 +373,7 @@ if [[ ! "$container_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
 fi
 [[ "$container_ip" != "$physical_ip" ]] || { echo "FAIL: container used the physical IPv4 exit"; exit 1; }
 echo "REAL VPN CONTAINER EGRESS: PASS"
+if [[ "$docker_mode" == 1 ]]; then echo "REAL DOCKER CONTAINER VPN EGRESS: PASS"; fi
 if (( has_ipv6 )); then
     vpn_ipv6=$(ip netns exec "$vpn_ns" curl -6fsS --max-time 15 https://api64.ipify.org 2>/dev/null || true)
     [[ "$vpn_ipv6" == *:* ]] || { echo "FAIL: real VPN IPv6 unavailable"; exit 1; }
@@ -392,6 +408,7 @@ set +e; wait "$capture_pid"; capture_rc=$?; set -e; capture_pid=""
 [[ "$capture_rc" -eq 124 ]] || { echo "FAIL: physical packet capture observed non-endpoint IPv4 traffic"; exit 1; }
 echo "REAL VPN LOSS HOST: PASS"
 echo "REAL VPN LOSS CONTAINER: PASS"
+if [[ "$docker_mode" == 1 ]]; then echo "REAL DOCKER CONTAINER VPN LOSS: PASS"; fi
 echo "REAL LEAKED PHYSICAL PACKETS: 0"
 
 configure_wireguard
@@ -401,4 +418,5 @@ recovered_ip=$(public_ipv4 "$vpn_ns" || true)
 recovered_container_ip=$(public_ipv4 "$ctr_ns" || true)
 [[ "$recovered_container_ip" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ && "$recovered_container_ip" != "$physical_ip" ]] || { echo "FAIL: real container egress did not recover through VPN"; exit 1; }
 echo "REAL WIREGUARD RESTART/RECOVERY: PASS"
+if [[ "$docker_mode" == 1 ]]; then echo "REAL DOCKER CONTAINER RECOVERY: PASS"; fi
 echo "REAL WIREGUARD ACCEPTANCE: PASS"
