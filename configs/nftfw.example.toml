@@ -1,0 +1,83 @@
+# NFT Firewall V2 declarative policy. Copy to /etc/nftfw/nftfw.toml and set
+# ownership root:nftfw, mode 0640 or stricter. No field is application-specific.
+
+[system]
+ipv6_mode = "disabled" # disabled, vpn, or native
+strict_vpn = true
+
+[[interfaces]]
+name = "eth0"
+role = "uplink"
+zone = "wan"
+cidrs = ["192.0.2.10/32"]
+
+[[interfaces]]
+name = "wg0"
+role = "vpn"
+zone = "vpn"
+cidrs = ["10.77.0.2/32"]
+
+[[zones]]
+name = "lan"
+networks = ["192.168.1.0/24"]
+
+[[zones]]
+name = "vpn"
+networks = ["10.77.0.0/24"]
+interfaces = ["wg0"]
+
+[[services]]
+name = "ssh"
+protocol = "tcp"
+ports = [22]
+
+[[services]]
+name = "dns"
+protocol = "udp"
+ports = [53]
+
+[[services]]
+name = "icmp"
+protocol = "icmp"
+ports = []
+
+[[policies]]
+name = "lan-to-ssh"
+from = "lan"
+to = "host"
+service = "ssh"
+action = "allow"
+
+[[policies]]
+name = "lan-to-dns"
+from = "lan"
+to = "host"
+service = "dns"
+action = "allow"
+
+[wireguard]
+interface = "wg0"
+endpoint_host = "vpn.example.invalid"
+endpoint_port = 51820
+fwmark = "0xca6c"
+bootstrap_ips = ["198.51.100.10/32"]
+bootstrap_ips_v6 = []
+bootstrap_hosts = ["vpn.example.invalid"]
+keep_recent = 2
+tcp_mss = 1360 # bidirectional container/VPN clamp; lower for smaller tunnel MTUs
+config_path = "/etc/wireguard/wg0.conf"
+handshake_timeout_seconds = 180
+
+[runtime]
+max_block_claims = 100000
+max_set_members = 65536
+
+[state]
+directory = "/var/lib/nftfw"
+database = "/var/lib/nftfw/state.db"
+
+[integrations]
+docker_enabled = false
+threat_feed = false
+geoip = false
+notifications = false

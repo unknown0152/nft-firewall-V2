@@ -1,0 +1,31 @@
+[Unit]
+Description=NFT Firewall V2 read-only dashboard
+After=nftfwd.service
+Requires=nftfwd.service
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/nftfw/nftfw-web
+Restart=on-failure
+RestartSec=2s
+User=nftfw-web
+Group=nftfw-web
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ReadOnlyPaths=/run/nftfw
+
+[Install]
+WantedBy=multi-user.target

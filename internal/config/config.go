@@ -1,0 +1,492 @@
+// Package config owns the side-effect-free, typed configuration contract.
+// Loading a document never talks to nftables or changes OS state.
+package config
+
+import (
+	"errors"
+	"fmt"
+	"net"
+	"net/netip"
+	"net/url"
+	"os"
+	"path/filepath"
+	"regexp"
+	"sort"
+	"strings"
+	"syscall"
+
+	"github.com/BurntSushi/toml"
+)
+
+type Config struct {
+	System       SystemConfig       `toml:"system"`
+	Interfaces   []Interface        `toml:"interfaces"`
+	Zones        []Zone             `toml:"zones"`
+	Services     []Service          `toml:"services"`
+	Policies     []Policy           `toml:"policies"`
+	WireGuard    WireGuardConfig    `toml:"wireguard"`
+	Runtime      RuntimeConfig      `toml:"runtime"`
+	State        StateConfig        `toml:"state"`
+	Integrations IntegrationsConfig `toml:"integrations"`
+	ThreatFeeds  []ThreatFeedConfig `toml:"threat_feeds"`
+	GeoSets      []GeoSetConfig     `toml:"geo_sets"`
+}
+
+type SystemConfig struct {
+	IPv6Mode  string `toml:"ipv6_mode"`
+	StrictVPN bool   `toml:"strict_vpn"`
+}
+
+type Interface struct {
+	Name  string   `toml:"name"`
+	Role  string   `toml:"role"`
+	Zone  string   `toml:"zone"`
+	CIDRs []string `toml:"cidrs"`
+}
+
+type Zone struct {
+	Name       string   `toml:"name"`
+	Networks   []string `toml:"networks"`
+	Interfaces []string `toml:"interfaces"`
+}
+
+type Service struct {
+	Name     string `toml:"name"`
+	Protocol string `toml:"protocol"`
+	Ports    []int  `toml:"ports"`
+}
+
+type Policy struct {
+	Name    string `toml:"name"`
+	From    string `toml:"from"`
+	To      string `toml:"to"`
+	Service string `toml:"service"`
+	Action  string `toml:"action"`
+}
+
+type WireGuardConfig struct {
+	Interface       string   `toml:"interface"`
+	EndpointHost    string   `toml:"endpoint_host"`
+	EndpointPort    int      `toml:"endpoint_port"`
+	Fwmark          string   `toml:"fwmark"`
+	BootstrapIPs    []string `toml:"bootstrap_ips"`
+	BootstrapIPsV6  []string `toml:"bootstrap_ips_v6"`
+	BootstrapHosts  []string `toml:"bootstrap_hosts"`
+	KeepRecent      int      `toml:"keep_recent"`
+	TCPMSS          int      `toml:"tcp_mss"`
+	ConfigPath      string   `toml:"config_path"`
+	HandshakeSecond int      `toml:"handshake_timeout_seconds"`
+}
+
+type RuntimeConfig struct {
+	MaxBlockClaims int `toml:"max_block_claims"`
+	MaxSetMembers  int `toml:"max_set_members"`
+}
+
+type StateConfig struct {
+	Directory string `toml:"directory"`
+	Database  string `toml:"database"`
+}
+
+type IntegrationsConfig struct {
+	DockerEnabled bool `toml:"docker_enabled"`
+	ThreatFeed    bool `toml:"threat_feed"`
+	GeoIP         bool `toml:"geoip"`
+	Notifications bool `toml:"notifications"`
+}
+
+type ThreatFeedConfig struct {
+	Name           string `toml:"name"`
+	URL            string `toml:"url"`
+	MaxEntries     int    `toml:"max_entries"`
+	MaxBytes       int64  `toml:"max_bytes"`
+	MinEntries     int    `toml:"min_entries"`
+	RefreshSeconds int    `toml:"refresh_seconds"`
+}
+
+type GeoSetConfig struct {
+	Name       string `toml:"name"`
+	Country    string `toml:"country"`
+	CIDRFile   string `toml:"cidr_file"`
+	MaxEntries int    `toml:"max_entries"`
+	MinEntries int    `toml:"min_entries"`
+}
+
+var namePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,62}$`)
+var ifacePattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`)
+var fwmarkPattern = regexp.MustCompile(`^(0x[0-9a-fA-F]{1,8}|[0-9]{1,10})$`)
+var countryPattern = regexp.MustCompile(`^[A-Za-z]{2}$`)
+
+func Defaults() Config {
+	return Config{
+		System:    SystemConfig{IPv6Mode: "disabled", StrictVPN: true},
+		WireGuard: WireGuardConfig{Interface: "wg0", EndpointPort: 51820, Fwmark: "0xca6c", KeepRecent: 2, TCPMSS: 1360, HandshakeSecond: 180},
+		Runtime:   RuntimeConfig{MaxBlockClaims: 100000, MaxSetMembers: 65536},
+		State:     StateConfig{Directory: "/var/lib/nftfw", Database: "/var/lib/nftfw/state.db"},
+	}
+}
+
+// Load decodes a strict TOML document. Unknown keys are rejected.
+func Load(path string) (Config, error) {
+	if err := secureConfigPath(path); err != nil {
+		return Config{}, err
+	}
+	b, err := os.ReadFile(path)
+	if err != nil {
+		return Config{}, fmt.Errorf("read config: %w", err)
+	}
+	return Decode(b)
+}
+
+// Decode is the pure configuration parser used by validation tooling and
+// fuzz tests. Filesystem ownership checks remain exclusively in Load.
+func Decode(b []byte) (Config, error) {
+	c := Defaults()
+	md, err := toml.Decode(string(b), &c)
+	if err != nil {
+		return Config{}, fmt.Errorf("decode TOML: %w", err)
+	}
+	if unknown := md.Undecoded(); len(unknown) > 0 {
+		keys := make([]string, 0, len(unknown))
+		for _, k := range unknown {
+			keys = append(keys, k.String())
+		}
+		sort.Strings(keys)
+		return Config{}, fmt.Errorf("unknown configuration key(s): %s", strings.Join(keys, ", "))
+	}
+	if err := Validate(c); err != nil {
+		return Config{}, err
+	}
+	return c, nil
+}
+
+func secureConfigPath(path string) error {
+	if path == "" {
+		return errors.New("config path is empty")
+	}
+	info, err := os.Lstat(path)
+	if err != nil {
+		return fmt.Errorf("stat config: %w", err)
+	}
+	if info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("configuration symlink is not allowed")
+	}
+	if !info.Mode().IsRegular() {
+		return errors.New("configuration is not a regular file")
+	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return fmt.Errorf("configuration is writable by group/other (%#o)", info.Mode().Perm())
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return fmt.Errorf("resolve config path: %w", err)
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil {
+		return fmt.Errorf("resolve config path components: %w", err)
+	}
+	if resolved != abs {
+		return errors.New("configuration path contains a symlink")
+	}
+	parent := filepath.Dir(path)
+	if p, err := os.Stat(parent); err == nil && p.Mode().Perm()&0o002 != 0 && p.Mode().Perm()&0o1000 == 0 {
+		return errors.New("configuration parent is world-writable without sticky bit")
+	}
+	if abs == "/etc/nftfw/nftfw.toml" || strings.HasPrefix(abs, "/etc/nftfw/") {
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || stat.Uid != 0 {
+			return errors.New("system configuration must be owned by root")
+		}
+		p, err := os.Stat(filepath.Dir(abs))
+		if err != nil {
+			return fmt.Errorf("stat system configuration directory: %w", err)
+		}
+		pstat, ok := p.Sys().(*syscall.Stat_t)
+		if !ok || pstat.Uid != 0 || p.Mode().Perm()&0o022 != 0 {
+			return errors.New("system configuration directory must be root-owned and not group/other writable")
+		}
+	}
+	return nil
+}
+
+func Validate(c Config) error {
+	if c.System.IPv6Mode != "disabled" && c.System.IPv6Mode != "vpn" && c.System.IPv6Mode != "native" {
+		return fmt.Errorf("system.ipv6_mode must be disabled, vpn, or native")
+	}
+	if !c.System.StrictVPN {
+		return errors.New("system.strict_vpn=false is not implemented; V2 requires explicit strict VPN egress")
+	}
+	if c.Runtime.MaxBlockClaims <= 0 || c.Runtime.MaxBlockClaims > 1000000 {
+		return fmt.Errorf("runtime.max_block_claims must be 1..1000000")
+	}
+	if c.Runtime.MaxSetMembers <= 0 || c.Runtime.MaxSetMembers > 1000000 {
+		return fmt.Errorf("runtime.max_set_members must be 1..1000000")
+	}
+	if c.Integrations.Notifications {
+		return errors.New("integrations.notifications is not implemented in the core; use a separate audit adapter")
+	}
+	if c.Integrations.ThreatFeed != (len(c.ThreatFeeds) > 0) {
+		return errors.New("integrations.threat_feed must be true exactly when [[threat_feeds]] entries are configured")
+	}
+	if c.Integrations.GeoIP != (len(c.GeoSets) > 0) {
+		return errors.New("integrations.geoip must be true exactly when [[geo_sets]] entries are configured")
+	}
+	feedNames := map[string]bool{}
+	for _, feed := range c.ThreatFeeds {
+		if !namePattern.MatchString(feed.Name) || feedNames[feed.Name] {
+			return fmt.Errorf("invalid or duplicate threat feed name %q", feed.Name)
+		}
+		feedNames[feed.Name] = true
+		u, err := url.Parse(feed.URL)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+			return fmt.Errorf("threat feed %s must use a credential-free HTTPS URL", feed.Name)
+		}
+		if feed.MaxEntries < 0 || feed.MaxEntries > c.Runtime.MaxBlockClaims || feed.MinEntries < 0 || (feed.MaxEntries > 0 && feed.MinEntries > feed.MaxEntries) {
+			return fmt.Errorf("threat feed %s has invalid entry bounds", feed.Name)
+		}
+		if feed.MaxBytes < 0 || feed.MaxBytes > 64<<20 || feed.RefreshSeconds < 0 || (feed.RefreshSeconds > 0 && feed.RefreshSeconds < 60) {
+			return fmt.Errorf("threat feed %s has invalid byte/refresh bounds", feed.Name)
+		}
+	}
+	geoNames := map[string]bool{}
+	for _, set := range c.GeoSets {
+		if !namePattern.MatchString(set.Name) || geoNames[set.Name] {
+			return fmt.Errorf("invalid or duplicate GeoIP set name %q", set.Name)
+		}
+		geoNames[set.Name] = true
+		if !countryPattern.MatchString(set.Country) {
+			return fmt.Errorf("GeoIP set %s has invalid country identifier %q", set.Name, set.Country)
+		}
+		if !filepath.IsAbs(set.CIDRFile) {
+			return fmt.Errorf("GeoIP set %s cidr_file must be absolute", set.Name)
+		}
+		if set.MaxEntries < 0 || set.MaxEntries > c.Runtime.MaxBlockClaims || set.MinEntries < 0 || (set.MaxEntries > 0 && set.MinEntries > set.MaxEntries) {
+			return fmt.Errorf("GeoIP set %s has invalid entry bounds", set.Name)
+		}
+	}
+	if len(c.Interfaces) == 0 {
+		return errors.New("at least one interface is required")
+	}
+	interfaces := map[string]Interface{}
+	for _, in := range c.Interfaces {
+		if !ifacePattern.MatchString(in.Name) {
+			return fmt.Errorf("interface %q has invalid name", in.Name)
+		}
+		if in.Role != "uplink" && in.Role != "vpn" && in.Role != "lan" && in.Role != "container" {
+			return fmt.Errorf("interface %q has invalid role %q", in.Name, in.Role)
+		}
+		if _, ok := interfaces[in.Name]; ok {
+			return fmt.Errorf("duplicate interface %q", in.Name)
+		}
+		interfaces[in.Name] = in
+		for _, cidr := range in.CIDRs {
+			if err := validateCIDR(cidr, true); err != nil {
+				return fmt.Errorf("interface %s cidr: %w", in.Name, err)
+			}
+		}
+	}
+	uplinks := 0
+	for _, in := range c.Interfaces {
+		if in.Role == "uplink" {
+			uplinks++
+		}
+	}
+	if uplinks != 1 {
+		return fmt.Errorf("exactly one uplink interface is required, got %d", uplinks)
+	}
+	zones := map[string]Zone{}
+	type zonePrefix struct {
+		zone   string
+		prefix netip.Prefix
+	}
+	var zonePrefixes []zonePrefix
+	for _, z := range c.Zones {
+		if !namePattern.MatchString(z.Name) {
+			return fmt.Errorf("zone %q has invalid name", z.Name)
+		}
+		if _, ok := zones[z.Name]; ok {
+			return fmt.Errorf("duplicate zone %q", z.Name)
+		}
+		zones[z.Name] = z
+		for _, n := range z.Networks {
+			if err := validateCIDR(n, true); err != nil {
+				return fmt.Errorf("zone %s network: %w", z.Name, err)
+			}
+			prefix, _ := netip.ParsePrefix(n)
+			prefix = prefix.Masked()
+			for _, existing := range zonePrefixes {
+				if prefix.Overlaps(existing.prefix) {
+					return fmt.Errorf("zone %s network %s overlaps zone %s network %s", z.Name, prefix, existing.zone, existing.prefix)
+				}
+			}
+			zonePrefixes = append(zonePrefixes, zonePrefix{zone: z.Name, prefix: prefix})
+		}
+		for _, name := range z.Interfaces {
+			if _, ok := interfaces[name]; !ok {
+				return fmt.Errorf("zone %s references unknown interface %q", z.Name, name)
+			}
+		}
+	}
+	services := map[string]Service{}
+	for _, s := range c.Services {
+		if !namePattern.MatchString(s.Name) {
+			return fmt.Errorf("service %q has invalid name", s.Name)
+		}
+		if _, ok := services[s.Name]; ok {
+			return fmt.Errorf("duplicate service %q", s.Name)
+		}
+		if s.Protocol != "tcp" && s.Protocol != "udp" && s.Protocol != "icmp" {
+			return fmt.Errorf("service %s has invalid protocol %q", s.Name, s.Protocol)
+		}
+		if s.Protocol == "icmp" && len(s.Ports) != 0 {
+			return fmt.Errorf("service %s: icmp cannot have ports", s.Name)
+		}
+		seenPorts := map[int]bool{}
+		for _, p := range s.Ports {
+			if p < 1 || p > 65535 || seenPorts[p] {
+				return fmt.Errorf("service %s has invalid or duplicate port %d", s.Name, p)
+			}
+			seenPorts[p] = true
+		}
+		if s.Protocol != "icmp" && len(s.Ports) == 0 {
+			return fmt.Errorf("service %s must define at least one port", s.Name)
+		}
+		services[s.Name] = s
+	}
+	policyNames := map[string]bool{}
+	policyFlows := map[string]string{}
+	for _, p := range c.Policies {
+		if !namePattern.MatchString(p.Name) || policyNames[p.Name] {
+			return fmt.Errorf("invalid or duplicate policy %q", p.Name)
+		}
+		policyNames[p.Name] = true
+		if p.Action != "allow" && p.Action != "deny" {
+			return fmt.Errorf("policy %s action must be allow or deny", p.Name)
+		}
+		if p.From != "any" && p.From != "host" {
+			if _, ok := zones[p.From]; !ok {
+				return fmt.Errorf("policy %s references unknown source zone %q", p.Name, p.From)
+			}
+		}
+		if p.To != "host" && p.To != "any" {
+			if _, ok := zones[p.To]; !ok {
+				return fmt.Errorf("policy %s references unknown destination zone %q", p.Name, p.To)
+			}
+		}
+		if _, ok := services[p.Service]; !ok {
+			return fmt.Errorf("policy %s references unknown service %q", p.Name, p.Service)
+		}
+		flow := p.From + "\x00" + p.To + "\x00" + p.Service
+		if previous, ok := policyFlows[flow]; ok {
+			return fmt.Errorf("policy %s duplicates flow tuple from policy %s", p.Name, previous)
+		}
+		policyFlows[flow] = p.Name
+	}
+	if c.WireGuard.Interface == "" {
+		return errors.New("wireguard.interface is required")
+	}
+	if !ifacePattern.MatchString(c.WireGuard.Interface) || c.WireGuard.Interface == "" {
+		return fmt.Errorf("wireguard.interface %q is invalid", c.WireGuard.Interface)
+	}
+	uplink := ""
+	for _, in := range c.Interfaces {
+		if in.Role == "uplink" {
+			uplink = in.Name
+		}
+	}
+	if c.WireGuard.Interface == uplink {
+		return errors.New("wireguard.interface cannot equal the uplink")
+	}
+	wgInterface, ok := interfaces[c.WireGuard.Interface]
+	if !ok || wgInterface.Role != "vpn" {
+		return fmt.Errorf("wireguard.interface %q must be declared with role vpn", c.WireGuard.Interface)
+	}
+	if c.WireGuard.EndpointPort < 1 || c.WireGuard.EndpointPort > 65535 {
+		return errors.New("wireguard.endpoint_port must be 1..65535")
+	}
+	if !fwmarkPattern.MatchString(c.WireGuard.Fwmark) {
+		return fmt.Errorf("wireguard.fwmark %q is invalid", c.WireGuard.Fwmark)
+	}
+	if c.WireGuard.KeepRecent < 0 || c.WireGuard.KeepRecent > 16 {
+		return errors.New("wireguard.keep_recent must be 0..16")
+	}
+	if c.WireGuard.TCPMSS < 536 || c.WireGuard.TCPMSS > 8960 {
+		return errors.New("wireguard.tcp_mss must be 536..8960")
+	}
+	if c.WireGuard.EndpointHost != "" && net.ParseIP(c.WireGuard.EndpointHost) == nil && !validHostname(c.WireGuard.EndpointHost) {
+		return fmt.Errorf("wireguard.endpoint_host %q is invalid", c.WireGuard.EndpointHost)
+	}
+	if len(c.WireGuard.BootstrapIPs)+len(c.WireGuard.BootstrapIPsV6) > 64 || len(c.WireGuard.BootstrapHosts) > 16 {
+		return errors.New("WireGuard bootstrap endpoint limits exceeded (64 addresses, 16 hosts)")
+	}
+	for _, raw := range c.WireGuard.BootstrapIPs {
+		if err := validateCIDR(raw, true); err != nil {
+			return fmt.Errorf("wireguard.bootstrap_ips: %w", err)
+		}
+		prefix, _ := netip.ParsePrefix(raw)
+		if !prefix.Addr().Is4() {
+			return fmt.Errorf("wireguard.bootstrap_ips contains non-IPv4 prefix %q", raw)
+		}
+	}
+	for _, raw := range c.WireGuard.BootstrapIPsV6 {
+		if err := validateCIDR(raw, true); err != nil {
+			return fmt.Errorf("wireguard.bootstrap_ips_v6: %w", err)
+		}
+		prefix, _ := netip.ParsePrefix(raw)
+		if !prefix.Addr().Is6() {
+			return fmt.Errorf("wireguard.bootstrap_ips_v6 contains non-IPv6 prefix %q", raw)
+		}
+	}
+	for _, h := range c.WireGuard.BootstrapHosts {
+		if !validHostname(h) {
+			return fmt.Errorf("wireguard.bootstrap_hosts %q is invalid", h)
+		}
+	}
+	if c.System.StrictVPN && c.WireGuard.Interface == "" {
+		return errors.New("strict VPN mode requires wireguard.interface")
+	}
+	return nil
+}
+
+func validateCIDR(raw string, allowHost bool) error {
+	_, n, err := net.ParseCIDR(strings.TrimSpace(raw))
+	if err != nil || n == nil {
+		return fmt.Errorf("invalid CIDR %q", raw)
+	}
+	ones, _ := n.Mask.Size()
+	if ones == 0 {
+		return errors.New("/0 is not permitted")
+	}
+	if !allowHost && bitsHost(n) != 1 {
+		return errors.New("host address required")
+	}
+	return nil
+}
+
+func bitsHost(n *net.IPNet) int {
+	ones, bits := n.Mask.Size()
+	if bits == 0 {
+		return 0
+	}
+	if ones == bits {
+		return 1
+	}
+	return 0
+}
+
+func validHostname(s string) bool {
+	if len(s) == 0 || len(s) > 253 || strings.ContainsAny(s, " /\\\t\r\n") {
+		return false
+	}
+	for _, label := range strings.Split(strings.TrimSuffix(s, "."), ".") {
+		if label == "" || len(label) > 63 || strings.HasPrefix(label, "-") || strings.HasSuffix(label, "-") {
+			return false
+		}
+		for _, r := range label {
+			if !(r == '-' || r == '_' || r >= 'a' && r <= 'z' || r >= 'A' && r <= 'Z' || r >= '0' && r <= '9') {
+				return false
+			}
+		}
+	}
+	return true
+}

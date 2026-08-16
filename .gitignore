@@ -1,0 +1,9 @@
+/dist/
+*.db
+*.db-shm
+*.db-wal
+*.tmp
+/test-results/
+/.cache/
+__pycache__/
+*.pyc

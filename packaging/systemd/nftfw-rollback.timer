@@ -1,0 +1,11 @@
+[Unit]
+Description=Check NFT Firewall V2 safe-apply deadline
+
+[Timer]
+OnBootSec=15s
+OnUnitActiveSec=15s
+Unit=nftfw-rollback.service
+Persistent=true
+
+[Install]
+WantedBy=timers.target

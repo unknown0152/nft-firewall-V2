@@ -1,0 +1,36 @@
+[Unit]
+Description=NFT Firewall V2 privileged reconciler
+After=local-fs.target network-pre.target
+Wants=network-pre.target
+Before=network.target
+
+[Service]
+Type=simple
+ExecStart=/usr/lib/nftfw/nftfwd --config /etc/nftfw/nftfw.toml --status-socket /run/nftfw/status.sock --control-socket /run/nftfw/control.sock
+Restart=on-failure
+RestartSec=2s
+User=root
+Group=nftfw-web
+RuntimeDirectory=nftfw
+RuntimeDirectoryMode=0750
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadWritePaths=/var/lib/nftfw /run/nftfw
+CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+
+[Install]
+WantedBy=multi-user.target
