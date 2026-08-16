@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/netip"
 	"net/url"
@@ -37,7 +38,10 @@ func (f Feed) Fetch(ctx context.Context) ([]string, error) {
 	}
 	client := f.Client
 	if client == nil {
-		client = &http.Client{Timeout: 15 * time.Second}
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.DialContext = publicDialContext
+		client = &http.Client{Timeout: 15 * time.Second, Transport: transport}
 	}
 	clientCopy := *client
 	previousRedirect := clientCopy.CheckRedirect
@@ -74,6 +78,62 @@ func (f Feed) Fetch(ctx context.Context) ([]string, error) {
 		return nil, errors.New("feed response exceeds byte limit")
 	}
 	return Parse(body, max)
+}
+
+var nonPublicFeedNetworks = func() []netip.Prefix {
+	raw := []string{
+		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+		"169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+		"192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
+		"203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+		"::/128", "::1/128", "100::/64", "2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8",
+	}
+	result := make([]netip.Prefix, 0, len(raw))
+	for _, value := range raw {
+		result = append(result, netip.MustParsePrefix(value))
+	}
+	return result
+}()
+
+func publicDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, errors.New("invalid threat feed network address")
+	}
+	resolved, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return nil, errors.New("threat feed DNS resolution failed")
+	}
+	dialer := net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+	var lastErr error
+	for _, candidate := range resolved {
+		candidate = candidate.Unmap()
+		if !isPublicFeedAddress(candidate) {
+			continue
+		}
+		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.String(), port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	if lastErr != nil {
+		return nil, errors.New("threat feed public endpoint connection failed")
+	}
+	return nil, errors.New("threat feed target resolved only to non-public addresses")
+}
+
+func isPublicFeedAddress(address netip.Addr) bool {
+	address = address.Unmap()
+	if !address.IsValid() || !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsMulticast() || address.IsUnspecified() {
+		return false
+	}
+	for _, prefix := range nonPublicFeedNetworks {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
 }
 
 func Parse(body []byte, max int) ([]string, error) {

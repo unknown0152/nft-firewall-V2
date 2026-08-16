@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 )
 
@@ -21,16 +22,45 @@ type Runner interface {
 
 type OSRunner struct{ Binary string }
 
+const (
+	maxNFTStdout = 32 << 20
+	maxNFTStderr = 1 << 20
+)
+
 func (r OSRunner) Run(ctx context.Context, args ...string) (string, string, error) {
 	bin := r.Binary
 	if bin == "" {
 		bin = "nft"
 	}
 	cmd := exec.CommandContext(ctx, bin, args...)
-	var out, errOut strings.Builder
+	var out, errOut boundedStringWriter
+	out.remaining = maxNFTStdout
+	errOut.remaining = maxNFTStderr
 	cmd.Stdout, cmd.Stderr = &out, &errOut
 	err := cmd.Run()
+	if out.exceeded || errOut.exceeded {
+		return out.String(), errOut.String(), errors.New("nft command output exceeded its safety limit")
+	}
 	return out.String(), errOut.String(), err
+}
+
+type boundedStringWriter struct {
+	strings.Builder
+	remaining int
+	exceeded  bool
+}
+
+func (w *boundedStringWriter) Write(p []byte) (int, error) {
+	original := len(p)
+	if len(p) > w.remaining {
+		p = p[:w.remaining]
+		w.exceeded = true
+	}
+	if len(p) > 0 {
+		_, _ = w.Builder.Write(p)
+		w.remaining -= len(p)
+	}
+	return original, nil
 }
 
 type Backend struct {
@@ -38,6 +68,7 @@ type Backend struct {
 	TempDir string
 	Timeout time.Duration
 	Owned   []Table
+	mu      sync.Mutex
 }
 
 type Table struct{ Family, Name string }
@@ -76,6 +107,8 @@ func (b *Backend) Check(ctx context.Context, script string) error {
 }
 
 func (b *Backend) Apply(ctx context.Context, script string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	if err := validateScript(script); err != nil {
 		return err
 	}
@@ -124,6 +157,8 @@ func (b *Backend) CheckCandidate(ctx context.Context, script string) error {
 // DestroyOwned removes only tables belonging to this product. It is used when
 // rolling back the first generation or uninstalling with explicit intent.
 func (b *Backend) DestroyOwned(ctx context.Context) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	existing, err := b.ExistingOwned(ctx)
 	if err != nil {
 		return err
@@ -152,6 +187,8 @@ func (b *Backend) DestroyOwned(ctx context.Context) error {
 }
 
 func (b *Backend) UpdateSet(ctx context.Context, name string, add bool, elements []string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	allowed := map[string]string{"blocked_v4": "ipv4", "blocked_v6": "ipv6", "trusted_v4": "ipv4", "trusted_v6": "ipv6", "wg_bootstrap_v4": "ipv4", "wg_bootstrap_v6": "ipv6", "docker_nets": "ipv4", "docker_nets6": "ipv6"}
 	family, ok := allowed[name]
 	if !ok {
@@ -202,6 +239,8 @@ func (b *Backend) UpdateSet(ctx context.Context, name string, add bool, elements
 // ReplaceSets atomically replaces bounded runtime-set contents without
 // recompiling chains. Only compiler-owned inet sets are accepted.
 func (b *Backend) ReplaceSets(ctx context.Context, sets map[string][]string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	allowed := map[string]string{
 		"blocked_v4": "ipv4", "blocked_v6": "ipv6", "trusted_v4": "ipv4", "trusted_v6": "ipv6",
 		"wg_bootstrap_v4": "ipv4", "wg_bootstrap_v6": "ipv6", "docker_nets": "ipv4", "docker_nets6": "ipv6",
@@ -258,6 +297,8 @@ func (b *Backend) ReplaceSets(ctx context.Context, sets map[string][]string) err
 // ReplaceContainerNetworks updates filter and NAT membership in one atomic
 // transaction so a recreated bridge never has split enforcement state.
 func (b *Backend) ReplaceContainerNetworks(ctx context.Context, v4, v6 []string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
 	sets := []struct {
 		family string
 		table  string

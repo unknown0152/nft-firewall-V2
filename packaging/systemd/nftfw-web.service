@@ -1,5 +1,7 @@
 [Unit]
 Description=NFT Firewall V2 read-only dashboard
+StartLimitIntervalSec=60s
+StartLimitBurst=20
 After=nftfwd.service
 Wants=nftfwd.service
 

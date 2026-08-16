@@ -11,6 +11,7 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -26,6 +27,10 @@ type Store struct {
 	Path string
 	mu   sync.Mutex
 }
+
+const currentSchemaVersion = 3
+
+var databaseNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 
 type Generation struct {
 	ID               uint64
@@ -83,6 +88,18 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		}
 	}
 	s := &Store{DB: db, Dir: filepath.Dir(path), Path: path}
+	if _, markerErr := os.Stat(filepath.Join(s.Dir, activeMarkerName)); markerErr == nil {
+		var requiredTables int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('schema_migrations','generations')").Scan(&requiredTables); err != nil || requiredTables != 2 {
+			db.Close()
+			return nil, errors.New("enforced state database lacks required generation schema")
+		}
+		var committed int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM generations WHERE status='committed'").Scan(&committed); err != nil || committed == 0 {
+			db.Close()
+			return nil, errors.New("enforced state database has no committed generation")
+		}
+	}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
 		return nil, err
@@ -94,6 +111,9 @@ func prepareStatePath(path string) (string, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
 		return "", fmt.Errorf("resolve state database path: %w", err)
+	}
+	if !databaseNamePattern.MatchString(filepath.Base(abs)) {
+		return "", errors.New("state database filename contains unsupported characters")
 	}
 	parent := filepath.Dir(abs)
 	if err := os.MkdirAll(parent, 0o750); err != nil {
@@ -117,8 +137,14 @@ func prepareStatePath(path string) (string, error) {
 	if !ok || parentStat.Uid != uint32(os.Geteuid()) {
 		return "", errors.New("state directory must be owned by the current service user")
 	}
+	databaseExists := false
+	var databaseSize int64
 	for _, candidate := range []string{abs, abs + "-wal", abs + "-shm", abs + "-journal"} {
 		if info, statErr := os.Lstat(candidate); statErr == nil {
+			if candidate == abs {
+				databaseExists = true
+				databaseSize = info.Size()
+			}
 			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 				return "", fmt.Errorf("state file %s must be regular and non-symlink", filepath.Base(candidate))
 			}
@@ -129,6 +155,18 @@ func prepareStatePath(path string) (string, error) {
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return "", fmt.Errorf("stat state file: %w", statErr)
 		}
+	}
+	marker := filepath.Join(parent, activeMarkerName)
+	if markerInfo, markerErr := os.Lstat(marker); markerErr == nil {
+		markerStat, valid := markerInfo.Sys().(*syscall.Stat_t)
+		if markerInfo.Mode()&os.ModeSymlink != 0 || !markerInfo.Mode().IsRegular() || markerInfo.Mode().Perm()&0o077 != 0 || !valid || markerStat.Uid != uint32(os.Geteuid()) {
+			return "", errors.New("enforcement marker has unsafe type, permissions, or ownership")
+		}
+		if !databaseExists || databaseSize == 0 {
+			return "", errors.New("state database is missing while firewall enforcement is enabled; restore state instead of creating an empty database")
+		}
+	} else if !errors.Is(markerErr, os.ErrNotExist) {
+		return "", fmt.Errorf("stat enforcement marker: %w", markerErr)
 	}
 	f, err := os.OpenFile(abs, os.O_CREATE|os.O_RDWR, 0o600)
 	if err != nil {
@@ -175,6 +213,9 @@ func (s *Store) migrate(ctx context.Context) error {
 	var version int
 	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),0) FROM schema_migrations").Scan(&version); err != nil {
 		return err
+	}
+	if version > currentSchemaVersion {
+		return fmt.Errorf("state schema version %d is newer than supported version %d", version, currentSchemaVersion)
 	}
 	if version < 1 {
 		_, err = tx.ExecContext(ctx, `
@@ -248,6 +289,15 @@ func (s *Store) NextGeneration(ctx context.Context) (uint64, error) {
 }
 
 func (s *Store) SaveGeneration(ctx context.Context, id uint64, checksum, script string, previous *uint64, deadline *time.Time) error {
+	if id == 0 {
+		return errors.New("generation id must be positive")
+	}
+	if len(script) > maxActiveSnapshot {
+		return errors.New("generation script exceeds 32 MiB")
+	}
+	if !validScriptChecksum(script, checksum) {
+		return errors.New("generation script checksum is invalid")
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	genDir := filepath.Join(s.Dir, "generations")
@@ -407,8 +457,12 @@ func (s *Store) ReadScript(g *Generation) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 || info.Size() > maxActiveSnapshot {
 		return "", errors.New("generation script has unsafe type or permissions")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return "", errors.New("generation script has unsafe ownership")
 	}
 	b, err := os.ReadFile(abs)
 	if err != nil {
@@ -516,6 +570,34 @@ func (s *Store) RemoveClaim(ctx context.Context, id int64, actor string) error {
 	return s.Audit(ctx, actor, "claim_removed", fmt.Sprintf("id=%d", id))
 }
 
+// RemoveOperatorClaim prevents the manual control API from deleting claims
+// owned by integrations. Integration claims are replaced atomically by source.
+func (s *Store) RemoveOperatorClaim(ctx context.Context, id int64, actor, kind string) error {
+	if id <= 0 {
+		return errors.New("claim id must be positive")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var source string
+	if err := tx.QueryRowContext(ctx, "SELECT source FROM claims WHERE id=?", id).Scan(&source); err != nil {
+		return err
+	}
+	allowed := kind == "block" && source == "manual" || kind == "allow" && isAllowSource(source)
+	if !allowed {
+		return fmt.Errorf("claim %d with source %s cannot be removed as %s", id, source, kind)
+	}
+	if _, err := tx.ExecContext(ctx, "DELETE FROM claims WHERE id=?", id); err != nil {
+		return err
+	}
+	if _, err := tx.ExecContext(ctx, "INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)", time.Now().UTC().Format(time.RFC3339Nano), actor, "claim_removed", fmt.Sprintf("id=%d", id)); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
 // ReplaceSourceClaims atomically replaces exactly one integration's claims.
 // Validation completes before the old claims are touched.
 func (s *Store) ReplaceSourceClaims(ctx context.Context, source, reason, actor string, addresses []string) (int, error) {
@@ -596,6 +678,34 @@ func (s *Store) Claims(ctx context.Context, now time.Time) ([]Claim, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	return scanClaims(rows)
+}
+
+func (s *Store) ClaimsPage(ctx context.Context, now time.Time, limit, offset int) ([]Claim, error) {
+	if limit < 1 || limit > 1000 || offset < 0 || offset > 1000000 {
+		return nil, errors.New("invalid claim page bounds")
+	}
+	rows, err := s.DB.QueryContext(ctx, `SELECT id,address,family,source,reason,actor,created_at,expires_at FROM claims WHERE expires_at IS NULL OR expires_at>? ORDER BY address,source,id LIMIT ? OFFSET ?`, now.UTC().Format(time.RFC3339Nano), limit, offset)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	return scanClaims(rows)
+}
+
+func (s *Store) ActiveClaimCount(ctx context.Context, now time.Time) (int, error) {
+	var count int
+	err := s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM claims WHERE expires_at IS NULL OR expires_at>?", now.UTC().Format(time.RFC3339Nano)).Scan(&count)
+	return count, err
+}
+
+type claimRows interface {
+	Next() bool
+	Scan(...any) error
+	Err() error
+}
+
+func scanClaims(rows claimRows) ([]Claim, error) {
 	result := []Claim{}
 	for rows.Next() {
 		var c Claim
@@ -604,12 +714,20 @@ func (s *Store) Claims(ctx context.Context, now time.Time) ([]Claim, error) {
 		if err := rows.Scan(&c.ID, &c.Address, &c.Family, &c.Source, &c.Reason, &c.Actor, &created, &expires); err != nil {
 			return nil, err
 		}
-		c.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
+		var err error
+		c.CreatedAt, err = time.Parse(time.RFC3339Nano, created)
+		if err != nil {
+			return nil, errors.New("claim has invalid creation timestamp")
+		}
 		if expires.Valid {
-			t, e := time.Parse(time.RFC3339Nano, expires.String)
-			if e == nil {
-				c.ExpiresAt = &t
+			t, parseErr := time.Parse(time.RFC3339Nano, expires.String)
+			if parseErr != nil {
+				return nil, errors.New("claim has invalid expiry timestamp")
 			}
+			c.ExpiresAt = &t
+		}
+		if err := ValidateClaim(c.Address, c.Family); err != nil {
+			return nil, fmt.Errorf("invalid persisted claim %d: %w", c.ID, err)
 		}
 		result = append(result, c)
 	}

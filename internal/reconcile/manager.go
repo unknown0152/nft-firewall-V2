@@ -3,9 +3,15 @@ package reconcile
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/compiler"
@@ -20,6 +26,7 @@ type Manager struct {
 	Now         func() time.Time
 	HealthCheck func(context.Context) error
 	SafeGuard   func(context.Context) error
+	mu          sync.Mutex
 }
 
 type Result struct {
@@ -33,9 +40,9 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 	if m == nil || m.Backend == nil || m.Store == nil {
 		return Result{}, errors.New("reconcile manager is not configured")
 	}
-	if pending, err := m.Store.Pending(ctx); err == nil && pending != nil {
-		return Result{}, fmt.Errorf("generation %d is still pending; commit or roll it back first", pending.ID)
-	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := m.requireNoPending(ctx); err != nil {
 		return Result{}, err
 	}
 	if safe {
@@ -45,6 +52,14 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 		if err := m.SafeGuard(ctx); err != nil {
 			return Result{}, fmt.Errorf("safe apply refused: %w", err)
 		}
+	}
+	release, err := m.acquireProcessLock()
+	if err != nil {
+		return Result{}, err
+	}
+	defer release()
+	if err := m.requireNoPending(ctx); err != nil {
+		return Result{}, err
 	}
 	now := time.Now
 	if m.Now != nil {
@@ -87,7 +102,7 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 	}
 	if m.HealthCheck != nil {
 		if err := m.HealthCheck(ctx); err != nil {
-			rollbackErr := m.Rollback(ctx, artifact.Generation)
+			rollbackErr := m.rollbackLocked(ctx, artifact.Generation)
 			_ = m.Store.Audit(ctx, "system", "generation_health_failed", fmt.Sprintf("generation=%d", artifact.Generation))
 			if rollbackErr != nil {
 				return Result{}, fmt.Errorf("candidate health check failed: %w; rollback also failed: %v", err, rollbackErr)
@@ -97,9 +112,7 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 	}
 	result := Result{Generation: artifact.Generation, Checksum: artifact.Checksum, Deadline: deadline, Committed: !safe}
 	if !safe {
-		if err := m.Store.Commit(ctx, artifact.Generation); err != nil {
-			_ = m.restore(ctx, previous)
-			_ = m.Store.MarkRolledBack(ctx, artifact.Generation)
+		if err := m.commitLocked(ctx, artifact.Generation); err != nil {
 			return Result{}, err
 		}
 	}
@@ -130,6 +143,16 @@ func (m *Manager) recordFingerprint(ctx context.Context, id uint64) error {
 }
 
 func (m *Manager) Commit(ctx context.Context, id uint64) error {
+	if m == nil || m.Backend == nil || m.Store == nil {
+		return errors.New("reconcile manager is not configured")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	release, err := m.acquireProcessLock()
+	if err != nil {
+		return err
+	}
+	defer release()
 	pending, err := m.Store.Pending(ctx)
 	if err != nil {
 		return err
@@ -140,38 +163,155 @@ func (m *Manager) Commit(ctx context.Context, id uint64) error {
 	if pending.Status != "applied" {
 		return fmt.Errorf("generation %d was persisted but not applied and cannot be committed", id)
 	}
-	return m.Store.Commit(ctx, id)
+	now := time.Now
+	if m.Now != nil {
+		now = m.Now
+	}
+	if pending.RollbackDeadline != nil && !now().UTC().Before(*pending.RollbackDeadline) {
+		if rollbackErr := m.rollbackLocked(ctx, id); rollbackErr != nil {
+			return fmt.Errorf("generation %d expired and rollback failed: %w", id, rollbackErr)
+		}
+		return fmt.Errorf("generation %d expired and was rolled back", id)
+	}
+	observedHash, err := m.Backend.Fingerprint(ctx)
+	if err != nil || pending.ObservedHash == "" || observedHash != pending.ObservedHash {
+		rollbackErr := m.rollbackLocked(ctx, id)
+		if rollbackErr != nil {
+			return fmt.Errorf("generation %d integrity verification failed and rollback failed: %v", id, rollbackErr)
+		}
+		return fmt.Errorf("generation %d integrity verification failed and was rolled back", id)
+	}
+	return m.commitLocked(ctx, id)
 }
 
-func (m *Manager) Rollback(ctx context.Context, id uint64) error {
+func (m *Manager) commitLocked(ctx context.Context, id uint64) error {
 	g, err := generationByID(m.Store, id)
 	if err != nil {
 		return err
 	}
+	script, err := m.Store.ReadScript(g)
+	if err != nil {
+		return fmt.Errorf("read committed generation: %w", err)
+	}
+	if err := m.Store.Commit(ctx, id); err != nil {
+		rollbackErr := m.rollbackLocked(ctx, id)
+		if rollbackErr != nil {
+			return fmt.Errorf("commit generation: %w; rollback also failed: %v", err, rollbackErr)
+		}
+		return fmt.Errorf("commit generation: %w; generation was rolled back", err)
+	}
+	if err := m.Store.PublishActive(script, g.Checksum); err != nil {
+		rollbackErr := m.rollbackLocked(ctx, id)
+		if rollbackErr != nil {
+			return fmt.Errorf("publish active boot snapshot: %w; rollback also failed: %v", err, rollbackErr)
+		}
+		return fmt.Errorf("publish active boot snapshot: %w; generation was rolled back", err)
+	}
+	return nil
+}
+
+func (m *Manager) Rollback(ctx context.Context, id uint64) error {
+	if m == nil || m.Backend == nil || m.Store == nil {
+		return errors.New("reconcile manager is not configured")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	release, err := m.acquireProcessLock()
+	if err != nil {
+		return err
+	}
+	defer release()
+	return m.rollbackLocked(ctx, id)
+}
+
+func (m *Manager) rollbackLocked(ctx context.Context, id uint64) error {
+	g, err := generationByID(m.Store, id)
+	if err != nil {
+		return err
+	}
+	if g.Status == "rolled_back" {
+		return nil
+	}
+	if g.Status == "committed" {
+		latest, latestErr := m.Store.LastKnownGood(ctx)
+		if latestErr != nil {
+			return latestErr
+		}
+		if latest.ID != id {
+			return fmt.Errorf("generation %d is historical; active committed generation is %d", id, latest.ID)
+		}
+	} else if g.Status != "pending" && g.Status != "applied" {
+		return fmt.Errorf("generation %d has unsupported rollback status %s", id, g.Status)
+	}
+	var previous *state.Generation
+	var previousScript string
 	if g.PreviousID == nil {
-		if err := m.Backend.DestroyOwned(ctx); err != nil {
-			return err
+		fallbackChecksum := sha256.Sum256([]byte(nft.EmergencyDenyScript))
+		if err := m.Store.PublishActive(nft.EmergencyDenyScript, hex.EncodeToString(fallbackChecksum[:])); err != nil {
+			return fmt.Errorf("publish first-generation rollback fallback: %w", err)
 		}
 	} else {
-		prev, err := generationByID(m.Store, *g.PreviousID)
+		previous, err = generationByID(m.Store, *g.PreviousID)
 		if err != nil {
 			return err
 		}
-		script, err := m.Store.ReadScript(prev)
+		previousScript, err = m.Store.ReadScript(previous)
 		if err != nil {
 			return err
 		}
-		if err := m.Backend.Apply(ctx, script); err != nil {
-			return err
+		// Publish the rollback target before changing the kernel. A crash at any
+		// later point will therefore restore the safer previous generation.
+		if err := m.Store.PublishActive(previousScript, previous.Checksum); err != nil {
+			return fmt.Errorf("publish rollback boot snapshot: %w", err)
 		}
 	}
-	if err := m.Store.MarkRolledBack(ctx, id); err != nil {
+	if previous == nil {
+		if err := m.Backend.DestroyOwned(ctx); err != nil {
+			m.restoreCommittedAfterFailedRollback(ctx, g)
+			return err
+		}
+	} else if err := m.Backend.Apply(ctx, previousScript); err != nil {
+		m.restoreCommittedAfterFailedRollback(ctx, g)
 		return err
+	}
+	if err := m.Store.MarkRolledBack(ctx, id); err != nil {
+		m.restoreCommittedAfterFailedRollback(ctx, g)
+		return err
+	}
+	if previous == nil {
+		// Clear only after the first generation is absent from the kernel and
+		// SQLite records the rollback. Until then, early boot restores the
+		// emergency default-deny snapshot published above.
+		if err := m.Store.ClearActive(); err != nil {
+			return fmt.Errorf("clear active boot snapshot: %w", err)
+		}
 	}
 	return m.Store.Audit(ctx, "system", "generation_rolled_back", fmt.Sprintf("generation=%d", id))
 }
 
+func (m *Manager) restoreCommittedAfterFailedRollback(ctx context.Context, g *state.Generation) {
+	if g == nil || g.Status != "committed" {
+		return
+	}
+	script, err := m.Store.ReadScript(g)
+	if err != nil {
+		return
+	}
+	_ = m.Store.PublishActive(script, g.Checksum)
+	_ = m.Backend.Apply(ctx, script)
+}
+
 func (m *Manager) RollbackExpired(ctx context.Context) (bool, error) {
+	if m == nil || m.Backend == nil || m.Store == nil {
+		return false, errors.New("reconcile manager is not configured")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	release, err := m.acquireProcessLock()
+	if err != nil {
+		return false, err
+	}
+	defer release()
 	pending, err := m.Store.Pending(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -186,7 +326,7 @@ func (m *Manager) RollbackExpired(ctx context.Context) (bool, error) {
 	if pending.RollbackDeadline == nil || now().UTC().Before(*pending.RollbackDeadline) {
 		return false, nil
 	}
-	if err := m.Rollback(ctx, pending.ID); err != nil {
+	if err := m.rollbackLocked(ctx, pending.ID); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -200,17 +340,28 @@ type Drift struct {
 }
 
 func (m *Manager) Reconcile(ctx context.Context, repair bool) (Drift, error) {
-	if pending, err := m.Store.Pending(ctx); err == nil && pending.Status == "pending" {
+	if m == nil || m.Backend == nil || m.Store == nil {
+		return Drift{}, errors.New("reconcile manager is not configured")
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	release, err := m.acquireProcessLock()
+	if err != nil {
+		return Drift{}, err
+	}
+	defer release()
+	pending, pendingErr := m.Store.Pending(ctx)
+	if pendingErr == nil && pending.Status == "pending" {
 		drift := Drift{Missing: true, Detail: fmt.Sprintf("generation %d was not fully applied before process exit", pending.ID)}
 		if repair {
-			if err := m.Rollback(ctx, pending.ID); err != nil {
+			if err := m.rollbackLocked(ctx, pending.ID); err != nil {
 				return drift, err
 			}
 			drift.Repaired = true
 		}
 		return drift, nil
-	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
-		return Drift{}, err
+	} else if pendingErr != nil && !errors.Is(pendingErr, sql.ErrNoRows) {
+		return Drift{}, pendingErr
 	}
 	observed, err := m.Backend.ListOwned(ctx)
 	if err != nil {
@@ -253,6 +404,14 @@ func (m *Manager) Reconcile(ctx context.Context, repair bool) (Drift, error) {
 	}
 	if d.Missing && repair {
 		_ = m.Store.Audit(ctx, "system", "drift_detected", d.Detail)
+		if pendingErr == nil && pending.Status == "applied" {
+			if err := m.rollbackLocked(ctx, pending.ID); err != nil {
+				return d, err
+			}
+			d.Repaired = true
+			d.Detail = fmt.Sprintf("pending generation %d lost integrity and was rolled back", pending.ID)
+			return d, nil
+		}
 		g := expected
 		if g == nil {
 			g, err = m.Store.LastKnownGood(ctx)
@@ -276,6 +435,52 @@ func (m *Manager) Reconcile(ctx context.Context, repair bool) (Drift, error) {
 		_ = m.Store.Audit(ctx, "system", "drift_detected", d.Detail)
 	}
 	return d, nil
+}
+
+func (m *Manager) requireNoPending(ctx context.Context) error {
+	pending, err := m.Store.Pending(ctx)
+	if err == nil {
+		return fmt.Errorf("generation %d is still pending; commit or roll it back first", pending.ID)
+	}
+	if !errors.Is(err, sql.ErrNoRows) {
+		return err
+	}
+	return nil
+}
+
+func (m *Manager) acquireProcessLock() (func(), error) {
+	path := filepath.Join(m.Store.Dir, ".controller.lock")
+	if info, err := os.Lstat(path); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular()) {
+		return nil, errors.New("controller lock path is not a regular file")
+	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, err
+	}
+	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, fmt.Errorf("open controller lock: %w", err)
+	}
+	info, err := file.Stat()
+	if err != nil || !info.Mode().IsRegular() {
+		file.Close()
+		return nil, errors.New("controller lock is not a regular file")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		file.Close()
+		return nil, errors.New("controller lock has unsafe ownership")
+	}
+	if err := file.Chmod(0o600); err != nil {
+		file.Close()
+		return nil, err
+	}
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
+		file.Close()
+		return nil, fmt.Errorf("lock controller state: %w", err)
+	}
+	return func() {
+		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+		_ = file.Close()
+	}, nil
 }
 
 func (m *Manager) expectedGeneration(ctx context.Context) (*state.Generation, error) {

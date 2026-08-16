@@ -91,9 +91,10 @@ type WireGuardConfig struct {
 }
 
 type RuntimeConfig struct {
-	MaxBlockClaims   int `toml:"max_block_claims"`
-	MaxSetMembers    int `toml:"max_set_members"`
-	SafeApplySeconds int `toml:"safe_apply_timeout_seconds"`
+	MaxBlockClaims   int      `toml:"max_block_claims"`
+	MaxSetMembers    int      `toml:"max_set_members"`
+	SafeApplySeconds int      `toml:"safe_apply_timeout_seconds"`
+	TrustedServices  []string `toml:"trusted_services"`
 }
 
 type StateConfig struct {
@@ -252,6 +253,9 @@ func Validate(c Config) error {
 	}
 	if c.Runtime.SafeApplySeconds < 30 || c.Runtime.SafeApplySeconds > 600 {
 		return fmt.Errorf("runtime.safe_apply_timeout_seconds must be 30..600")
+	}
+	if len(c.Runtime.TrustedServices) > 32 {
+		return errors.New("runtime.trusted_services exceeds 32 entries")
 	}
 	if !filepath.IsAbs(c.State.Directory) || filepath.Clean(c.State.Directory) == "/" {
 		return errors.New("state.directory must be an absolute non-root directory")
@@ -414,6 +418,20 @@ func Validate(c Config) error {
 		}
 		services[s.Name] = s
 	}
+	trustedSeen := map[string]bool{}
+	for _, name := range c.Runtime.TrustedServices {
+		service, ok := services[name]
+		if !ok {
+			return fmt.Errorf("runtime.trusted_services references unknown service %q", name)
+		}
+		if trustedSeen[name] {
+			return fmt.Errorf("runtime.trusted_services contains duplicate service %q", name)
+		}
+		if service.Protocol != "tcp" && service.Protocol != "udp" {
+			return fmt.Errorf("runtime.trusted_services service %q must use tcp or udp", name)
+		}
+		trustedSeen[name] = true
+	}
 	policyNames := map[string]bool{}
 	policyFlows := map[string]string{}
 	for _, p := range c.Policies {
@@ -436,6 +454,19 @@ func Validate(c Config) error {
 		}
 		if _, ok := services[p.Service]; !ok {
 			return fmt.Errorf("policy %s references unknown service %q", p.Name, p.Service)
+		}
+		if (p.From == "host" || p.From == "any") && p.To != "host" && p.To != "any" {
+			destination := zones[p.To]
+			for _, interfaceName := range destination.Interfaces {
+				if interfaces[interfaceName].Role == "uplink" {
+					return fmt.Errorf("policy %s cannot use an uplink interface as a host destination zone", p.Name)
+				}
+			}
+			for _, configured := range c.Interfaces {
+				if configured.Zone == p.To && configured.Role == "uplink" {
+					return fmt.Errorf("policy %s cannot use an uplink interface as a host destination zone", p.Name)
+				}
+			}
 		}
 		flow := p.From + "\x00" + p.To + "\x00" + p.Service
 		if previous, ok := policyFlows[flow]; ok {
@@ -517,8 +548,12 @@ func Validate(c Config) error {
 		markBase = 16
 		markValue = strings.TrimPrefix(markValue, "0x")
 	}
-	if _, err := strconv.ParseUint(markValue, markBase, 32); err != nil {
+	parsedMark, err := strconv.ParseUint(markValue, markBase, 32)
+	if err != nil {
 		return fmt.Errorf("wireguard.fwmark %q exceeds 32 bits", c.WireGuard.Fwmark)
+	}
+	if parsedMark == 0 {
+		return errors.New("wireguard.fwmark must be nonzero so bootstrap traffic cannot match ordinary unmarked UDP")
 	}
 	if c.WireGuard.KeepRecent < 0 || c.WireGuard.KeepRecent > 16 {
 		return errors.New("wireguard.keep_recent must be 0..16")
@@ -526,8 +561,14 @@ func Validate(c Config) error {
 	if c.WireGuard.TCPMSS < 536 || c.WireGuard.TCPMSS > 8960 {
 		return errors.New("wireguard.tcp_mss must be 536..8960")
 	}
-	if c.WireGuard.EndpointHost != "" && net.ParseIP(c.WireGuard.EndpointHost) == nil && !validHostname(c.WireGuard.EndpointHost) {
-		return fmt.Errorf("wireguard.endpoint_host %q is invalid", c.WireGuard.EndpointHost)
+	if c.WireGuard.EndpointHost != "" {
+		if endpoint, err := netip.ParseAddr(c.WireGuard.EndpointHost); err == nil {
+			if !validEndpointAddress(endpoint) {
+				return fmt.Errorf("wireguard.endpoint_host %q is not a usable unicast endpoint", c.WireGuard.EndpointHost)
+			}
+		} else if !validHostname(c.WireGuard.EndpointHost) {
+			return fmt.Errorf("wireguard.endpoint_host %q is invalid", c.WireGuard.EndpointHost)
+		}
 	}
 	if len(c.WireGuard.BootstrapIPs)+len(c.WireGuard.BootstrapIPsV6) > 64 || len(c.WireGuard.BootstrapHosts) > 16 {
 		return errors.New("WireGuard bootstrap endpoint limits exceeded (64 addresses, 16 hosts)")
@@ -537,7 +578,7 @@ func Validate(c Config) error {
 			return fmt.Errorf("wireguard.bootstrap_ips: %w", err)
 		}
 		prefix, _ := netip.ParsePrefix(raw)
-		if !prefix.Addr().Is4() || prefix.Bits() != 32 {
+		if !prefix.Addr().Is4() || prefix.Bits() != 32 || !validEndpointAddress(prefix.Addr()) {
 			return fmt.Errorf("wireguard.bootstrap_ips requires IPv4 host prefixes, got %q", raw)
 		}
 	}
@@ -546,7 +587,7 @@ func Validate(c Config) error {
 			return fmt.Errorf("wireguard.bootstrap_ips_v6: %w", err)
 		}
 		prefix, _ := netip.ParsePrefix(raw)
-		if !prefix.Addr().Is6() || prefix.Bits() != 128 {
+		if !prefix.Addr().Is6() || prefix.Bits() != 128 || !validEndpointAddress(prefix.Addr()) {
 			return fmt.Errorf("wireguard.bootstrap_ips_v6 requires IPv6 host prefixes, got %q", raw)
 		}
 	}
@@ -567,6 +608,10 @@ func Validate(c Config) error {
 		return errors.New("strict VPN mode requires wireguard.interface")
 	}
 	return nil
+}
+
+func validEndpointAddress(address netip.Addr) bool {
+	return address.IsValid() && !address.IsUnspecified() && !address.IsMulticast() && !address.IsLoopback() && !address.IsLinkLocalUnicast()
 }
 
 func validateCIDR(raw string, allowHost bool) error {

@@ -76,6 +76,7 @@ handshake_timeout_seconds = 180
 max_block_claims = 100000
 max_set_members = 65536
 safe_apply_timeout_seconds = 90
+trusted_services = ["ssh"] # exact services a temporary `allow` lease may open
 
 [state]
 directory = "/var/lib/nftfw"

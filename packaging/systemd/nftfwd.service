@@ -1,6 +1,9 @@
 [Unit]
 Description=NFT Firewall V2 privileged reconciler
-After=local-fs.target network-pre.target
+StartLimitIntervalSec=60s
+StartLimitBurst=20
+After=local-fs.target nftfw-early.service network-pre.target
+Requires=nftfw-early.service
 Wants=network-pre.target
 Before=network.target
 

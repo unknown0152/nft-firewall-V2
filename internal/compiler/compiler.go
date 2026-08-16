@@ -25,8 +25,6 @@ type Input struct {
 	Policy      policy.Effective
 	BlockedV4   []string
 	BlockedV6   []string
-	TrustedV4   []string
-	TrustedV6   []string
 	BootstrapV4 []string
 	BootstrapV6 []string
 	DockerNets  []string
@@ -48,7 +46,6 @@ func Compile(in Input, generation uint64) (Artifact, error) {
 		values       []string
 	}{
 		{"blocked_v4", "ipv4", in.BlockedV4}, {"blocked_v6", "ipv6", in.BlockedV6},
-		{"trusted_v4", "ipv4", in.TrustedV4}, {"trusted_v6", "ipv6", in.TrustedV6},
 		{"wg_bootstrap_v4", "ipv4", in.BootstrapV4}, {"wg_bootstrap_v6", "ipv6", in.BootstrapV6},
 		{"docker_nets", "ipv4", in.DockerNets},
 		{"docker_nets6", "ipv6", in.DockerNets6},
@@ -103,8 +100,10 @@ func emitFilter(b *strings.Builder, in Input) {
 	line("table inet " + FilterTable + " {")
 	emitSet(b, "blocked_v4", "ipv4_addr", in.BlockedV4, false)
 	emitSet(b, "blocked_v6", "ipv6_addr", in.BlockedV6, false)
-	emitSet(b, "trusted_v4", "ipv4_addr", in.TrustedV4, true)
-	emitSet(b, "trusted_v6", "ipv6_addr", in.TrustedV6, true)
+	// Trusted leases are intentionally absent from committed generations.
+	// Runtime reconciliation installs them with kernel-enforced expirations.
+	emitSet(b, "trusted_v4", "ipv4_addr", nil, true)
+	emitSet(b, "trusted_v6", "ipv6_addr", nil, true)
 	emitSet(b, "wg_bootstrap_v4", "ipv4_addr", in.BootstrapV4, false)
 	emitSet(b, "wg_bootstrap_v6", "ipv6_addr", in.BootstrapV6, false)
 	emitSet(b, "docker_nets", "ipv4_addr", in.DockerNets, false)
@@ -118,9 +117,11 @@ func emitFilter(b *strings.Builder, in Input) {
 	if c.System.IPv6Mode != "disabled" {
 		line("        ip6 hoplimit 255 meta l4proto ipv6-icmp icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } accept comment \"nftfw:ipv6-neighbor-discovery\"")
 	}
-	if ports := trustedPorts(in.Policy); len(ports) > 0 {
-		line("        ip saddr @trusted_v4 tcp dport { " + strings.Join(ports, ", ") + " } accept comment \"nftfw:trusted-services-v4\"")
-		line("        ip6 saddr @trusted_v6 tcp dport { " + strings.Join(ports, ", ") + " } accept comment \"nftfw:trusted-services-v6\"")
+	for _, protocol := range []string{"tcp", "udp"} {
+		if ports := trustedPorts(in.Policy, protocol); len(ports) > 0 {
+			line("        ip saddr @trusted_v4 " + protocol + " dport { " + strings.Join(ports, ", ") + " } accept comment \"nftfw:trusted-services-v4-" + protocol + "\"")
+			line("        ip6 saddr @trusted_v6 " + protocol + " dport { " + strings.Join(ports, ", ") + " } accept comment \"nftfw:trusted-services-v6-" + protocol + "\"")
+		}
 	}
 	emitPolicies(b, in.Policy, "input", "deny")
 	line("        ct state established,related accept comment \"nftfw:input-established\"")
@@ -322,7 +323,7 @@ func emitPolicyRules(b *strings.Builder, p config.Policy, svc config.Service, e 
 	if chain == "output" {
 		for _, dst := range zoneSelectors(p.To, "destination", e) {
 			prefix := "        " + dst.Expression + " "
-			if p.To == "any" {
+			if p.To == "any" || dst.RequiresVPN {
 				prefix += "oifname " + strconv.Quote(e.Config.WireGuard.Interface) + " "
 			}
 			b.WriteString(prefix + serviceExpr(svc, dst.Family) + " " + verdict + " comment " + quoteString("nftfw-policy:"+p.Name) + "\n")
@@ -361,8 +362,9 @@ func emitPolicyRules(b *strings.Builder, p config.Policy, svc config.Service, e 
 }
 
 type zoneSelector struct {
-	Expression string
-	Family     string
+	Expression  string
+	Family      string
+	RequiresVPN bool
 }
 
 func zoneSelectors(name, direction string, e policy.Effective) []zoneSelector {
@@ -392,7 +394,7 @@ func zoneSelectors(name, direction string, e policy.Effective) []zoneSelector {
 		}
 	}
 	for _, network := range zone.Networks {
-		add(zoneSelector{Expression: addressMatch(network, addressDirection), Family: familyExpr(network)})
+		add(zoneSelector{Expression: addressMatch(network, addressDirection), Family: familyExpr(network), RequiresVPN: destinationRequiresVPN(network)})
 	}
 	interfaces := append([]string(nil), zone.Interfaces...)
 	for _, configured := range e.Config.Interfaces {
@@ -407,6 +409,15 @@ func zoneSelectors(name, direction string, e policy.Effective) []zoneSelector {
 		add(zoneSelector{Expression: interfaceDirection + " " + quoted + " meta nfproto ipv6", Family: "ip6"})
 	}
 	return result
+}
+
+func destinationRequiresVPN(raw string) bool {
+	prefix, err := netip.ParsePrefix(raw)
+	if err != nil {
+		return true
+	}
+	address := prefix.Addr()
+	return !address.IsPrivate() && !address.IsLinkLocalUnicast() && !address.IsLoopback()
 }
 
 func serviceExpr(s config.Service, family string) string {
@@ -425,13 +436,15 @@ func serviceExpr(s config.Service, family string) string {
 	return s.Protocol + " dport { " + strings.Join(values, ", ") + " }"
 }
 
-func trustedPorts(e policy.Effective) []string {
+func trustedPorts(e policy.Effective, protocol string) []string {
 	seen := map[int]bool{}
-	for _, svc := range e.Svcs {
-		if svc.Protocol == "tcp" {
-			for _, p := range svc.Ports {
-				seen[p] = true
-			}
+	for _, name := range e.Config.Runtime.TrustedServices {
+		svc, ok := e.Svcs[name]
+		if !ok || svc.Protocol != protocol {
+			continue
+		}
+		for _, p := range svc.Ports {
+			seen[p] = true
 		}
 	}
 	values := make([]int, 0, len(seen))

@@ -12,6 +12,8 @@ func TestSystemdGuardRequiresEnabledAndActiveTimer(t *testing.T) {
 	guard := SystemdGuard{Run: func(_ context.Context, args ...string) error {
 		calls = append(calls, append([]string(nil), args...))
 		return nil
+	}, Inspect: func(context.Context, ...string) (string, error) {
+		return "argv[]=/usr/lib/nftfw/nftfwd --rollback-expired --state-db /var/lib/nftfw/state.db ;", nil
 	}}
 	if err := guard.Verify(context.Background()); err != nil {
 		t.Fatal(err)
@@ -37,5 +39,20 @@ func TestSystemdGuardRequiresEnabledAndActiveTimer(t *testing.T) {
 	}
 	if err := guard.Verify(context.Background()); err == nil {
 		t.Fatal("failed rollback service preflight accepted")
+	}
+	guard.Run = func(context.Context, ...string) error { return nil }
+	guard.StateDB = "/var/lib/nftfw/other.db"
+	if err := guard.Verify(context.Background()); err == nil {
+		t.Fatal("rollback service protecting a different database was accepted")
+	}
+}
+
+func TestExecStartStateDBMatchIsExact(t *testing.T) {
+	line := "argv[]=/usr/lib/nftfw/nftfwd --rollback-expired --state-db /var/lib/nftfw/state.db ;"
+	if !execStartUsesStateDB(line, "/var/lib/nftfw/state.db") {
+		t.Fatal("exact rollback database was not recognized")
+	}
+	if execStartUsesStateDB(line, "/var/lib/nftfw/state") {
+		t.Fatal("partial rollback database match was accepted")
 	}
 }

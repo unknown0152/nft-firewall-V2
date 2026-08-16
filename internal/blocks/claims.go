@@ -63,10 +63,21 @@ func (s Service) AddAllow(ctx context.Context, address, reason, actor string, ex
 }
 
 func (s Service) Remove(ctx context.Context, id int64, actor string) error {
+	return s.RemoveBlock(ctx, id, actor)
+}
+
+func (s Service) RemoveBlock(ctx context.Context, id int64, actor string) error {
 	if s.Store == nil {
 		return fmt.Errorf("claim store is unavailable")
 	}
-	return s.Store.RemoveClaim(ctx, id, actor)
+	return s.Store.RemoveOperatorClaim(ctx, id, actor, "block")
+}
+
+func (s Service) RemoveAllow(ctx context.Context, id int64, actor string) error {
+	if s.Store == nil {
+		return fmt.Errorf("claim store is unavailable")
+	}
+	return s.Store.RemoveOperatorClaim(ctx, id, actor, "allow")
 }
 
 func (s Service) Effective(ctx context.Context) (v4, v6 []string, err error) {

@@ -20,6 +20,10 @@ func TestExplainUsesCompilerModel(t *testing.T) {
 	if d.Action != "allow" || d.Matched == nil || d.Matched.Name != "lan-ssh" {
 		t.Fatalf("unexpected allow: %#v", d)
 	}
+	d = e.Explain(Query{From: "lan", To: "host", Protocol: "tcp", Port: 22})
+	if d.Action != "allow" || d.SourceZone != "lan" {
+		t.Fatalf("named source zone was not explained: %#v", d)
+	}
 	d = e.Explain(Query{From: "203.0.113.5", To: "host", Protocol: "tcp", Port: 22})
 	if d.Action != "deny" || d.Matched != nil {
 		t.Fatalf("unexpected deny: %#v", d)

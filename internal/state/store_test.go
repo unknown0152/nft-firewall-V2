@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -56,6 +57,33 @@ func TestClaimProvenanceUnion(t *testing.T) {
 	claims, _ = s.Claims(ctx, time.Now())
 	if got := EffectiveAddresses(claims, "ipv4"); len(got) != 0 {
 		t.Fatalf("address remained after its final claim was removed: %v", got)
+	}
+}
+
+func TestClaimPaginationAndInvalidRecordHandling(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	for _, address := range []string{"192.0.2.1/32", "192.0.2.2/32", "192.0.2.3/32"} {
+		if _, err := s.AddClaim(ctx, Claim{Address: address, Family: "ipv4", Source: "manual", Actor: "test"}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	page, err := s.ClaimsPage(ctx, time.Now().UTC(), 1, 1)
+	if err != nil || len(page) != 1 || page[0].Address != "192.0.2.2/32" {
+		t.Fatalf("unexpected claim page: %#v %v", page, err)
+	}
+	if total, err := s.ActiveClaimCount(ctx, time.Now().UTC()); err != nil || total != 3 {
+		t.Fatalf("unexpected active claim count: %d %v", total, err)
+	}
+	if _, err := s.DB.ExecContext(ctx, `INSERT INTO claims(address,family,source,reason,actor,created_at) VALUES('invalid','ipv4','manual','bad','test','not-a-time')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Claims(ctx, time.Now().UTC()); err == nil {
+		t.Fatal("invalid persisted claim was silently accepted")
 	}
 }
 
@@ -149,6 +177,30 @@ func TestMigrationAndCorruptDatabase(t *testing.T) {
 	}
 }
 
+func TestOpenRejectsNewerSchemaAndDSNFilename(t *testing.T) {
+	dir := t.TempDir()
+	if store, err := Open(context.Background(), filepath.Join(dir, "state.db?mode=memory")); err == nil {
+		store.Close()
+		t.Fatal("SQLite DSN characters in state filename accepted")
+	}
+	path := filepath.Join(dir, "future.db")
+	db, err := sql.Open("sqlite", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec(`CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL); INSERT INTO schema_migrations VALUES(99, 'now')`); err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := Open(context.Background(), path); err == nil {
+		store.Close()
+		t.Fatal("newer state schema accepted")
+	}
+}
+
 func TestGenerationIntegrityAndSQLiteBackup(t *testing.T) {
 	ctx := context.Background()
 	dir := t.TempDir()
@@ -162,6 +214,12 @@ func TestGenerationIntegrityAndSQLiteBackup(t *testing.T) {
 		t.Fatalf("state database mode is not 0600: info=%v err=%v", info, err)
 	}
 	script := "table inet nftfw_filter { }\n"
+	if err := s.SaveGeneration(ctx, 0, testChecksum(script), script, nil, nil); err == nil {
+		t.Fatal("zero generation id accepted")
+	}
+	if err := s.SaveGeneration(ctx, 1, strings.Repeat("0", 64), script, nil, nil); err == nil {
+		t.Fatal("generation with mismatched checksum accepted")
+	}
 	if err := s.SaveGeneration(ctx, 1, testChecksum(script), script, nil, nil); err != nil {
 		t.Fatal(err)
 	}
@@ -171,6 +229,15 @@ func TestGenerationIntegrityAndSQLiteBackup(t *testing.T) {
 	}
 	if got, err := s.ReadScript(g); err != nil || got != script {
 		t.Fatalf("valid generation rejected: got=%q err=%v", got, err)
+	}
+	if err := os.Chmod(g.ScriptPath, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReadScript(g); err == nil {
+		t.Fatal("group-readable generation script accepted")
+	}
+	if err := os.Chmod(g.ScriptPath, 0o600); err != nil {
+		t.Fatal(err)
 	}
 	backup := filepath.Join(dir, "backups", "state.db")
 	if err := s.Backup(ctx, backup); err != nil {

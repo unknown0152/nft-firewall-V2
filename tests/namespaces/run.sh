@@ -178,6 +178,11 @@ endpoint_port = 51820
 fwmark = "0xca6c"
 bootstrap_ips = ["198.18.0.6/32"]
 bootstrap_ips_v6 = []
+[runtime]
+max_block_claims = 100000
+max_set_members = 65536
+safe_apply_timeout_seconds = 90
+trusted_services = ["active-tcp"]
 [state]
 directory = "/tmp/nftfw-lab-state"
 database = "/tmp/nftfw-lab-state/state.db"
@@ -188,10 +193,56 @@ root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
 flow_probe="$root_dir/tests/namespaces/flow_probe.py"
 case "$(uname -m)" in x86_64) build_arch=amd64 ;; aarch64|arm64) build_arch=arm64 ;; *) echo "BLOCKED: unsupported test architecture"; exit 77 ;; esac
 nftfw_bin="$root_dir/dist/nftfw-linux-$build_arch"
+nftfwd_bin="$root_dir/dist/nftfwd-linux-$build_arch"
 nftfw_local=(env NFTFW_CONFIG="$lab_tmp/nftfw.toml" NFTFW_STATE_DB="$lab_tmp/state.db" NFTFW_CONTROL_SOCKET="$lab_tmp/no-control.sock" NFTFW_LOCAL=1 "$nftfw_bin")
 ip netns exec "$host_ns" "${nftfw_local[@]}" apply --unsafe >/dev/null
 ip netns exec "$host_ns" "${nftfw_local[@]}" apply --unsafe >/dev/null
 echo "ATOMIC REPEATED APPLY: PASS"
+
+ip netns exec "$host_ns" "${nftfw_local[@]}" allow add 198.18.0.100/32 --ttl 30s >/dev/null
+ip netns exec "$host_ns" nft list set inet nftfw_filter trusted_v4 | grep -F '198.18.0.100' >/dev/null
+
+owned_families=(inet ip ip6)
+owned_names=(nftfw_filter nftfw_nat nftfw_filter6)
+for index in "${!owned_names[@]}"; do
+    ip netns exec "$host_ns" nft delete table "${owned_families[$index]}" "${owned_names[$index]}"
+done
+ip netns exec "$host_ns" "$nftfwd_bin" --restore-active --state-dir "$lab_tmp" >/dev/null
+for index in "${!owned_names[@]}"; do
+    ip netns exec "$host_ns" nft list table "${owned_families[$index]}" "${owned_names[$index]}" >/dev/null
+done
+if ip netns exec "$host_ns" nft list set inet nftfw_filter trusted_v4 | grep -F '198.18.0.100' >/dev/null; then
+    echo "FAIL: early boot replayed a runtime access lease"
+    exit 1
+fi
+echo "EARLY BOOT ACTIVE SNAPSHOT RESTORE: PASS"
+echo "EARLY BOOT TRUST LEASE REPLAY PREVENTION: PASS"
+
+corrupt_state="$lab_tmp/corrupt-state"
+install -d -m 0700 "$corrupt_state"
+install -m 0600 "$lab_tmp/enforcement-enabled" "$corrupt_state/enforcement-enabled"
+printf '{"damaged":true}\n' >"$corrupt_state/active.snapshot.json"
+chmod 0600 "$corrupt_state/active.snapshot.json"
+if ip netns exec "$host_ns" "$nftfwd_bin" --restore-active --state-dir "$corrupt_state" >/dev/null 2>&1; then
+    echo "FAIL: corrupt boot snapshot was accepted"
+    exit 1
+fi
+ip netns exec "$host_ns" nft list chain inet nftfw_filter output | grep -F 'policy drop' >/dev/null
+if ip netns exec "$host_ns" nft list chain inet nftfw_filter output | grep -F 'accept' | grep -v 'oifname "lo"' >/dev/null; then
+    echo "FAIL: emergency boot policy contains non-loopback output acceptance"
+    exit 1
+fi
+ip netns exec "$host_ns" "$nftfwd_bin" --restore-active --state-dir "$lab_tmp" >/dev/null
+echo "CORRUPT BOOT SNAPSHOT FAIL-CLOSED: PASS"
+
+ip netns exec "$host_ns" "${nftfw_local[@]}" allow add 198.18.0.101/32 --ttl 2s >/dev/null
+ip netns exec "$host_ns" nft list set inet nftfw_filter trusted_v4 | grep -F '198.18.0.101' | grep -F 'timeout' >/dev/null
+sleep 3
+if ip netns exec "$host_ns" nft list set inet nftfw_filter trusted_v4 | grep -F '198.18.0.101' >/dev/null; then
+    echo "FAIL: kernel did not expire a temporary access lease"
+    exit 1
+fi
+echo "KERNEL-ENFORCED ACCESS LEASE EXPIRY: PASS"
 
 ip netns exec "$host_ns" nft -f - <<'NFT'
 table inet third_party_test {

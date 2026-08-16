@@ -52,9 +52,17 @@ func run(args []string) error {
 	}
 	switch args[0] {
 	case "version":
-		return printJSONOr(version.Current(), has(args, "--json"))
+		if len(args) > 2 || (len(args) == 2 && args[1] != "--json") {
+			return errors.New("usage: nftfw version [--json]")
+		}
+		info := version.Current()
+		if has(args, "--json") {
+			return printJSONOr(info, true)
+		}
+		fmt.Printf("nftfw %s (commit %s, built %s)\n", info.Version, info.Commit, info.Date)
+		return nil
 	case "config":
-		if len(args) < 2 || args[1] != "validate" {
+		if len(args) < 2 || len(args) > 3 || args[1] != "validate" {
 			return errors.New("usage: nftfw config validate [path]")
 		}
 		path := configPath
@@ -103,6 +111,9 @@ func run(args []string) error {
 		}
 		return nil
 	case "apply":
+		if len(args) > 2 {
+			return errors.New("usage: nftfw apply [--safe|--unsafe]")
+		}
 		for _, arg := range args[1:] {
 			if arg != "--safe" && arg != "--unsafe" {
 				return fmt.Errorf("unknown apply option %q", arg)
@@ -112,12 +123,9 @@ func run(args []string) error {
 			return errors.New("apply accepts only one of --safe or --unsafe")
 		}
 		safe := !has(args, "--unsafe")
-		return controlOrLocal(controlSock, configPath, api.Request{Op: "apply", Safe: safe}, func(rt *app.Runtime) (any, error) {
-			a, e := rt.Artifact(context.Background())
-			if e != nil {
-				return nil, e
-			}
-			return rt.Manager.Apply(context.Background(), a, safe)
+		request := api.Request{Op: "apply", Safe: safe, Unsafe: !safe}
+		return controlOrLocal(controlSock, configPath, request, func(rt *app.Runtime) (any, error) {
+			return rt.Control(context.Background(), request)
 		})
 	case "commit":
 		id, err := parseID(args, 1)
@@ -132,10 +140,16 @@ func run(args []string) error {
 		}
 		return controlOrLocal(controlSock, configPath, api.Request{Op: "rollback", Generation: id}, func(rt *app.Runtime) (any, error) { return nil, rt.Manager.Rollback(context.Background(), id) })
 	case "reconcile":
+		if len(args) != 1 {
+			return errors.New("usage: nftfw reconcile")
+		}
 		return controlOrLocal(controlSock, configPath, api.Request{Op: "reconcile"}, func(rt *app.Runtime) (any, error) {
 			return rt.Manager.Reconcile(context.Background(), true)
 		})
 	case "status", "health":
+		if len(args) > 2 || (len(args) == 2 && args[1] != "--json") {
+			return fmt.Errorf("usage: nftfw %s [--json]", args[0])
+		}
 		resp, err := api.Call(context.Background(), statusSock, api.Request{Op: "status"})
 		if err != nil {
 			return err
@@ -157,10 +171,16 @@ func run(args []string) error {
 		}
 		return nil
 	case "doctor":
+		if len(args) != 1 {
+			return errors.New("usage: nftfw doctor")
+		}
 		return doctor(configPath)
 	case "explain":
 		return explain(configPath, args[1:])
 	case "audit":
+		if len(args) != 1 {
+			return errors.New("usage: nftfw audit")
+		}
 		resp, err := api.Call(context.Background(), controlSock, api.Request{Op: "audit"})
 		if err != nil {
 			return err
@@ -171,9 +191,9 @@ func run(args []string) error {
 	case "block":
 		return claimSubcommand(controlSock, configPath, args[1:], "block-add", "block-remove")
 	case "allow":
-		return claimSubcommand(controlSock, configPath, args[1:], "allow-add", "block-remove")
+		return claimSubcommand(controlSock, configPath, args[1:], "allow-add", "allow-remove")
 	case "wg":
-		if len(args) < 2 {
+		if len(args) != 2 {
 			return errors.New("usage: nftfw wg <status|refresh>")
 		}
 		if args[1] == "refresh" {
@@ -327,7 +347,7 @@ func doctor(path string) error {
 	if err := nft.New(nil).CheckCandidate(context.Background(), artifact.Script); err != nil {
 		return fmt.Errorf("kernel candidate validation failed: %w", err)
 	}
-	if err := (recovery.SystemdGuard{}).Verify(context.Background()); err != nil {
+	if err := (recovery.SystemdGuard{StateDB: c.State.Database}).Verify(context.Background()); err != nil {
 		return fmt.Errorf("safe-apply rollback guard: %w", err)
 	}
 	fmt.Println("[ok] configuration schema and semantics")
@@ -337,7 +357,22 @@ func doctor(path string) error {
 	if _, err := net.InterfaceByName(c.WireGuard.Interface); err != nil {
 		fmt.Printf("[warn] WireGuard interface %s is absent; policy remains fail-closed until it appears\n", c.WireGuard.Interface)
 	} else {
+		liveMark, markErr := wireGuardMark(context.Background(), c.WireGuard.Interface)
+		if markErr != nil {
+			return markErr
+		}
+		configuredText := c.WireGuard.Fwmark
+		configuredBase := 10
+		if strings.HasPrefix(configuredText, "0x") {
+			configuredText = strings.TrimPrefix(configuredText, "0x")
+			configuredBase = 16
+		}
+		configuredMark, _ := strconv.ParseUint(configuredText, configuredBase, 32)
+		if liveMark != configuredMark {
+			return fmt.Errorf("WireGuard interface %s fwmark %#x does not match configured %s", c.WireGuard.Interface, liveMark, c.WireGuard.Fwmark)
+		}
 		fmt.Printf("[ok] WireGuard interface %s exists\n", c.WireGuard.Interface)
+		fmt.Printf("[ok] WireGuard fwmark %#x matches bootstrap policy\n", liveMark)
 	}
 	fmt.Println("[ok] state and executable ownership/permissions")
 	if c.WireGuard.ConfigPath != "" {
@@ -347,6 +382,26 @@ func doctor(path string) error {
 	fmt.Println("[ok] exact candidate passed nft --check")
 	fmt.Println("[ok] no firewall changes were made")
 	return nil
+}
+
+func wireGuardMark(ctx context.Context, interfaceName string) (uint64, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "wg", "show", interfaceName, "fwmark").Output()
+	if err != nil || len(output) > 128 {
+		return 0, fmt.Errorf("could not inspect WireGuard interface %s fwmark", interfaceName)
+	}
+	value := strings.TrimSpace(string(output))
+	base := 10
+	if strings.HasPrefix(value, "0x") {
+		base = 16
+		value = strings.TrimPrefix(value, "0x")
+	}
+	mark, err := strconv.ParseUint(value, base, 32)
+	if err != nil || mark == 0 {
+		return 0, fmt.Errorf("WireGuard interface %s has an invalid or zero fwmark", interfaceName)
+	}
+	return mark, nil
 }
 
 func defaultRouteDevices(ctx context.Context, family string) ([]string, error) {
@@ -389,6 +444,10 @@ func secureExistingDirectory(path string) error {
 	info, err := os.Stat(abs)
 	if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
 		return errors.New("path must be a directory and not group/other writable")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return errors.New("path must be owned by the current service user")
 	}
 	return nil
 }
@@ -445,6 +504,11 @@ func contains(values []string, want string) bool {
 func controlOrLocal(sock, path string, req api.Request, local func(*app.Runtime) (any, error)) error {
 	if resp, err := api.Call(context.Background(), sock, req); err == nil {
 		return printJSONOr(resp.Data, true)
+	} else {
+		var remote api.RemoteError
+		if errors.As(err, &remote) {
+			return remote
+		}
 	}
 	if os.Getenv("NFTFW_LOCAL") != "1" {
 		return fmt.Errorf("nftfwd control socket unavailable; start nftfwd or set NFTFW_LOCAL=1 for an explicit local operation")
@@ -470,6 +534,12 @@ func explain(path string, args []string) error {
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
+	if fs.NArg() != 0 || (*proto != "tcp" && *proto != "udp" && *proto != "icmp") {
+		return errors.New("explain accepts only protocol tcp, udp, or icmp")
+	}
+	if ((*proto == "tcp" || *proto == "udp") && (*port < 1 || *port > 65535)) || (*proto == "icmp" && *port != 0) {
+		return errors.New("explain requires port 1..65535 for tcp/udp and no port for icmp")
+	}
 	c, err := config.Load(path)
 	if err != nil {
 		return err
@@ -481,7 +551,7 @@ func explain(path string, args []string) error {
 	d := e.Explain(policy.Query{From: *from, To: *to, Protocol: *proto, Port: *port})
 	fmt.Printf("%s\n\nSource: %s\nSource zone: %s\nDestination: %s\n", strings.ToUpper(d.Action), *from, d.SourceZone, *to)
 	if d.Matched != nil {
-		fmt.Printf("Matched policy: %s\nReason: %s\n", d.Matched.Name, d.Reason)
+		fmt.Printf("Matched policy: %s\nCompiled object: nftfw-policy:%s\nReason: %s\n", d.Matched.Name, d.Matched.Name, d.Reason)
 	} else {
 		fmt.Printf("Reason: %s\n", d.Reason)
 	}
@@ -489,12 +559,18 @@ func explain(path string, args []string) error {
 }
 
 func blocksCommand(sock, path string, args []string) error {
-	if len(args) == 0 || args[0] != "list" {
-		return errors.New("usage: nftfw blocks list")
+	if len(args) < 1 || args[0] != "list" {
+		return errors.New("usage: nftfw blocks list [--limit 1..1000] [--offset N]")
 	}
-	return controlOrLocal(sock, path, api.Request{Op: "claims"}, func(rt *app.Runtime) (any, error) {
-		claims, e := rt.Store.Claims(context.Background(), time.Now().UTC())
-		return claims, e
+	fs := flag.NewFlagSet("blocks list", flag.ContinueOnError)
+	limit := fs.Int("limit", 1000, "maximum claims to return")
+	offset := fs.Int("offset", 0, "claim offset")
+	if err := fs.Parse(args[1:]); err != nil || fs.NArg() != 0 || *limit < 1 || *limit > 1000 || *offset < 0 || *offset > 1000000 {
+		return errors.New("usage: nftfw blocks list [--limit 1..1000] [--offset N]")
+	}
+	request := api.Request{Op: "claims", Limit: *limit, Offset: *offset}
+	return controlOrLocal(sock, path, request, func(rt *app.Runtime) (any, error) {
+		return rt.Control(context.Background(), request)
 	})
 }
 func claimSubcommand(sock, path string, args []string, addOp, removeOp string) error {
@@ -502,6 +578,9 @@ func claimSubcommand(sock, path string, args []string, addOp, removeOp string) e
 		return errors.New("usage: nftfw block|allow add <address> [--ttl duration] [reason] | remove <claim-id>")
 	}
 	if args[0] == "remove" {
+		if len(args) != 2 {
+			return errors.New("remove requires exactly one claim id")
+		}
 		id, err := strconv.ParseInt(args[1], 10, 64)
 		if err != nil || id <= 0 {
 			return errors.New("claim id must be positive")
@@ -529,6 +608,9 @@ func claimSubcommand(sock, path string, args []string, addOp, removeOp string) e
 	if err != nil || ttl < 0 || ttl > 365*24*time.Hour || ttl%time.Second != 0 {
 		return errors.New("--ttl must be a whole-second duration from 0 through 8760h")
 	}
+	if addOp == "allow-add" && ttl <= 0 {
+		return errors.New("temporary allow --ttl must be at least one second")
+	}
 	req.ExpiresSec = int64(ttl / time.Second)
 	if reason := strings.TrimSpace(strings.Join(fs.Args(), " ")); reason != "" {
 		req.Reason = reason
@@ -538,10 +620,14 @@ func claimSubcommand(sock, path string, args []string, addOp, removeOp string) e
 	})
 }
 func parseID(args []string, idx int) (uint64, error) {
-	if len(args) <= idx {
+	if len(args) != idx+1 {
 		return 0, errors.New("generation id is required")
 	}
-	return strconv.ParseUint(args[idx], 10, 64)
+	id, err := strconv.ParseUint(args[idx], 10, 64)
+	if err != nil || id == 0 {
+		return 0, errors.New("generation id must be a positive integer")
+	}
+	return id, nil
 }
 func has(args []string, want string) bool {
 	for _, a := range args {
@@ -553,7 +639,10 @@ func has(args []string, want string) bool {
 }
 func printJSONOr(v any, jsonMode bool) error {
 	if jsonMode {
-		b, _ := json.MarshalIndent(v, "", "  ")
+		b, err := json.MarshalIndent(v, "", "  ")
+		if err != nil {
+			return fmt.Errorf("encode output: %w", err)
+		}
 		fmt.Println(string(b))
 		return nil
 	}

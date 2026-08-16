@@ -68,6 +68,9 @@ func (e Effective) sourceZone(raw string) string {
 	if raw == "" || raw == "host" {
 		return "host"
 	}
+	if _, ok := e.Zones[raw]; ok {
+		return raw
+	}
 	addr, err := netip.ParseAddr(raw)
 	if err != nil {
 		return "unknown"

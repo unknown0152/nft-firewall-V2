@@ -74,3 +74,55 @@ func TestBlockCanonicalizesPrefix(t *testing.T) {
 		t.Fatalf("prefix was not canonicalized: %#v", claims)
 	}
 }
+
+func TestOperatorCannotRemoveIntegrationClaim(t *testing.T) {
+	ctx := context.Background()
+	store, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	feedID, err := store.AddClaim(ctx, state.Claim{Address: "203.0.113.8/32", Family: "ipv4", Source: "threatfeed/example", Reason: "feed", Actor: "integration"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := Service{Store: store, Max: 10}
+	if err := service.Remove(ctx, feedID, "admin"); err == nil {
+		t.Fatal("operator removed an integration-owned claim")
+	}
+	manualID, err := service.Add(ctx, "203.0.113.9", "manual", "operator", "admin", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.Remove(ctx, manualID, "admin"); err != nil {
+		t.Fatal(err)
+	}
+	claims, err := store.Claims(ctx, time.Now())
+	if err != nil || len(claims) != 1 || claims[0].ID != feedID {
+		t.Fatalf("unexpected claims after operator removal: %#v err=%v", claims, err)
+	}
+}
+
+func TestTypedOperatorRemovalDoesNotCrossAllowAndBlockClaims(t *testing.T) {
+	ctx := context.Background()
+	store, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	service := Service{Store: store, Max: 10}
+	blockID, err := service.Add(ctx, "203.0.113.10", "manual", "block", "admin", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	allowID, err := service.AddAllow(ctx, "203.0.113.11", "allow", "admin", nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := service.RemoveAllow(ctx, blockID, "admin"); err == nil {
+		t.Fatal("allow removal deleted a manual block")
+	}
+	if err := service.RemoveBlock(ctx, allowID, "admin"); err == nil {
+		t.Fatal("block removal deleted an allow lease")
+	}
+}

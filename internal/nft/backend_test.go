@@ -43,6 +43,48 @@ func TestValidateScriptRejectsGlobalFlush(t *testing.T) {
 		}
 	}
 }
+
+func TestEmergencyDenyScriptIsOwnedAndFailClosed(t *testing.T) {
+	if err := validateScript(EmergencyDenyScript); err != nil {
+		t.Fatal(err)
+	}
+	for _, required := range []string{"table inet nftfw_filter", "table ip nftfw_nat", "table ip6 nftfw_filter6", "policy drop"} {
+		if !strings.Contains(EmergencyDenyScript, required) {
+			t.Fatalf("emergency script lacks %q", required)
+		}
+	}
+	if strings.Contains(EmergencyDenyScript, "ct state established") || strings.Contains(EmergencyDenyScript, "masquerade") {
+		t.Fatal("emergency script contains an egress-capable exception")
+	}
+}
+
+func TestBoundedStringWriterCapsCommandOutput(t *testing.T) {
+	w := boundedStringWriter{remaining: 4}
+	input := []byte("123456")
+	n, err := w.Write(input)
+	if err != nil || n != len(input) || w.String() != "1234" || !w.exceeded {
+		t.Fatalf("unexpected bounded writer result: n=%d value=%q exceeded=%t err=%v", n, w.String(), w.exceeded, err)
+	}
+}
+
+func TestReplaceClaimSetsEncodesKernelTimeoutAtomically(t *testing.T) {
+	f := &fakeRunner{}
+	b := New(f)
+	if err := b.ReplaceClaimSets(context.Background(), []string{"203.0.113.8/32"}, nil, []TimedElement{{Prefix: "198.51.100.4/32", TimeoutSeconds: 90}}, nil); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.scripts) != 2 || f.scripts[0] != f.scripts[1] {
+		t.Fatalf("claim set check/apply transactions differ: %#v", f.scripts)
+	}
+	for _, want := range []string{"flush set inet nftfw_filter blocked_v4", "203.0.113.8/32", "198.51.100.4/32 timeout 90s"} {
+		if !strings.Contains(f.scripts[0], want) {
+			t.Fatalf("claim transaction lacks %q: %s", want, f.scripts[0])
+		}
+	}
+	if err := b.ReplaceClaimSets(context.Background(), nil, nil, []TimedElement{{Prefix: "198.51.100.4/32", TimeoutSeconds: -1}}, nil); err == nil {
+		t.Fatal("negative kernel lease timeout accepted")
+	}
+}
 func TestApplyDestroysOnlyOwnedTables(t *testing.T) {
 	f := &fakeRunner{tables: `{"nftables":[{"table":{"family":"inet","name":"nftfw_filter"}},{"table":{"family":"ip","name":"third_party"}}]}`}
 	b := New(f)

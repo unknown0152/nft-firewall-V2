@@ -24,9 +24,22 @@ func main() {
 	control := flag.String("control-socket", "/run/nftfw/control.sock", "mutation socket")
 	expired := flag.Bool("rollback-expired", false, "rollback an expired pending generation and exit")
 	stateDB := flag.String("state-db", "/var/lib/nftfw/state.db", "state database for rollback-only mode")
+	restoreActive := flag.Bool("restore-active", false, "restore the independently verified active snapshot and exit")
+	stateDir := flag.String("state-dir", "/var/lib/nftfw", "state directory for early-boot restore mode")
 	flag.Parse()
+	if flag.NArg() != 0 || (*expired && *restoreActive) {
+		fmt.Fprintln(os.Stderr, "nftfwd: invalid arguments")
+		os.Exit(2)
+	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+	if *restoreActive {
+		if err := restoreAtBoot(ctx, *stateDir); err != nil {
+			fmt.Fprintln(os.Stderr, "nftfwd early boot:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *expired {
 		st, err := state.Open(ctx, *stateDB)
 		if err != nil {
@@ -57,6 +70,27 @@ func main() {
 	} else if drift.Repaired {
 		fmt.Fprintln(os.Stderr, "nftfwd: restored committed firewall generation at startup")
 	}
+	existing, inspectErr := rt.Backend.ExistingOwned(ctx)
+	if inspectErr != nil {
+		fmt.Fprintln(os.Stderr, "nftfwd: startup owned-table inspection failed:", inspectErr)
+		os.Exit(1)
+	}
+	if existing["inet/"+nft.FilterTable] {
+		refreshes := []struct {
+			name string
+			run  func(context.Context) (bool, error)
+		}{
+			{name: "runtime claims", run: rt.RefreshClaimSets},
+			{name: "WireGuard endpoints", run: rt.RefreshEndpoints},
+			{name: "container networks", run: rt.RefreshContainerSets},
+		}
+		for _, refresh := range refreshes {
+			if _, refreshErr := refresh.run(ctx); refreshErr != nil {
+				fmt.Fprintf(os.Stderr, "nftfwd: startup %s reconciliation failed: %v\n", refresh.name, refreshErr)
+				os.Exit(1)
+			}
+		}
+	}
 	server := &api.Server{Handler: rt, StatusPath: *status, ControlPath: *control}
 	if err := rt.RefreshWireGuardHealth(ctx); err != nil {
 		fmt.Fprintln(os.Stderr, "nftfwd WireGuard health:", err)
@@ -66,6 +100,28 @@ func main() {
 		fmt.Fprintln(os.Stderr, "nftfwd:", err)
 		os.Exit(1)
 	}
+}
+
+func restoreAtBoot(ctx context.Context, directory string) error {
+	script, enabled, err := state.LoadActiveSnapshot(directory)
+	backend := nft.New(nil)
+	if err != nil {
+		if applyErr := backend.Apply(ctx, nft.EmergencyDenyScript); applyErr != nil {
+			return fmt.Errorf("active snapshot is invalid and emergency deny failed: %w", applyErr)
+		}
+		return errors.New("active snapshot is invalid; emergency default-deny policy installed")
+	}
+	if !enabled {
+		return nil
+	}
+	if err := backend.Apply(ctx, script); err != nil {
+		if fallbackErr := backend.Apply(ctx, nft.EmergencyDenyScript); fallbackErr != nil {
+			return fmt.Errorf("active snapshot restore and emergency deny both failed: %w", fallbackErr)
+		}
+		return errors.New("active snapshot restore failed; emergency default-deny policy installed")
+	}
+	fmt.Println("committed firewall snapshot restored")
+	return nil
 }
 
 func rollbackLoop(ctx context.Context, rt *app.Runtime) {

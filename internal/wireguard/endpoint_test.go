@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"net"
+	"os"
 	"path/filepath"
 	"reflect"
 	"testing"
@@ -55,5 +56,27 @@ func TestEndpointCacheExpiresFailClosed(t *testing.T) {
 	r.Resolver = &fakeLookup{err: errors.New("dns unavailable")}
 	if got, err := r.Resolve(context.Background(), "vpn.example.test"); err == nil || len(got) != 0 {
 		t.Fatalf("stale endpoint cache accepted: %v, %v", got, err)
+	}
+}
+
+func TestEndpointCacheRejectsSymlinkAndOversize(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "target.json")
+	if err := os.WriteFile(target, []byte(`{"hosts":{"vpn.example.test":[{"address":"203.0.113.8","seen_at":"2099-01-01T00:00:00Z"}]}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "link.json")
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if cache := (&Resolver{CachePath: link}).loadLocked(); len(cache.Hosts) != 0 {
+		t.Fatal("symlinked endpoint cache accepted")
+	}
+	large := filepath.Join(dir, "large.json")
+	if err := os.WriteFile(large, make([]byte, (1<<20)+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if cache := (&Resolver{CachePath: large}).loadLocked(); len(cache.Hosts) != 0 {
+		t.Fatal("oversized endpoint cache accepted")
 	}
 }

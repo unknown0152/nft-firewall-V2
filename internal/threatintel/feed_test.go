@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"net/netip"
 	"testing"
 )
 
@@ -11,6 +12,24 @@ func TestFeedRequiresHTTPS(t *testing.T) {
 	_, err := (Feed{URL: "http://example.test"}).Fetch(context.Background())
 	if err == nil {
 		t.Fatal("HTTP feed accepted")
+	}
+}
+
+func TestDefaultFeedClientRejectsNonPublicTargets(t *testing.T) {
+	for _, target := range []string{"https://127.0.0.1/feed", "https://169.254.169.254/feed", "https://[::1]/feed"} {
+		if _, err := (Feed{URL: target}).Fetch(context.Background()); err == nil {
+			t.Fatalf("non-public threat feed target accepted: %s", target)
+		}
+	}
+	for _, raw := range []string{"8.8.8.8", "2606:4700:4700::1111"} {
+		if !isPublicFeedAddress(netip.MustParseAddr(raw)) {
+			t.Fatalf("public address rejected: %s", raw)
+		}
+	}
+	for _, raw := range []string{"10.0.0.1", "100.64.0.1", "198.18.0.1", "fc00::1", "fe80::1"} {
+		if isPublicFeedAddress(netip.MustParseAddr(raw)) {
+			t.Fatalf("non-public address accepted: %s", raw)
+		}
 	}
 }
 

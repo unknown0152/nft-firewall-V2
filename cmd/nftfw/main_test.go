@@ -39,3 +39,20 @@ func TestStateDatabaseFlagOverridesEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+func TestSecuritySensitiveCommandsRejectTrailingArguments(t *testing.T) {
+	for _, args := range [][]string{
+		{"version", "extra"},
+		{"apply", "--safe", "--safe"},
+		{"commit", "1", "extra"},
+		{"rollback", "0"},
+		{"reconcile", "extra"},
+		{"blocks", "list", "extra"},
+		{"block", "remove", "1", "extra"},
+		{"wg", "status", "extra"},
+	} {
+		if err := run(args); err == nil {
+			t.Fatalf("ambiguous command accepted: %#v", args)
+		}
+	}
+}

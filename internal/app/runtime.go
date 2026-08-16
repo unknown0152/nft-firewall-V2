@@ -8,6 +8,8 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
@@ -55,7 +57,7 @@ func Open(ctx context.Context, configPath string, runner nft.Runner) (*Runtime, 
 	}
 	be := nft.New(runner)
 	m := &reconcile.Manager{Backend: be, Store: st, SafeTTL: time.Duration(c.Runtime.SafeApplySeconds) * time.Second}
-	m.SafeGuard = recovery.SystemdGuard{}.Verify
+	m.SafeGuard = recovery.SystemdGuard{StateDB: st.Path}.Verify
 	m.HealthCheck = func(checkCtx context.Context) error {
 		ok, detail, checkErr := be.Integrity(checkCtx)
 		if checkErr != nil {
@@ -99,7 +101,69 @@ func (r *Runtime) Artifact(ctx context.Context) (compiler.Artifact, error) {
 	if err != nil {
 		return compiler.Artifact{}, err
 	}
-	return compiler.Compile(compiler.Input{Policy: r.Effective, BlockedV4: state.EffectiveAddresses(claims, "ipv4"), BlockedV6: state.EffectiveAddresses(claims, "ipv6"), TrustedV4: state.EffectiveAddressesFrom(claims, "ipv4", "allow"), TrustedV6: state.EffectiveAddressesFrom(claims, "ipv6", "allow"), BootstrapV4: v4, BootstrapV6: v6, DockerNets: dockerV4, DockerNets6: dockerV6}, id)
+	claimSets, err := r.claimSets(claims, time.Now().UTC())
+	if err != nil {
+		return compiler.Artifact{}, err
+	}
+	return compiler.Compile(compiler.Input{Policy: r.Effective, BlockedV4: claimSets.blockedV4, BlockedV6: claimSets.blockedV6, BootstrapV4: v4, BootstrapV6: v6, DockerNets: dockerV4, DockerNets6: dockerV6}, id)
+}
+
+type runtimeClaimSets struct {
+	blockedV4, blockedV6 []string
+	trustedV4, trustedV6 []nft.TimedElement
+}
+
+func (r *Runtime) claimSets(claims []state.Claim, now time.Time) (runtimeClaimSets, error) {
+	sets := runtimeClaimSets{
+		blockedV4: state.EffectiveAddresses(claims, "ipv4"),
+		blockedV6: state.EffectiveAddresses(claims, "ipv6"),
+		trustedV4: effectiveTrusted(claims, "ipv4", now),
+		trustedV6: effectiveTrusted(claims, "ipv6", now),
+	}
+	counts := map[string]int{
+		"blocked_v4": len(sets.blockedV4), "blocked_v6": len(sets.blockedV6),
+		"trusted_v4": len(sets.trustedV4), "trusted_v6": len(sets.trustedV6),
+	}
+	for name, count := range counts {
+		if count > r.Config.Runtime.MaxSetMembers {
+			return runtimeClaimSets{}, fmt.Errorf("runtime set %s exceeds runtime.max_set_members (%d)", name, r.Config.Runtime.MaxSetMembers)
+		}
+	}
+	return sets, nil
+}
+
+func effectiveTrusted(claims []state.Claim, family string, now time.Time) []nft.TimedElement {
+	type lease struct {
+		permanent bool
+		expires   time.Time
+	}
+	byAddress := map[string]lease{}
+	for _, claim := range claims {
+		if claim.Family != family || claim.Source != "allow" && !strings.HasPrefix(claim.Source, "allow/") {
+			continue
+		}
+		current := byAddress[claim.Address]
+		if claim.ExpiresAt == nil {
+			current.permanent = true
+		} else if claim.ExpiresAt.After(current.expires) {
+			current.expires = claim.ExpiresAt.UTC()
+		}
+		byAddress[claim.Address] = current
+	}
+	result := make([]nft.TimedElement, 0, len(byAddress))
+	for address, lease := range byAddress {
+		element := nft.TimedElement{Prefix: address}
+		if !lease.permanent {
+			remaining := lease.expires.Sub(now)
+			if remaining <= 0 {
+				continue
+			}
+			element.TimeoutSeconds = int64((remaining + time.Second - 1) / time.Second)
+		}
+		result = append(result, element)
+	}
+	sort.Slice(result, func(i, j int) bool { return result[i].Prefix < result[j].Prefix })
+	return result
 }
 
 func (r *Runtime) bootstrapEndpoints(ctx context.Context) ([]string, []string, string, error) {
@@ -208,7 +272,17 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 	case "status":
 		return r.Status(ctx)
 	case "claims":
-		return r.Store.Claims(ctx, time.Now().UTC())
+		limit := req.Limit
+		if limit == 0 {
+			limit = 1000
+		}
+		now := time.Now().UTC()
+		claims, err := r.Store.ClaimsPage(ctx, now, limit, req.Offset)
+		if err != nil {
+			return nil, err
+		}
+		total, err := r.Store.ActiveClaimCount(ctx, now)
+		return map[string]any{"claims": claims, "total": total, "limit": limit, "offset": req.Offset}, err
 	case "audit":
 		return r.Store.RecentAudit(ctx, 100)
 	case "plan":
@@ -223,7 +297,18 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		return r.Manager.Apply(ctx, a, req.Safe)
+		result, err := r.Manager.Apply(ctx, a, req.Safe)
+		if err != nil {
+			return nil, err
+		}
+		if _, err := r.RefreshClaimSets(ctx); err != nil {
+			rollbackErr := r.Manager.Rollback(ctx, a.Generation)
+			if rollbackErr != nil {
+				return nil, fmt.Errorf("apply runtime lease reconciliation failed: %w; rollback also failed: %v", err, rollbackErr)
+			}
+			return nil, fmt.Errorf("apply runtime lease reconciliation failed and generation was rolled back: %w", err)
+		}
+		return result, nil
 	case "commit":
 		return nil, r.Manager.Commit(ctx, req.Generation)
 	case "rollback":
@@ -244,6 +329,12 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 		}
 		return map[string]any{"claim_id": id}, err
 	case "allow-add":
+		if len(r.Config.Runtime.TrustedServices) == 0 {
+			return nil, errors.New("temporary access is disabled because runtime.trusted_services is empty")
+		}
+		if req.ExpiresSec <= 0 {
+			return nil, errors.New("temporary access requires a positive expiry")
+		}
 		expires, err := claimExpiry(req.ExpiresSec)
 		if err != nil {
 			return nil, err
@@ -255,7 +346,14 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 		return map[string]any{"claim_id": id}, err
 	case "block-remove":
 		service := blocks.Service{Store: r.Store}
-		if err := service.Remove(ctx, req.ClaimID, "uid:0"); err != nil {
+		if err := service.RemoveBlock(ctx, req.ClaimID, "uid:0"); err != nil {
+			return nil, err
+		}
+		_, err := r.RefreshClaimSets(ctx)
+		return nil, err
+	case "allow-remove":
+		service := blocks.Service{Store: r.Store}
+		if err := service.RemoveAllow(ctx, req.ClaimID, "uid:0"); err != nil {
 			return nil, err
 		}
 		_, err := r.RefreshClaimSets(ctx)
@@ -354,13 +452,11 @@ func (r *Runtime) RefreshClaimSets(ctx context.Context) (bool, error) {
 	if !existing["inet/"+nft.FilterTable] {
 		return false, nil
 	}
-	sets := map[string][]string{
-		"blocked_v4": state.EffectiveAddresses(claims, "ipv4"),
-		"blocked_v6": state.EffectiveAddresses(claims, "ipv6"),
-		"trusted_v4": state.EffectiveAddressesFrom(claims, "ipv4", "allow"),
-		"trusted_v6": state.EffectiveAddressesFrom(claims, "ipv6", "allow"),
+	sets, err := r.claimSets(claims, time.Now().UTC())
+	if err != nil {
+		return false, err
 	}
-	if err := r.Backend.ReplaceSets(ctx, sets); err != nil {
+	if err := r.Backend.ReplaceClaimSets(ctx, sets.blockedV4, sets.blockedV6, sets.trustedV4, sets.trustedV6); err != nil {
 		return false, err
 	}
 	return true, nil
@@ -392,7 +488,11 @@ func (r *Runtime) RefreshContainerSets(ctx context.Context) (bool, error) {
 
 func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
 	var failures []error
-	updated := false
+	type refreshedIntegration struct {
+		name  string
+		count int
+	}
+	var refreshed []refreshedIntegration
 	for _, feedConfig := range r.Config.ThreatFeeds {
 		name := "threatfeed/" + feedConfig.Name
 		if !r.integrationDue(ctx, name, feedConfig.RefreshSeconds) {
@@ -423,11 +523,12 @@ func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
 		}
 		count, err := r.Store.ReplaceSourceClaimsBounded(ctx, name, "threat intelligence", "integration", addresses, r.Config.Runtime.MaxBlockClaims)
 		if err != nil {
+			oldCount, _ := r.Store.SourceClaimCount(ctx, name)
+			_ = r.Store.SetIntegrationState(ctx, name, "degraded", oldCount, false)
 			failures = append(failures, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		_ = r.Store.SetIntegrationState(ctx, name, "healthy", count, true)
-		updated = true
+		refreshed = append(refreshed, refreshedIntegration{name: name, count: count})
 	}
 	for _, geoConfig := range r.Config.GeoSets {
 		name := "geo/" + geoConfig.Name
@@ -455,15 +556,23 @@ func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
 		}
 		count, err := r.Store.ReplaceSourceClaimsBounded(ctx, name, "GeoIP "+geoConfig.Country, "integration", addresses, r.Config.Runtime.MaxBlockClaims)
 		if err != nil {
+			oldCount, _ := r.Store.SourceClaimCount(ctx, name)
+			_ = r.Store.SetIntegrationState(ctx, name, "degraded", oldCount, false)
 			failures = append(failures, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		_ = r.Store.SetIntegrationState(ctx, name, "healthy", count, true)
-		updated = true
+		refreshed = append(refreshed, refreshedIntegration{name: name, count: count})
 	}
-	if updated {
+	if len(refreshed) > 0 {
 		if _, err := r.RefreshClaimSets(ctx); err != nil {
+			for _, integration := range refreshed {
+				_ = r.Store.SetIntegrationState(ctx, integration.name, "degraded", integration.count, false)
+			}
 			failures = append(failures, err)
+		} else {
+			for _, integration := range refreshed {
+				_ = r.Store.SetIntegrationState(ctx, integration.name, "healthy", integration.count, true)
+			}
 		}
 	}
 	return errors.Join(failures...)

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -167,16 +168,25 @@ func cachedAddresses(entries []CachedIP) []string {
 }
 
 func (r *Resolver) loadLocked() Cache {
+	empty := Cache{Hosts: map[string][]CachedIP{}}
 	if r.CachePath == "" {
-		return Cache{Hosts: map[string][]CachedIP{}}
+		return empty
+	}
+	info, err := os.Lstat(r.CachePath)
+	if err != nil || info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 || info.Size() > 1<<20 {
+		return empty
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return empty
 	}
 	b, err := os.ReadFile(r.CachePath)
 	if err != nil {
-		return Cache{Hosts: map[string][]CachedIP{}}
+		return empty
 	}
 	var c Cache
-	if json.Unmarshal(b, &c) != nil || c.Hosts == nil {
-		c.Hosts = map[string][]CachedIP{}
+	if json.Unmarshal(b, &c) != nil || c.Hosts == nil || len(c.Hosts) > 64 {
+		return empty
 	}
 	return c
 }
@@ -207,7 +217,15 @@ func (r *Resolver) saveLocked(c Cache) error {
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	return os.Rename(p, r.CachePath)
+	if err := os.Rename(p, r.CachePath); err != nil {
+		return err
+	}
+	dir, err := os.Open(filepath.Dir(r.CachePath))
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func FamilySets(addrs []string) (v4, v6 []string) {

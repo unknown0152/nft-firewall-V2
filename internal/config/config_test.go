@@ -97,6 +97,25 @@ func TestValidateRejectsUnsafeTCPMSS(t *testing.T) {
 		t.Fatal("undersized TCP MSS accepted")
 	}
 }
+
+func TestValidateTrustedServicesAreExplicitAndTyped(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Runtime.TrustedServices = []string{"ssh"}
+	if err := Validate(c); err != nil {
+		t.Fatal(err)
+	}
+	c.Runtime.TrustedServices = []string{"missing"}
+	if err := Validate(c); err == nil {
+		t.Fatal("unknown trusted service accepted")
+	}
+	c.Runtime.TrustedServices = []string{"ssh", "ssh"}
+	if err := Validate(c); err == nil {
+		t.Fatal("duplicate trusted service accepted")
+	}
+}
 func TestValidateRejectsSlashZero(t *testing.T) {
 	c, err := Load(writeConfig(t, validTOML))
 	if err != nil {
@@ -174,6 +193,18 @@ func TestValidateRejectsUnknownAndEmptyInterfaceZones(t *testing.T) {
 	}
 }
 
+func TestValidateRejectsHostPolicyToUplinkInterfaceZone(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Zones = append(c.Zones, Zone{Name: "physical", Interfaces: []string{"eth0"}})
+	c.Policies = append(c.Policies, Policy{Name: "host-physical", From: "host", To: "physical", Service: "ssh", Action: "allow"})
+	if err := Validate(c); err == nil {
+		t.Fatal("host output policy using the physical uplink as a destination zone was accepted")
+	}
+}
+
 func TestValidateNATSchema(t *testing.T) {
 	c, err := Load(writeConfig(t, validTOML))
 	if err != nil {
@@ -202,6 +233,24 @@ func TestWireGuardBootstrapRequiresHostPrefixes(t *testing.T) {
 	c.WireGuard.BootstrapIPsV6 = []string{"2001:db8::/64"}
 	if err := Validate(c); err == nil {
 		t.Fatal("broad IPv6 bootstrap prefix accepted")
+	}
+}
+
+func TestWireGuardBootstrapRequiresNonzeroMarkAndUnicast(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.WireGuard.Fwmark = "0"
+	if err := Validate(c); err == nil {
+		t.Fatal("zero WireGuard fwmark accepted")
+	}
+	c.WireGuard.Fwmark = "0xca6c"
+	for _, address := range []string{"127.0.0.1/32", "224.0.0.1/32"} {
+		c.WireGuard.BootstrapIPs = []string{address}
+		if err := Validate(c); err == nil {
+			t.Fatalf("unsafe bootstrap address %s accepted", address)
+		}
 	}
 }
 

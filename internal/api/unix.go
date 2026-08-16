@@ -17,17 +17,21 @@ import (
 )
 
 const MaxRequestBytes = 64 << 10
+const MaxResponseBytes = 4 << 20
 const MaxConcurrentConnections = 64
 
 type Request struct {
 	Op         string `json:"op"`
 	Generation uint64 `json:"generation,omitempty"`
 	Safe       bool   `json:"safe,omitempty"`
+	Unsafe     bool   `json:"unsafe,omitempty"`
 	Address    string `json:"address,omitempty"`
 	ClaimID    int64  `json:"claim_id,omitempty"`
 	Source     string `json:"source,omitempty"`
 	Reason     string `json:"reason,omitempty"`
 	ExpiresSec int64  `json:"expires_seconds,omitempty"`
+	Limit      int    `json:"limit,omitempty"`
+	Offset     int    `json:"offset,omitempty"`
 }
 
 type Response struct {
@@ -35,6 +39,10 @@ type Response struct {
 	Error string `json:"error,omitempty"`
 	Data  any    `json:"data,omitempty"`
 }
+
+type RemoteError struct{ Message string }
+
+func (e RemoteError) Error() string { return e.Message }
 
 type Handler interface {
 	Status(context.Context) (any, error)
@@ -193,30 +201,34 @@ func validateRequest(r Request, control bool) error {
 	if !control && r.Op != "status" {
 		return errors.New("status socket is read-only")
 	}
-	plain := r.Generation == 0 && !r.Safe && r.Address == "" && r.ClaimID == 0 && r.Source == "" && r.Reason == "" && r.ExpiresSec == 0
+	plain := r.Generation == 0 && !r.Safe && !r.Unsafe && r.Address == "" && r.ClaimID == 0 && r.Source == "" && r.Reason == "" && r.ExpiresSec == 0 && r.Limit == 0 && r.Offset == 0
 	switch r.Op {
-	case "status", "claims", "audit", "plan", "reconcile", "wg-refresh":
+	case "status", "audit", "plan", "reconcile", "wg-refresh":
 		if !plain {
 			return errors.New("operation does not accept fields")
 		}
+	case "claims":
+		if r.Generation != 0 || r.Safe || r.Unsafe || r.Address != "" || r.ClaimID != 0 || r.Source != "" || r.Reason != "" || r.ExpiresSec != 0 || r.Limit < 0 || r.Limit > 1000 || r.Offset < 0 || r.Offset > 1000000 {
+			return errors.New("claims accepts only limit 1..1000 and bounded offset")
+		}
 	case "apply":
-		if r.Generation != 0 || r.Address != "" || r.ClaimID != 0 || r.Source != "" || r.Reason != "" || r.ExpiresSec != 0 {
-			return errors.New("apply accepts only safe")
+		if r.Safe == r.Unsafe || r.Generation != 0 || r.Address != "" || r.ClaimID != 0 || r.Source != "" || r.Reason != "" || r.ExpiresSec != 0 || r.Limit != 0 || r.Offset != 0 {
+			return errors.New("apply requires exactly one explicit safe or unsafe mode")
 		}
 	case "commit", "rollback":
-		if r.Generation == 0 || r.Safe || r.Address != "" || r.ClaimID != 0 || r.Source != "" || r.Reason != "" || r.ExpiresSec != 0 {
+		if r.Generation == 0 || r.Safe || r.Unsafe || r.Address != "" || r.ClaimID != 0 || r.Source != "" || r.Reason != "" || r.ExpiresSec != 0 || r.Limit != 0 || r.Offset != 0 {
 			return errors.New("generation operation requires only a positive generation")
 		}
 	case "block-add":
-		if r.Address == "" || r.Generation != 0 || r.Safe || r.ClaimID != 0 || r.Source != "manual" || r.ExpiresSec < 0 || r.ExpiresSec > 365*24*60*60 {
+		if r.Address == "" || r.Generation != 0 || r.Safe || r.Unsafe || r.ClaimID != 0 || r.Source != "manual" || r.ExpiresSec < 0 || r.ExpiresSec > 365*24*60*60 || r.Limit != 0 || r.Offset != 0 {
 			return errors.New("block-add requires an address, source=manual, optional reason, and a bounded expiry")
 		}
 	case "allow-add":
-		if r.Address == "" || r.Generation != 0 || r.Safe || r.ClaimID != 0 || r.Source != "" || r.ExpiresSec < 0 || r.ExpiresSec > 365*24*60*60 {
-			return errors.New("allow-add requires an address, optional reason, and a bounded expiry")
+		if r.Address == "" || r.Generation != 0 || r.Safe || r.Unsafe || r.ClaimID != 0 || r.Source != "" || r.ExpiresSec <= 0 || r.ExpiresSec > 365*24*60*60 || r.Limit != 0 || r.Offset != 0 {
+			return errors.New("allow-add requires an address, optional reason, and a positive bounded expiry")
 		}
-	case "block-remove":
-		if r.ClaimID <= 0 || r.Generation != 0 || r.Safe || r.Address != "" || r.Source != "" || r.Reason != "" || r.ExpiresSec != 0 {
+	case "block-remove", "allow-remove":
+		if r.ClaimID <= 0 || r.Generation != 0 || r.Safe || r.Unsafe || r.Address != "" || r.Source != "" || r.Reason != "" || r.ExpiresSec != 0 || r.Limit != 0 || r.Offset != 0 {
 			return errors.New("block-remove requires only a positive claim_id")
 		}
 	default:
@@ -280,6 +292,10 @@ func prepareSocketPath(path string) error {
 	if err != nil || !parentInfo.IsDir() || parentInfo.Mode().Perm()&0o022 != 0 {
 		return errors.New("socket parent must not be group/other writable")
 	}
+	parentStat, ok := parentInfo.Sys().(*syscall.Stat_t)
+	if !ok || parentStat.Uid != uint32(os.Geteuid()) {
+		return errors.New("socket parent must be owned by the service user")
+	}
 	if fi, err := os.Lstat(abs); err == nil {
 		stat, ok := fi.Sys().(*syscall.Stat_t)
 		if fi.Mode()&os.ModeSymlink != 0 || fi.Mode()&os.ModeSocket == 0 || !ok || stat.Uid != uint32(os.Geteuid()) {
@@ -305,12 +321,32 @@ func Call(ctx context.Context, path string, req Request) (Response, error) {
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return Response{}, err
 	}
-	var resp Response
-	if err := json.NewDecoder(io.LimitReader(conn, MaxRequestBytes)).Decode(&resp); err != nil {
+	resp, err := readResponse(conn)
+	if err != nil {
 		return Response{}, err
 	}
 	if !resp.OK {
-		return resp, errors.New(resp.Error)
+		return resp, RemoteError{Message: resp.Error}
 	}
 	return resp, nil
+}
+
+func readResponse(r io.Reader) (Response, error) {
+	encoded, err := io.ReadAll(io.LimitReader(r, MaxResponseBytes+1))
+	if err != nil {
+		return Response{}, err
+	}
+	if len(encoded) > MaxResponseBytes {
+		return Response{}, errors.New("API response exceeds safety limit")
+	}
+	var response Response
+	decoder := json.NewDecoder(bytes.NewReader(encoded))
+	if err := decoder.Decode(&response); err != nil {
+		return Response{}, err
+	}
+	var extra any
+	if err := decoder.Decode(&extra); err != io.EOF {
+		return Response{}, errors.New("multiple API response values are not allowed")
+	}
+	return response, nil
 }

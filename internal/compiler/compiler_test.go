@@ -105,15 +105,26 @@ func TestCompileRejectsRuntimeSlashZero(t *testing.T) {
 }
 
 func TestTrustedSetIsSeparateFromBlockedSet(t *testing.T) {
-	a, err := Compile(Input{Policy: testEffective(t), BlockedV4: []string{"203.0.113.9/32"}, TrustedV4: []string{"198.51.100.8/32"}}, 1)
+	e := testEffective(t)
+	e.Config.Runtime.TrustedServices = []string{"ssh"}
+	e.Config.Services = append(e.Config.Services, config.Service{Name: "untrusted-web", Protocol: "tcp", Ports: []int{8096}})
+	e.Svcs["untrusted-web"] = config.Service{Name: "untrusted-web", Protocol: "tcp", Ports: []int{8096}}
+	a, err := Compile(Input{Policy: e, BlockedV4: []string{"203.0.113.9/32"}}, 1)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if !strings.Contains(a.Script, "set trusted_v4") || !strings.Contains(a.Script, "nftfw:trusted-services-v4") {
 		t.Fatal("trusted set/rule missing")
 	}
+	trustedSection := a.Script[strings.Index(a.Script, "set trusted_v4"):strings.Index(a.Script, "set trusted_v6")]
+	if strings.Contains(trustedSection, "elements =") {
+		t.Fatal("committed generation contains a replayable trusted lease")
+	}
 	if !strings.Contains(a.Script, "elements = { 203.0.113.9/32 }") {
 		t.Fatal("blocked set missing")
+	}
+	if strings.Contains(a.Script, "8096") {
+		t.Fatal("temporary access opened a service absent from runtime.trusted_services")
 	}
 }
 
@@ -136,6 +147,26 @@ func TestAnyAndDenyPoliciesCompileToMatchingRules(t *testing.T) {
 	}
 	if strings.Contains(a.Script, "oifname \"wg0\" accept comment \"nftfw:vpn-only-egress\"") {
 		t.Fatal("compiler emitted a broad VPN allow instead of typed output policies")
+	}
+}
+
+func TestPublicNamedDestinationIsPinnedToVPN(t *testing.T) {
+	c := config.Defaults()
+	c.Interfaces = []config.Interface{{Name: "eth0", Role: "uplink"}, {Name: "wg0", Role: "vpn"}}
+	c.Zones = []config.Zone{{Name: "external-service", Networks: []string{"203.0.113.0/24"}}}
+	c.Services = []config.Service{{Name: "https", Protocol: "tcp", Ports: []int{443}}}
+	c.Policies = []config.Policy{{Name: "host-external", From: "host", To: "external-service", Service: "https", Action: "allow"}}
+	e, err := policy.Compile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := Compile(Input{Policy: e}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := `ip daddr 203.0.113.0/24 oifname "wg0" tcp dport { 443 } accept`
+	if !strings.Contains(a.Script, want) {
+		t.Fatalf("public destination was not pinned to WireGuard: %s", a.Script)
 	}
 }
 

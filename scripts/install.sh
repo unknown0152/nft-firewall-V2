@@ -2,14 +2,16 @@
 set -euo pipefail
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then echo "install.sh must run as root" >&2; exit 1; fi
+if (( $# != 0 )); then echo "Usage: install.sh" >&2; exit 2; fi
 ROOT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 BIN_DIR=/usr/lib/nftfw
 CONF_DIR=/etc/nftfw
 STATE_DIR=/var/lib/nftfw
 case "$(uname -m)" in x86_64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; esac
 
-command -v nft >/dev/null || { echo "Missing nftables (nft); install it first" >&2; exit 1; }
-command -v systemctl >/dev/null || { echo "Missing systemd systemctl" >&2; exit 1; }
+for command_name in nft ip wg systemctl sha256sum awk getent groupadd useradd install readlink; do
+    command -v "$command_name" >/dev/null || { echo "Missing prerequisite: $command_name" >&2; exit 1; }
+done
 for binary in nftfw nftfwd nftfw-web; do [[ -x "$ROOT_DIR/dist/$binary-linux-$ARCH" ]] || { echo "Missing dist/$binary-linux-$ARCH; run make release" >&2; exit 1; }; done
 for binary in nftfw nftfwd nftfw-web; do
     expected=$(awk -v file="$binary-linux-$ARCH" '$2 == file { print $1 }' "$ROOT_DIR/dist/SHA256SUMS")
@@ -18,6 +20,12 @@ for binary in nftfw nftfwd nftfw-web; do
     [[ "$actual" == "$expected" ]] || { echo "Checksum mismatch for $binary-linux-$ARCH" >&2; exit 1; }
 done
 
+for directory in "$BIN_DIR" "$CONF_DIR" "$STATE_DIR"; do
+    [[ ! -L "$directory" ]] || { echo "Refusing symlinked installation directory: $directory" >&2; exit 1; }
+done
+if [[ -e /usr/sbin/nftfw || -L /usr/sbin/nftfw ]]; then
+    [[ -L /usr/sbin/nftfw && $(readlink /usr/sbin/nftfw) == "$BIN_DIR/nftfw" ]] || { echo "Refusing to replace unrelated /usr/sbin/nftfw" >&2; exit 1; }
+fi
 install -d -o root -g root -m 0755 "$BIN_DIR"
 install -d -m 0750 "$CONF_DIR" "$STATE_DIR"
 if ! getent group nftfw >/dev/null; then groupadd --system nftfw; fi
@@ -33,14 +41,24 @@ install -o root -g root -m 0755 "$ROOT_DIR/dist/nftfw-linux-$ARCH" "$BIN_DIR/nft
 install -o root -g root -m 0755 "$ROOT_DIR/dist/nftfwd-linux-$ARCH" "$BIN_DIR/nftfwd"
 install -o root -g root -m 0755 "$ROOT_DIR/dist/nftfw-web-linux-$ARCH" "$BIN_DIR/nftfw-web"
 ln -sfn "$BIN_DIR/nftfw" /usr/sbin/nftfw
-if [[ ! -e "$CONF_DIR/nftfw.toml" ]]; then install -o root -g nftfw -m 0640 "$ROOT_DIR/configs/nftfw.example.toml" "$CONF_DIR/nftfw.toml"; echo "Installed example config at $CONF_DIR/nftfw.toml; edit it before applying."; fi
+if [[ -L "$CONF_DIR/nftfw.toml" ]]; then
+    echo "Refusing symlinked configuration: $CONF_DIR/nftfw.toml" >&2
+    exit 1
+elif [[ ! -e "$CONF_DIR/nftfw.toml" ]]; then
+    install -o root -g nftfw -m 0640 "$ROOT_DIR/configs/nftfw.example.toml" "$CONF_DIR/nftfw.toml"
+    echo "Installed example config at $CONF_DIR/nftfw.toml; edit it before applying."
+elif [[ ! -f "$CONF_DIR/nftfw.toml" ]]; then
+    echo "Configuration path is not a regular file: $CONF_DIR/nftfw.toml" >&2
+    exit 1
+fi
 install -o root -g root -m 0644 "$ROOT_DIR/packaging/systemd/nftfwd.service" /etc/systemd/system/nftfwd.service
+install -o root -g root -m 0644 "$ROOT_DIR/packaging/systemd/nftfw-early.service" /etc/systemd/system/nftfw-early.service
 install -o root -g root -m 0644 "$ROOT_DIR/packaging/systemd/nftfw-web.service" /etc/systemd/system/nftfw-web.service
 install -o root -g root -m 0644 "$ROOT_DIR/packaging/systemd/nftfw-rollback.service" /etc/systemd/system/nftfw-rollback.service
 install -o root -g root -m 0644 "$ROOT_DIR/packaging/systemd/nftfw-rollback.timer" /etc/systemd/system/nftfw-rollback.timer
 systemctl daemon-reload
-systemctl reset-failed nftfwd.service nftfw-web.service nftfw-rollback.service 2>/dev/null || true
-systemctl enable nftfwd.service nftfw-rollback.timer nftfw-web.service
+systemctl reset-failed nftfw-early.service nftfwd.service nftfw-web.service nftfw-rollback.service 2>/dev/null || true
+systemctl enable nftfw-early.service nftfwd.service nftfw-rollback.timer nftfw-web.service
 systemctl restart nftfwd.service
 systemctl restart nftfw-rollback.timer
 systemctl restart nftfw-web.service
