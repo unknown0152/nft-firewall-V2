@@ -66,6 +66,9 @@ func Compile(in Input, generation uint64) (Artifact, error) {
 			}
 		}
 	}
+	if err := validateNATTargets(in.Policy.Config.NAT, in.DockerNets); err != nil {
+		return Artifact{}, err
+	}
 	var b strings.Builder
 	line := func(s string) { b.WriteString(s); b.WriteByte('\n') }
 	line("#!/usr/sbin/nft -f")
@@ -189,11 +192,71 @@ func emitNAT(b *strings.Builder, in Input) {
 	line := func(s string) { b.WriteString(s); b.WriteByte('\n') }
 	line("table ip " + NATTable + " {")
 	emitSet(b, "docker_nets_nat", "ipv4_addr", in.DockerNets, false)
+	line("    chain prerouting {")
+	line("        type nat hook prerouting priority dstnat; policy accept;")
+	line("        counter comment \"nftfw:dnat-chain\"")
+	rules := append([]config.NATRule(nil), c.NAT...)
+	sort.Slice(rules, func(i, j int) bool { return rules[i].Name < rules[j].Name })
+	for _, rule := range rules {
+		for _, source := range natSources(rule.Source, in.Policy) {
+			prefix := "        iifname " + strconv.Quote(rule.ExternalInterface) + " "
+			if source != "" {
+				prefix += source + " "
+			}
+			line(fmt.Sprintf("%s%s dport %d dnat to %s:%d comment %s", prefix, rule.Protocol, rule.ExternalPort, rule.Destination, rule.DestinationPort, quoteString("nftfw-nat:"+rule.Name)))
+		}
+	}
+	line("    }")
 	line("    chain postrouting {")
 	line("        type nat hook postrouting priority srcnat; policy accept;")
 	line(fmt.Sprintf("        ip saddr @docker_nets_nat oifname %s masquerade comment \"nftfw:vpn-only-nat\"", strconv.Quote(c.WireGuard.Interface)))
 	line("    }")
 	line("}")
+}
+
+func validateNATTargets(rules []config.NATRule, networks []string) error {
+	if len(rules) == 0 {
+		return nil
+	}
+	prefixes := make([]netip.Prefix, 0, len(networks))
+	for _, raw := range networks {
+		prefix, err := netip.ParsePrefix(raw)
+		if err == nil && prefix.Addr().Is4() {
+			prefixes = append(prefixes, prefix)
+		}
+	}
+	for _, rule := range rules {
+		destination, _ := netip.ParseAddr(rule.Destination)
+		contained := false
+		for _, prefix := range prefixes {
+			if prefix.Contains(destination) {
+				contained = true
+				break
+			}
+		}
+		if !contained {
+			return fmt.Errorf("NAT rule %s destination is outside observed container networks", rule.Name)
+		}
+	}
+	return nil
+}
+
+func natSources(name string, effective policy.Effective) []string {
+	if name == "any" {
+		return []string{""}
+	}
+	zone := effective.Zones[name]
+	var sources []string
+	for _, network := range zone.Networks {
+		if prefix, err := netip.ParsePrefix(network); err == nil && prefix.Addr().Is4() {
+			sources = append(sources, "ip saddr "+prefix.String())
+		}
+	}
+	if len(sources) == 0 {
+		return []string{""}
+	}
+	sort.Strings(sources)
+	return sources
 }
 
 func emitIPv6(b *strings.Builder, in Input) {
@@ -245,11 +308,6 @@ func policyAppliesToChain(p config.Policy, chain string) bool {
 	}
 }
 
-const (
-	anyV4 = "@nftfw-any-v4"
-	anyV6 = "@nftfw-any-v6"
-)
-
 func emitPolicyRules(b *strings.Builder, p config.Policy, svc config.Service, e policy.Effective, chain string) {
 	verdict := p.Action
 	if verdict == "allow" {
@@ -258,59 +316,93 @@ func emitPolicyRules(b *strings.Builder, p config.Policy, svc config.Service, e 
 		verdict = "drop"
 	}
 	if chain == "output" {
-		for _, dst := range zoneNetworks(p.To, e) {
-			prefix := "        " + addressMatch(dst, "daddr") + " "
+		for _, dst := range zoneSelectors(p.To, "destination", e) {
+			prefix := "        " + dst.Expression + " "
 			if p.To == "any" {
 				prefix += "oifname " + strconv.Quote(e.Config.WireGuard.Interface) + " "
 			}
-			b.WriteString(prefix + serviceExpr(svc, familyExpr(dst)) + " " + verdict + " comment " + quoteString("nftfw-policy:"+p.Name) + "\n")
+			b.WriteString(prefix + serviceExpr(svc, dst.Family) + " " + verdict + " comment " + quoteString("nftfw-policy:"+p.Name) + "\n")
 		}
 		return
 	}
-	sources := zoneNetworks(p.From, e)
-	dests := zoneNetworks(p.To, e)
+	sources := zoneSelectors(p.From, "source", e)
+	dests := zoneSelectors(p.To, "destination", e)
 	if chain == "input" && p.To == "host" {
-		dests = []string{""}
+		dests = []zoneSelector{{}}
 	}
 	if len(sources) == 0 {
 		return
 	}
 	for _, src := range sources {
 		for _, dst := range dests {
-			if dst != "" && familyExpr(src) != familyExpr(dst) {
+			if dst.Family != "" && src.Family != dst.Family {
 				continue
 			}
 			prefix := "        "
 			if chain == "input" {
-				prefix += addressMatch(src, "saddr") + " "
+				prefix += src.Expression + " "
 			} else {
-				prefix += addressMatch(src, "saddr") + " "
-				if dst != "" {
-					prefix += addressMatch(dst, "daddr") + " "
+				prefix += src.Expression + " "
+				if dst.Expression != "" {
+					prefix += dst.Expression + " "
 				}
 				if p.To == "any" {
 					prefix += "oifname " + strconv.Quote(e.Config.WireGuard.Interface) + " "
 				}
 			}
-			expr := prefix + serviceExpr(svc, familyExpr(src)) + " " + verdict + " comment " + quoteString("nftfw-policy:"+p.Name)
+			expr := prefix + serviceExpr(svc, src.Family) + " " + verdict + " comment " + quoteString("nftfw-policy:"+p.Name)
 			b.WriteString(expr + "\n")
 		}
 	}
 }
 
-func zoneNetworks(name string, e policy.Effective) []string {
-	if name == "any" {
-		return []string{anyV4, anyV6}
-	}
+type zoneSelector struct {
+	Expression string
+	Family     string
+}
+
+func zoneSelectors(name, direction string, e policy.Effective) []zoneSelector {
 	if name == "host" {
 		return nil
 	}
-	if z, ok := e.Zones[name]; ok {
-		result := append([]string(nil), z.Networks...)
-		sort.Strings(result)
-		return result
+	addressDirection := "saddr"
+	interfaceDirection := "iifname"
+	if direction == "destination" {
+		addressDirection = "daddr"
+		interfaceDirection = "oifname"
 	}
-	return nil
+	if name == "any" {
+		return []zoneSelector{{Expression: "meta nfproto ipv4", Family: "ip"}, {Expression: "meta nfproto ipv6", Family: "ip6"}}
+	}
+	zone, ok := e.Zones[name]
+	if !ok {
+		return nil
+	}
+	var result []zoneSelector
+	seen := map[string]bool{}
+	add := func(selector zoneSelector) {
+		key := selector.Family + "\x00" + selector.Expression
+		if !seen[key] {
+			seen[key] = true
+			result = append(result, selector)
+		}
+	}
+	for _, network := range zone.Networks {
+		add(zoneSelector{Expression: addressMatch(network, addressDirection), Family: familyExpr(network)})
+	}
+	interfaces := append([]string(nil), zone.Interfaces...)
+	for _, configured := range e.Config.Interfaces {
+		if configured.Zone == name {
+			interfaces = append(interfaces, configured.Name)
+		}
+	}
+	sort.Strings(interfaces)
+	for _, name := range interfaces {
+		quoted := strconv.Quote(name)
+		add(zoneSelector{Expression: interfaceDirection + " " + quoted + " meta nfproto ipv4", Family: "ip"})
+		add(zoneSelector{Expression: interfaceDirection + " " + quoted + " meta nfproto ipv6", Family: "ip6"})
+	}
+	return result
 }
 
 func serviceExpr(s config.Service, family string) string {
@@ -351,12 +443,6 @@ func trustedPorts(e policy.Effective) []string {
 }
 
 func familyExpr(prefix string) string {
-	if prefix == anyV6 {
-		return "ip6"
-	}
-	if prefix == anyV4 {
-		return "ip"
-	}
 	if strings.Contains(prefix, ":") {
 		return "ip6"
 	}
@@ -364,14 +450,7 @@ func familyExpr(prefix string) string {
 }
 
 func addressMatch(prefix, direction string) string {
-	switch prefix {
-	case anyV4:
-		return "meta nfproto ipv4"
-	case anyV6:
-		return "meta nfproto ipv6"
-	default:
-		return familyExpr(prefix) + " " + direction + " " + prefix
-	}
+	return familyExpr(prefix) + " " + direction + " " + prefix
 }
 
 func quote(in []config.Interface, role string) string {

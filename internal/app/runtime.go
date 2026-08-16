@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -19,6 +20,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
 	"github.com/unknown0152/nft-firewall-v2/internal/policy"
 	"github.com/unknown0152/nft-firewall-v2/internal/reconcile"
+	"github.com/unknown0152/nft-firewall-v2/internal/recovery"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
 	"github.com/unknown0152/nft-firewall-v2/internal/threatintel"
 	"github.com/unknown0152/nft-firewall-v2/internal/wireguard"
@@ -31,6 +33,7 @@ type Runtime struct {
 	Backend          *nft.Backend
 	Manager          *reconcile.Manager
 	EndpointResolver *wireguard.Resolver
+	WGController     *wireguard.Controller
 }
 
 func Open(ctx context.Context, configPath string, runner nft.Runner) (*Runtime, error) {
@@ -52,6 +55,7 @@ func Open(ctx context.Context, configPath string, runner nft.Runner) (*Runtime, 
 	}
 	be := nft.New(runner)
 	m := &reconcile.Manager{Backend: be, Store: st, SafeTTL: 90 * time.Second}
+	m.SafeGuard = recovery.SystemdGuard{}.Verify
 	m.HealthCheck = func(checkCtx context.Context) error {
 		ok, detail, checkErr := be.Integrity(checkCtx)
 		if checkErr != nil {
@@ -63,13 +67,18 @@ func Open(ctx context.Context, configPath string, runner nft.Runner) (*Runtime, 
 		return nil
 	}
 	resolver := &wireguard.Resolver{CachePath: filepath.Join(st.Dir, "wg-endpoints.json"), KeepRecent: c.WireGuard.KeepRecent, Max: 64, MaxStale: 24 * time.Hour}
-	return &Runtime{Config: c, Effective: e, Store: st, Backend: be, Manager: m, EndpointResolver: resolver}, nil
+	controller := &wireguard.Controller{}
+	return &Runtime{Config: c, Effective: e, Store: st, Backend: be, Manager: m, EndpointResolver: resolver, WGController: controller}, nil
 }
 func (r *Runtime) Close() error {
 	if r == nil || r.Store == nil {
 		return nil
 	}
 	return r.Store.Close()
+}
+
+func (r *Runtime) SecurityEvent(ctx context.Context, event, detail string) {
+	_ = r.Store.Audit(ctx, "peer", event, detail)
 }
 
 func (r *Runtime) Artifact(ctx context.Context) (compiler.Artifact, error) {
@@ -81,7 +90,7 @@ func (r *Runtime) Artifact(ctx context.Context) (compiler.Artifact, error) {
 	if err != nil {
 		return compiler.Artifact{}, err
 	}
-	v4, v6, err := r.bootstrapEndpoints(ctx)
+	v4, v6, _, err := r.bootstrapEndpoints(ctx)
 	if err != nil {
 		return compiler.Artifact{}, err
 	}
@@ -92,7 +101,7 @@ func (r *Runtime) Artifact(ctx context.Context) (compiler.Artifact, error) {
 	return compiler.Compile(compiler.Input{Policy: r.Effective, BlockedV4: state.EffectiveAddresses(claims, "ipv4"), BlockedV6: state.EffectiveAddresses(claims, "ipv6"), TrustedV4: state.EffectiveAddressesFrom(claims, "ipv4", "allow"), TrustedV6: state.EffectiveAddressesFrom(claims, "ipv6", "allow"), BootstrapV4: v4, BootstrapV6: v6, DockerNets: dockerV4, DockerNets6: dockerV6}, id)
 }
 
-func (r *Runtime) bootstrapEndpoints(ctx context.Context) ([]string, []string, error) {
+func (r *Runtime) bootstrapEndpoints(ctx context.Context) ([]string, []string, string, error) {
 	v4 := append([]string(nil), r.Config.WireGuard.BootstrapIPs...)
 	v6 := append([]string(nil), r.Config.WireGuard.BootstrapIPsV6...)
 	hosts := append([]string(nil), r.Config.WireGuard.BootstrapHosts...)
@@ -101,13 +110,17 @@ func (r *Runtime) bootstrapEndpoints(ctx context.Context) ([]string, []string, e
 	}
 	hosts = unique(hosts)
 	if len(hosts) == 0 {
-		return v4, v6, nil
+		return v4, v6, "", nil
 	}
 	var lastErr error
+	preferred := ""
 	for _, host := range hosts {
 		addrs, resolveErr := r.EndpointResolver.Resolve(ctx, host)
 		if resolveErr != nil {
 			lastErr = resolveErr
+		}
+		if host == r.Config.WireGuard.EndpointHost && len(addrs) > 0 {
+			preferred = addrs[0]
 		}
 		for _, raw := range addrs {
 			if ip, parseErr := netip.ParseAddr(raw); parseErr == nil {
@@ -121,12 +134,12 @@ func (r *Runtime) bootstrapEndpoints(ctx context.Context) ([]string, []string, e
 	}
 	v4, v6 = unique(v4), unique(v6)
 	if len(v4)+len(v6) == 0 {
-		return nil, nil, fmt.Errorf("WireGuard endpoints could not be resolved and no fresh cached/static address exists: %w", lastErr)
+		return nil, nil, "", fmt.Errorf("WireGuard endpoints could not be resolved and no fresh cached/static address exists: %w", lastErr)
 	}
 	if len(v4)+len(v6) > 64 {
-		return nil, nil, fmt.Errorf("WireGuard endpoint set exceeds 64 addresses")
+		return nil, nil, "", fmt.Errorf("WireGuard endpoint set exceeds 64 addresses")
 	}
-	return v4, v6, nil
+	return v4, v6, preferred, nil
 }
 
 func unique(values []string) []string {
@@ -182,7 +195,12 @@ func (r *Runtime) containerNets(ctx context.Context) (v4, v6 []string, err error
 }
 
 func (r *Runtime) Status(ctx context.Context) (any, error) {
-	return health.Provider{Store: r.Store, Backend: r.Backend}.Snapshot(ctx)
+	return health.Provider{
+		Store: r.Store, Backend: r.Backend, WG: r.WGController,
+		WGName:          r.Config.WireGuard.Interface,
+		WGHealthyWithin: time.Duration(r.Config.WireGuard.HandshakeSecond) * time.Second,
+		IPv6Mode:        r.Config.System.IPv6Mode, ZoneCount: len(r.Config.Zones), PolicyCount: len(r.Config.Policies),
+	}.Snapshot(ctx)
 }
 func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 	switch req.Op {
@@ -242,7 +260,7 @@ func (r *Runtime) RollbackExpired(ctx context.Context) (bool, error) {
 }
 
 func (r *Runtime) RefreshEndpoints(ctx context.Context) (bool, error) {
-	v4, v6, err := r.bootstrapEndpoints(ctx)
+	v4, v6, preferred, err := r.bootstrapEndpoints(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -256,11 +274,25 @@ func (r *Runtime) RefreshEndpoints(ctx context.Context) (bool, error) {
 	if err := r.Backend.ReplaceSets(ctx, map[string][]string{"wg_bootstrap_v4": v4, "wg_bootstrap_v6": v6}); err != nil {
 		return false, err
 	}
+	changed := false
+	if preferred != "" && r.WGController != nil {
+		changed, err = r.WGController.SetEndpoint(ctx, r.Config.WireGuard.Interface, preferred, r.Config.WireGuard.EndpointPort)
+		if err != nil {
+			_ = r.Store.Audit(ctx, "system", "wireguard_endpoint_update_failed", "live peer update rejected")
+			return false, err
+		}
+	}
 	_ = r.Store.Audit(ctx, "system", "wireguard_endpoint_set_refreshed", fmt.Sprintf("ipv4=%d ipv6=%d", len(v4), len(v6)))
+	if changed {
+		_ = r.Store.Audit(ctx, "system", "wireguard_endpoint_changed", "live peer endpoint updated")
+	}
 	return true, nil
 }
 
 func (r *Runtime) RefreshClaimSets(ctx context.Context) (bool, error) {
+	if _, err := r.Store.PurgeExpiredClaims(ctx, time.Now().UTC()); err != nil {
+		return false, err
+	}
 	claims, err := r.Store.Claims(ctx, time.Now().UTC())
 	if err != nil {
 		return false, err
@@ -284,10 +316,38 @@ func (r *Runtime) RefreshClaimSets(ctx context.Context) (bool, error) {
 	return true, nil
 }
 
+func (r *Runtime) RefreshContainerSets(ctx context.Context) (bool, error) {
+	v4, v6, err := r.containerNets(ctx)
+	if err != nil {
+		if r.Config.Integrations.DockerEnabled {
+			_ = r.Store.SetIntegrationState(ctx, "docker", "degraded", 0, false)
+		}
+		return false, err
+	}
+	existing, err := r.Backend.ExistingOwned(ctx)
+	if err != nil {
+		return false, err
+	}
+	if !existing["inet/"+nft.FilterTable] || !existing["ip/"+nft.NATTable] {
+		return false, nil
+	}
+	if err := r.Backend.ReplaceContainerNetworks(ctx, v4, v6); err != nil {
+		return false, err
+	}
+	if r.Config.Integrations.DockerEnabled {
+		_ = r.Store.SetIntegrationState(ctx, "docker", "healthy", len(v4)+len(v6), true)
+	}
+	return true, nil
+}
+
 func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
 	var failures []error
 	updated := false
 	for _, feedConfig := range r.Config.ThreatFeeds {
+		name := "threatfeed/" + feedConfig.Name
+		if !r.integrationDue(ctx, name, feedConfig.RefreshSeconds) {
+			continue
+		}
 		max := feedConfig.MaxEntries
 		if max == 0 {
 			max = 10000
@@ -300,7 +360,6 @@ func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
 		if min == 0 {
 			min = 1
 		}
-		name := "threatfeed/" + feedConfig.Name
 		addresses, err := (threatintel.Feed{URL: feedConfig.URL, MaxEntries: max, MaxBytes: maxBytes}).Fetch(ctx)
 		if err == nil && len(addresses) < min {
 			err = fmt.Errorf("entry sanity threshold not met: got %d, require %d", len(addresses), min)
@@ -314,7 +373,8 @@ func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
 			}
 		}
 		if err != nil {
-			_ = r.Store.SetIntegrationState(ctx, name, "degraded", 0, false)
+			oldCount, _ := r.Store.SourceClaimCount(ctx, name)
+			_ = r.Store.SetIntegrationState(ctx, name, "degraded", oldCount, false)
 			_ = r.Store.Audit(ctx, "integration", "threat_feed_failed", fmt.Sprintf("name=%s", feedConfig.Name))
 			failures = append(failures, fmt.Errorf("%s: %w", name, err))
 			continue
@@ -328,6 +388,10 @@ func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
 		updated = true
 	}
 	for _, geoConfig := range r.Config.GeoSets {
+		name := "geo/" + geoConfig.Name
+		if !r.integrationDue(ctx, name, geoConfig.RefreshSeconds) {
+			continue
+		}
 		max := geoConfig.MaxEntries
 		if max == 0 {
 			max = 100000
@@ -336,13 +400,13 @@ func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
 		if min == 0 {
 			min = 1
 		}
-		name := "geo/" + geoConfig.Name
 		addresses, err := geo.LoadCIDRs(geoConfig.CIDRFile, max)
 		if err == nil && len(addresses) < min {
 			err = fmt.Errorf("entry sanity threshold not met: got %d, require %d", len(addresses), min)
 		}
 		if err != nil {
-			_ = r.Store.SetIntegrationState(ctx, name, "degraded", 0, false)
+			oldCount, _ := r.Store.SourceClaimCount(ctx, name)
+			_ = r.Store.SetIntegrationState(ctx, name, "degraded", oldCount, false)
 			_ = r.Store.Audit(ctx, "integration", "geoip_refresh_failed", fmt.Sprintf("name=%s", geoConfig.Name))
 			failures = append(failures, fmt.Errorf("%s: %w", name, err))
 			continue
@@ -361,6 +425,20 @@ func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
 		}
 	}
 	return errors.Join(failures...)
+}
+
+func (r *Runtime) integrationDue(ctx context.Context, name string, refreshSeconds int) bool {
+	if refreshSeconds == 0 {
+		refreshSeconds = 3600
+	}
+	current, err := r.Store.IntegrationState(ctx, name)
+	if errors.Is(err, sql.ErrNoRows) {
+		return true
+	}
+	if err != nil {
+		return true
+	}
+	return time.Now().UTC().Sub(current.UpdatedAt) >= time.Duration(refreshSeconds)*time.Second
 }
 func OpenStoreOnly(ctx context.Context, path string) (*state.Store, error) {
 	return state.Open(ctx, path)

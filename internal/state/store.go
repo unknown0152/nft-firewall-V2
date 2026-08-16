@@ -3,7 +3,9 @@ package state
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -18,9 +20,10 @@ import (
 )
 
 type Store struct {
-	DB  *sql.DB
-	Dir string
-	mu  sync.Mutex
+	DB   *sql.DB
+	Dir  string
+	Path string
+	mu   sync.Mutex
 }
 
 type Generation struct {
@@ -56,11 +59,9 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("state database path is empty")
 	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
-		return nil, fmt.Errorf("create state directory: %w", err)
-	}
-	if fi, err := os.Stat(filepath.Dir(path)); err == nil && fi.Mode().Perm()&0o002 != 0 {
-		return nil, errors.New("state directory is world-writable")
+	path, err := prepareStatePath(path)
+	if err != nil {
+		return nil, err
 	}
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -73,12 +74,75 @@ func Open(ctx context.Context, path string) (*Store, error) {
 			return nil, fmt.Errorf("sqlite %s: %w", stmt, err)
 		}
 	}
-	s := &Store{DB: db, Dir: filepath.Dir(path)}
+	for _, suffix := range []string{"", "-wal", "-shm"} {
+		if err := restrictRegularFile(path+suffix, 0o600); err != nil && !errors.Is(err, os.ErrNotExist) {
+			db.Close()
+			return nil, err
+		}
+	}
+	s := &Store{DB: db, Dir: filepath.Dir(path), Path: path}
 	if err := s.migrate(ctx); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+func prepareStatePath(path string) (string, error) {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return "", fmt.Errorf("resolve state database path: %w", err)
+	}
+	parent := filepath.Dir(abs)
+	if err := os.MkdirAll(parent, 0o750); err != nil {
+		return "", fmt.Errorf("create state directory: %w", err)
+	}
+	resolvedParent, err := filepath.EvalSymlinks(parent)
+	if err != nil {
+		return "", fmt.Errorf("resolve state directory: %w", err)
+	}
+	if resolvedParent != parent {
+		return "", errors.New("state directory path contains a symlink")
+	}
+	parentInfo, err := os.Stat(parent)
+	if err != nil {
+		return "", fmt.Errorf("stat state directory: %w", err)
+	}
+	if !parentInfo.IsDir() || parentInfo.Mode().Perm()&0o022 != 0 {
+		return "", errors.New("state directory must be a directory and not group/other writable")
+	}
+	for _, candidate := range []string{abs, abs + "-wal", abs + "-shm", abs + "-journal"} {
+		if info, statErr := os.Lstat(candidate); statErr == nil {
+			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+				return "", fmt.Errorf("state file %s must be regular and non-symlink", filepath.Base(candidate))
+			}
+		} else if !errors.Is(statErr, os.ErrNotExist) {
+			return "", fmt.Errorf("stat state file: %w", statErr)
+		}
+	}
+	f, err := os.OpenFile(abs, os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return "", fmt.Errorf("create state database: %w", err)
+	}
+	if err := f.Chmod(0o600); err != nil {
+		f.Close()
+		return "", fmt.Errorf("secure state database: %w", err)
+	}
+	if err := f.Close(); err != nil {
+		return "", err
+	}
+	return abs, nil
+}
+
+func restrictRegularFile(path string, mode os.FileMode) error {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
+		return fmt.Errorf("state file %s is not a regular file", filepath.Base(path))
+	}
+	return os.Chmod(path, mode)
 }
 
 func (s *Store) Close() error {
@@ -194,7 +258,13 @@ func (s *Store) SaveGeneration(ctx context.Context, id uint64, checksum, script 
 	if err := tmp.Close(); err != nil {
 		return err
 	}
-	if err := os.Rename(tmpPath, path); err != nil {
+	if err := os.Link(tmpPath, path); err != nil {
+		return err
+	}
+	if err := os.Remove(tmpPath); err != nil {
+		return err
+	}
+	if err := syncDirectory(genDir); err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -204,6 +274,7 @@ func (s *Store) SaveGeneration(ctx context.Context, id uint64, checksum, script 
 	}
 	_, err = s.DB.ExecContext(ctx, `INSERT INTO generations(id,checksum,script_path,status,created_at,rollback_deadline,previous_id) VALUES(?,?,?,?,?,?,?)`, id, checksum, path, "pending", now.Format(time.RFC3339Nano), deadlineText, previous)
 	if err != nil {
+		_ = os.Remove(path)
 		return err
 	}
 	return nil
@@ -277,11 +348,58 @@ func (s *Store) ReadScript(g *Generation) (string, error) {
 	if g == nil {
 		return "", errors.New("nil generation")
 	}
-	b, err := os.ReadFile(g.ScriptPath)
-	return string(b), err
+	expectedDir := filepath.Join(s.Dir, "generations") + string(os.PathSeparator)
+	abs, err := filepath.Abs(g.ScriptPath)
+	if err != nil || !strings.HasPrefix(abs, expectedDir) {
+		return "", errors.New("generation script path escapes the state directory")
+	}
+	info, err := os.Lstat(abs)
+	if err != nil {
+		return "", err
+	}
+	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
+		return "", errors.New("generation script has unsafe type or permissions")
+	}
+	b, err := os.ReadFile(abs)
+	if err != nil {
+		return "", err
+	}
+	want, err := hex.DecodeString(g.Checksum)
+	if err != nil || len(want) != sha256.Size {
+		return "", errors.New("generation checksum is malformed")
+	}
+	got := sha256.Sum256(b)
+	if !equalBytes(got[:], want) {
+		return "", errors.New("generation script checksum mismatch")
+	}
+	return string(b), nil
+}
+
+func equalBytes(a, b []byte) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	var diff byte
+	for i := range a {
+		diff |= a[i] ^ b[i]
+	}
+	return diff == 0
+}
+
+func syncDirectory(path string) error {
+	dir, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer dir.Close()
+	return dir.Sync()
 }
 
 func (s *Store) AddClaim(ctx context.Context, c Claim) (int64, error) {
+	return s.AddClaimBounded(ctx, c, 0)
+}
+
+func (s *Store) AddClaimBounded(ctx context.Context, c Claim, max int) (int64, error) {
 	if err := ValidateClaim(c.Address, c.Family); err != nil {
 		return 0, err
 	}
@@ -302,15 +420,35 @@ func (s *Store) AddClaim(ctx context.Context, c Claim) (int64, error) {
 	if c.ExpiresAt != nil {
 		expires = c.ExpiresAt.UTC().Format(time.RFC3339Nano)
 	}
-	res, err := s.DB.ExecContext(ctx, `INSERT INTO claims(address,family,source,reason,actor,created_at,expires_at) VALUES(?,?,?,?,?,?,?)`, c.Address, c.Family, c.Source, c.Reason, c.Actor, c.CreatedAt.UTC().Format(time.RFC3339Nano), expires)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	if max > 0 {
+		var count int
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM claims WHERE expires_at IS NULL OR expires_at>?", now.Format(time.RFC3339Nano)).Scan(&count); err != nil {
+			return 0, err
+		}
+		if count >= max {
+			return 0, fmt.Errorf("claim limit reached (%d)", max)
+		}
+	}
+	res, err := tx.ExecContext(ctx, `INSERT INTO claims(address,family,source,reason,actor,created_at,expires_at) VALUES(?,?,?,?,?,?,?)`, c.Address, c.Family, c.Source, c.Reason, c.Actor, c.CreatedAt.UTC().Format(time.RFC3339Nano), expires)
 	if err != nil {
 		return 0, err
 	}
 	id, err := res.LastInsertId()
-	if err == nil {
-		_ = s.Audit(ctx, c.Actor, "claim_added", fmt.Sprintf("id=%d address=%s source=%s", id, c.Address, c.Source))
+	if err != nil {
+		return 0, err
 	}
-	return id, err
+	if _, err := tx.ExecContext(ctx, "INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)", now.Format(time.RFC3339Nano), c.Actor, "claim_added", fmt.Sprintf("id=%d address=%s source=%s", id, c.Address, c.Source)); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 func (s *Store) RemoveClaim(ctx context.Context, id int64, actor string) error {
@@ -421,7 +559,7 @@ func (s *Store) ClaimCountExcludingSource(ctx context.Context, source string) (i
 func EffectiveAddresses(claims []Claim, family string) []string {
 	seen := map[string]bool{}
 	for _, c := range claims {
-		if c.Family == family && !strings.HasPrefix(c.Source, "allow") {
+		if c.Family == family && !isAllowSource(c.Source) {
 			seen[c.Address] = true
 		}
 	}
@@ -436,7 +574,7 @@ func EffectiveAddresses(claims []Claim, family string) []string {
 func EffectiveAddressesFrom(claims []Claim, family, sourcePrefix string) []string {
 	seen := map[string]bool{}
 	for _, c := range claims {
-		if c.Family == family && (sourcePrefix == "" || strings.HasPrefix(c.Source, sourcePrefix)) {
+		if c.Family == family && (sourcePrefix == "" || (sourcePrefix == "allow" && isAllowSource(c.Source)) || strings.HasPrefix(c.Source, sourcePrefix+"/")) {
 			seen[c.Address] = true
 		}
 	}
@@ -449,6 +587,9 @@ func EffectiveAddressesFrom(claims []Claim, family, sourcePrefix string) []strin
 }
 
 func ValidateClaim(address, family string) error {
+	if family != "ipv4" && family != "ipv6" {
+		return errors.New("claim family must be ipv4 or ipv6")
+	}
 	p, err := netip.ParsePrefix(address)
 	if err != nil {
 		a, e := netip.ParseAddr(address)
@@ -467,6 +608,22 @@ func ValidateClaim(address, family string) error {
 		return errors.New("claim family/address mismatch")
 	}
 	return nil
+}
+
+func isAllowSource(source string) bool {
+	return source == "allow" || strings.HasPrefix(source, "allow/")
+}
+
+func (s *Store) PurgeExpiredClaims(ctx context.Context, now time.Time) (int64, error) {
+	result, err := s.DB.ExecContext(ctx, "DELETE FROM claims WHERE expires_at IS NOT NULL AND expires_at<=?", now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return 0, err
+	}
+	count, err := result.RowsAffected()
+	if err == nil && count > 0 {
+		_ = s.Audit(ctx, "system", "expired_claims_purged", fmt.Sprintf("count=%d", count))
+	}
+	return count, err
 }
 
 func (s *Store) Audit(ctx context.Context, actor, event, detail string) error {
@@ -541,6 +698,101 @@ func (s *Store) IntegrationStates(ctx context.Context) ([]IntegrationState, erro
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+func (s *Store) IntegrationState(ctx context.Context, name string) (*IntegrationState, error) {
+	var item IntegrationState
+	var success sql.NullString
+	var updated string
+	err := s.DB.QueryRowContext(ctx, "SELECT name,status,entry_count,last_success,updated_at FROM integration_state WHERE name=?", name).Scan(&item.Name, &item.Status, &item.EntryCount, &success, &updated)
+	if err != nil {
+		return nil, err
+	}
+	item.UpdatedAt, _ = time.Parse(time.RFC3339Nano, updated)
+	if success.Valid {
+		t, parseErr := time.Parse(time.RFC3339Nano, success.String)
+		if parseErr == nil {
+			item.LastSuccess = &t
+		}
+	}
+	return &item, nil
+}
+
+func (s *Store) SourceClaimCount(ctx context.Context, source string) (int, error) {
+	var count int
+	err := s.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM claims WHERE source=?", source).Scan(&count)
+	return count, err
+}
+
+// QuickCheck performs SQLite's bounded structural integrity check.
+func (s *Store) QuickCheck(ctx context.Context) error {
+	var result string
+	if err := s.DB.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&result); err != nil {
+		return err
+	}
+	if result != "ok" {
+		return fmt.Errorf("SQLite quick_check: %s", result)
+	}
+	return nil
+}
+
+// Backup writes a consistent SQLite snapshot and atomically publishes it.
+func (s *Store) Backup(ctx context.Context, destination string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	abs, err := filepath.Abs(destination)
+	if err != nil {
+		return err
+	}
+	parent := filepath.Dir(abs)
+	if err := os.MkdirAll(parent, 0o750); err != nil {
+		return err
+	}
+	resolved, err := filepath.EvalSymlinks(parent)
+	if err != nil || resolved != parent {
+		return errors.New("backup directory path is unsafe")
+	}
+	if info, statErr := os.Stat(parent); statErr != nil || info.Mode().Perm()&0o022 != 0 {
+		return errors.New("backup directory is group/other writable")
+	}
+	if _, err := os.Lstat(abs); err == nil {
+		return errors.New("backup destination already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	tmp, err := os.CreateTemp(parent, ".nftfw-backup-*.db")
+	if err != nil {
+		return err
+	}
+	tmpPath := tmp.Name()
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(tmpPath); err != nil {
+		return err
+	}
+	defer os.Remove(tmpPath)
+	if _, err := s.DB.ExecContext(ctx, "VACUUM INTO ?", tmpPath); err != nil {
+		return fmt.Errorf("create SQLite backup: %w", err)
+	}
+	if err := restrictRegularFile(tmpPath, 0o600); err != nil {
+		return err
+	}
+	f, err := os.Open(tmpPath)
+	if err != nil {
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(tmpPath, abs); err != nil {
+		return err
+	}
+	return syncDirectory(parent)
 }
 
 // ReadGenerationScript is an explicit alias used by reconciliation callers.

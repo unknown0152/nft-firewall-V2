@@ -104,6 +104,23 @@ func (b *Backend) Apply(ctx context.Context, script string) error {
 	return nil
 }
 
+// CheckCandidate validates the exact destroy-owned/create transaction Apply
+// would execute, but does not mutate nftables.
+func (b *Backend) CheckCandidate(ctx context.Context, script string) error {
+	if err := validateScript(script); err != nil {
+		return err
+	}
+	owned, err := b.ExistingOwned(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect owned nft tables: %w", err)
+	}
+	transaction := prependDestroy(script, owned, b.Owned)
+	if err := validateScript(transaction); err != nil {
+		return err
+	}
+	return b.Check(ctx, transaction)
+}
+
 // DestroyOwned removes only tables belonging to this product. It is used when
 // rolling back the first generation or uninstalling with explicit intent.
 func (b *Backend) DestroyOwned(ctx context.Context) error {
@@ -228,6 +245,52 @@ func (b *Backend) ReplaceSets(ctx context.Context, sets map[string][]string) err
 	_, stderr, runErr := b.Runner.Run(ctx, "--file", path)
 	if runErr != nil {
 		return fmt.Errorf("nft set replacement failed: %s: %w", strings.TrimSpace(stderr), runErr)
+	}
+	return nil
+}
+
+// ReplaceContainerNetworks updates filter and NAT membership in one atomic
+// transaction so a recreated bridge never has split enforcement state.
+func (b *Backend) ReplaceContainerNetworks(ctx context.Context, v4, v6 []string) error {
+	sets := []struct {
+		family string
+		table  string
+		name   string
+		values []string
+		ipv4   bool
+	}{
+		{"inet", FilterTable, "docker_nets", v4, true},
+		{"inet", FilterTable, "docker_nets6", v6, false},
+		{"ip", NATTable, "docker_nets_nat", v4, true},
+	}
+	var script strings.Builder
+	for _, set := range sets {
+		values := append([]string(nil), set.values...)
+		sort.Strings(values)
+		for _, raw := range values {
+			prefix, err := netip.ParsePrefix(raw)
+			if err != nil || prefix.Bits() == 0 || prefix.Addr().Is4() != set.ipv4 {
+				return fmt.Errorf("invalid container network %q", raw)
+			}
+		}
+		fmt.Fprintf(&script, "flush set %s %s %s\n", set.family, set.table, set.name)
+		if len(values) > 0 {
+			fmt.Fprintf(&script, "add element %s %s %s { %s }\n", set.family, set.table, set.name, strings.Join(values, ", "))
+		}
+	}
+	if err := b.Check(ctx, script.String()); err != nil {
+		return err
+	}
+	path, cleanup, err := b.tempScript(script.String(), "nftfw-containers-")
+	if err != nil {
+		return err
+	}
+	defer cleanup()
+	ctx, cancel := context.WithTimeout(ctx, b.Timeout)
+	defer cancel()
+	_, stderr, runErr := b.Runner.Run(ctx, "--file", path)
+	if runErr != nil {
+		return fmt.Errorf("nft container set replacement failed: %s: %w", strings.TrimSpace(stderr), runErr)
 	}
 	return nil
 }
@@ -396,6 +459,12 @@ func validateOwnedTableJSON(data []byte, table Table) (bool, string, error) {
 			}
 		}
 	case (Table{"ip", NATTable}):
+		if ok, detail := requireBaseChain("prerouting", "nat", "prerouting", "accept"); !ok {
+			return false, detail, nil
+		}
+		if ok, detail := requireComment("nftfw:dnat-chain"); !ok {
+			return false, detail, nil
+		}
 		if ok, detail := requireBaseChain("postrouting", "nat", "postrouting", "accept"); !ok {
 			return false, detail, nil
 		}

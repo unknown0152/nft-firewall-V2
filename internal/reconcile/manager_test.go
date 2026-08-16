@@ -2,7 +2,9 @@ package reconcile
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"path/filepath"
 	"testing"
 	"time"
@@ -30,7 +32,9 @@ func (r *runner) Run(_ context.Context, args ...string) (string, string, error) 
 	return "", "", nil
 }
 func artifact(id uint64) compiler.Artifact {
-	return compiler.Artifact{Generation: id, Checksum: "abc", Script: "table inet nftfw_filter { }\ntable ip nftfw_nat { }\ntable ip6 nftfw_filter6 { }\n"}
+	script := "table inet nftfw_filter { }\ntable ip nftfw_nat { }\ntable ip6 nftfw_filter6 { }\n"
+	sum := sha256.Sum256([]byte(script))
+	return compiler.Artifact{Generation: id, Checksum: hex.EncodeToString(sum[:]), Script: script}
 }
 func newManager(t *testing.T) (*Manager, *state.Store, *runner) {
 	t.Helper()
@@ -39,7 +43,7 @@ func newManager(t *testing.T) (*Manager, *state.Store, *runner) {
 		t.Fatal(err)
 	}
 	r := &runner{}
-	return &Manager{Backend: nft.New(r), Store: s, SafeTTL: time.Millisecond}, s, r
+	return &Manager{Backend: nft.New(r), Store: s, SafeTTL: time.Millisecond, SafeGuard: func(context.Context) error { return nil }}, s, r
 }
 func TestSafeApplyCommitAndTimeoutRollback(t *testing.T) {
 	ctx := context.Background()
@@ -139,7 +143,7 @@ func TestPendingGenerationSurvivesRestart(t *testing.T) {
 	}
 	r := &runner{}
 	past := time.Now().Add(-time.Hour)
-	m := &Manager{Backend: nft.New(r), Store: s, SafeTTL: time.Minute, Now: func() time.Time { return past }}
+	m := &Manager{Backend: nft.New(r), Store: s, SafeTTL: time.Minute, Now: func() time.Time { return past }, SafeGuard: func(context.Context) error { return nil }}
 	if _, err := m.Apply(ctx, artifact(1), true); err != nil {
 		t.Fatal(err)
 	}
@@ -175,5 +179,18 @@ func TestKernelCheckFailureRetainsCommitted(t *testing.T) {
 	g, err := s.LastKnownGood(ctx)
 	if err != nil || g.ID != 1 {
 		t.Fatalf("known-good generation changed after check failure: %#v, %v", g, err)
+	}
+}
+
+func TestSafeApplyRequiresIndependentGuard(t *testing.T) {
+	m, s, _ := newManager(t)
+	defer s.Close()
+	m.SafeGuard = nil
+	if _, err := m.Apply(context.Background(), artifact(1), true); err == nil {
+		t.Fatal("safe apply without independent rollback guard was accepted")
+	}
+	m.SafeGuard = func(context.Context) error { return context.Canceled }
+	if _, err := m.Apply(context.Background(), artifact(1), true); err == nil {
+		t.Fatal("safe apply with failed rollback guard was accepted")
 	}
 }

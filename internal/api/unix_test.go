@@ -3,6 +3,7 @@ package api
 import (
 	"bytes"
 	"context"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -13,6 +14,30 @@ type testHandler struct{}
 
 func (testHandler) Status(context.Context) (any, error) {
 	return map[string]string{"status": "HEALTHY"}, nil
+}
+
+func TestPrepareSocketPathRejectsUnsafeObjectsAndParents(t *testing.T) {
+	dir := t.TempDir()
+	regular := filepath.Join(dir, "control.sock")
+	if err := os.WriteFile(regular, []byte("do not remove"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareSocketPath(regular); err == nil {
+		t.Fatal("regular file at socket path was removed")
+	}
+	if data, err := os.ReadFile(regular); err != nil || string(data) != "do not remove" {
+		t.Fatal("regular file at socket path was modified")
+	}
+	unsafe := filepath.Join(dir, "unsafe")
+	if err := os.Mkdir(unsafe, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafe, 0o777); err != nil {
+		t.Fatal(err)
+	}
+	if err := prepareSocketPath(filepath.Join(unsafe, "status.sock")); err == nil {
+		t.Fatal("group/other-writable socket parent accepted")
+	}
 }
 
 func FuzzDecodeRequest(f *testing.F) {

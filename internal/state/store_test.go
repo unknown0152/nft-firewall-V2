@@ -2,12 +2,19 @@ package state
 
 import (
 	"context"
+	"crypto/sha256"
 	"database/sql"
+	"encoding/hex"
 	"os"
 	"path/filepath"
 	"testing"
 	"time"
 )
+
+func testChecksum(text string) string {
+	sum := sha256.Sum256([]byte(text))
+	return hex.EncodeToString(sum[:])
+}
 
 func TestClaimProvenanceUnion(t *testing.T) {
 	ctx := context.Background()
@@ -105,5 +112,80 @@ func TestMigrationAndCorruptDatabase(t *testing.T) {
 			s.Close()
 		}
 		t.Fatal("corrupt db accepted")
+	}
+}
+
+func TestGenerationIntegrityAndSQLiteBackup(t *testing.T) {
+	ctx := context.Background()
+	dir := t.TempDir()
+	path := filepath.Join(dir, "state.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if info, err := os.Stat(path); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("state database mode is not 0600: info=%v err=%v", info, err)
+	}
+	script := "table inet nftfw_filter { }\n"
+	if err := s.SaveGeneration(ctx, 1, testChecksum(script), script, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.Pending(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ReadScript(g); err != nil || got != script {
+		t.Fatalf("valid generation rejected: got=%q err=%v", got, err)
+	}
+	backup := filepath.Join(dir, "backups", "state.db")
+	if err := s.Backup(ctx, backup); err != nil {
+		t.Fatal(err)
+	}
+	if info, err := os.Stat(backup); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("backup mode is not 0600: info=%v err=%v", info, err)
+	}
+	backupStore, err := Open(ctx, backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := backupStore.QuickCheck(ctx); err != nil {
+		backupStore.Close()
+		t.Fatal(err)
+	}
+	backupStore.Close()
+	if err := os.WriteFile(g.ScriptPath, []byte("tampered\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReadScript(g); err == nil {
+		t.Fatal("tampered generation script accepted")
+	}
+}
+
+func TestOpenRejectsSymlinkedStatePaths(t *testing.T) {
+	dir := t.TempDir()
+	realDir := filepath.Join(dir, "real")
+	if err := os.Mkdir(realDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	linkDir := filepath.Join(dir, "link")
+	if err := os.Symlink(realDir, linkDir); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := Open(context.Background(), filepath.Join(linkDir, "state.db")); err == nil {
+		store.Close()
+		t.Fatal("symlinked state directory accepted")
+	}
+	target := filepath.Join(realDir, "target.db")
+	if err := os.WriteFile(target, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dbLink := filepath.Join(realDir, "state.db")
+	if err := os.Symlink(target, dbLink); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := Open(context.Background(), dbLink); err == nil {
+		store.Close()
+		t.Fatal("symlinked state database accepted")
 	}
 }

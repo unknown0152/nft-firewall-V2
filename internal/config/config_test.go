@@ -95,6 +95,20 @@ func TestLoadRejectsWritableConfig(t *testing.T) {
 	}
 }
 
+func TestLoadRejectsWritableParent(t *testing.T) {
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o770); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "nftfw.toml")
+	if err := os.WriteFile(path, []byte(validTOML), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := Load(path); err == nil {
+		t.Fatal("configuration in group-writable parent accepted")
+	}
+}
+
 func TestValidateRejectsUnsupportedNonStrictMode(t *testing.T) {
 	c, err := Load(writeConfig(t, validTOML))
 	if err != nil {
@@ -119,6 +133,37 @@ func TestValidateRejectsAmbiguousZonesAndPolicies(t *testing.T) {
 	c.Policies = append(c.Policies, Policy{Name: "duplicate", From: "lan", To: "host", Service: "ssh", Action: "deny"})
 	if err := Validate(c); err == nil {
 		t.Fatal("duplicate policy tuple accepted")
+	}
+}
+
+func TestValidateRejectsUnknownAndEmptyInterfaceZones(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Interfaces[0].Zone = "missing"
+	if err := Validate(c); err == nil {
+		t.Fatal("unknown interface zone accepted")
+	}
+	c, _ = Load(writeConfig(t, validTOML))
+	c.Zones = append(c.Zones, Zone{Name: "empty"})
+	if err := Validate(c); err == nil {
+		t.Fatal("empty zone accepted")
+	}
+}
+
+func TestValidateNATSchema(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.NAT = []NATRule{{Name: "web", Source: "any", ExternalInterface: "eth0", Protocol: "tcp", ExternalPort: 8443, Destination: "172.19.0.5", DestinationPort: 443}}
+	if err := Validate(c); err != nil {
+		t.Fatal(err)
+	}
+	c.NAT = append(c.NAT, NATRule{Name: "duplicate", Source: "any", ExternalInterface: "eth0", Protocol: "tcp", ExternalPort: 8443, Destination: "172.19.0.6", DestinationPort: 443})
+	if err := Validate(c); err == nil {
+		t.Fatal("conflicting NAT binding accepted")
 	}
 }
 

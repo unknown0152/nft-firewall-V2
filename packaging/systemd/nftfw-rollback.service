@@ -4,7 +4,7 @@ After=local-fs.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/lib/nftfw/nftfwd --rollback-expired --config /etc/nftfw/nftfw.toml
+ExecStart=/usr/lib/nftfw/nftfwd --rollback-expired --state-db /var/lib/nftfw/state.db
 User=root
 Group=root
 UMask=0077
@@ -18,10 +18,11 @@ ProtectKernelModules=yes
 ProtectControlGroups=yes
 LockPersonality=yes
 RestrictRealtime=yes
+RestrictSUIDSGID=yes
 MemoryDenyWriteExecute=yes
 RestrictNamespaces=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ReadWritePaths=/var/lib/nftfw /run/nftfw
-CapabilityBoundingSet=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
-AmbientCapabilities=CAP_NET_ADMIN CAP_NET_RAW CAP_DAC_READ_SEARCH
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN

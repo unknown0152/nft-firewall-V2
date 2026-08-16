@@ -19,6 +19,7 @@ type Manager struct {
 	SafeTTL     time.Duration
 	Now         func() time.Time
 	HealthCheck func(context.Context) error
+	SafeGuard   func(context.Context) error
 }
 
 type Result struct {
@@ -36,6 +37,14 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 		return Result{}, fmt.Errorf("generation %d is still pending; commit or roll it back first", pending.ID)
 	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return Result{}, err
+	}
+	if safe {
+		if m.SafeGuard == nil {
+			return Result{}, errors.New("safe apply requires an independent rollback guard")
+		}
+		if err := m.SafeGuard(ctx); err != nil {
+			return Result{}, fmt.Errorf("safe apply refused: %w", err)
+		}
 	}
 	now := time.Now
 	if m.Now != nil {
@@ -67,6 +76,8 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 		return Result{}, err
 	}
 	if err := m.Store.MarkApplied(ctx, artifact.Generation); err != nil {
+		_ = m.restore(ctx, previous)
+		_ = m.Store.MarkRolledBack(ctx, artifact.Generation)
 		return Result{}, err
 	}
 	if m.HealthCheck != nil {
@@ -82,11 +93,24 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 	result := Result{Generation: artifact.Generation, Checksum: artifact.Checksum, Deadline: deadline, Committed: !safe}
 	if !safe {
 		if err := m.Store.Commit(ctx, artifact.Generation); err != nil {
+			_ = m.restore(ctx, previous)
+			_ = m.Store.MarkRolledBack(ctx, artifact.Generation)
 			return Result{}, err
 		}
 	}
 	_ = m.Store.Audit(ctx, "system", "generation_applied", fmt.Sprintf("generation=%d safe=%t", artifact.Generation, safe))
 	return result, nil
+}
+
+func (m *Manager) restore(ctx context.Context, previous *state.Generation) error {
+	if previous == nil {
+		return m.Backend.DestroyOwned(ctx)
+	}
+	script, err := m.Store.ReadScript(previous)
+	if err != nil {
+		return err
+	}
+	return m.Backend.Apply(ctx, script)
 }
 
 func (m *Manager) Commit(ctx context.Context, id uint64) error {

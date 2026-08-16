@@ -22,15 +22,6 @@ func (s Service) Add(ctx context.Context, address, source, reason, actor string,
 	if s.Store == nil {
 		return 0, fmt.Errorf("block claim store is unavailable")
 	}
-	if s.Max > 0 {
-		var count int
-		if err := s.Store.DB.QueryRowContext(ctx, "SELECT COUNT(*) FROM claims").Scan(&count); err != nil {
-			return 0, err
-		}
-		if count >= s.Max {
-			return 0, fmt.Errorf("block claim limit reached (%d)", s.Max)
-		}
-	}
 	if !sourcePattern.MatchString(source) || strings.HasPrefix(source, "allow") {
 		return 0, fmt.Errorf("invalid block claim source %q", source)
 	}
@@ -46,7 +37,7 @@ func (s Service) Add(ctx context.Context, address, source, reason, actor string,
 	if p.Addr().Is4() {
 		family = "ipv4"
 	}
-	return s.Store.AddClaim(ctx, state.Claim{Address: p.Masked().String(), Family: family, Source: source, Reason: reason, Actor: actor, ExpiresAt: expires})
+	return s.Store.AddClaimBounded(ctx, state.Claim{Address: p.Masked().String(), Family: family, Source: source, Reason: reason, Actor: actor, ExpiresAt: expires}, s.Max)
 }
 
 func (s Service) AddAllow(ctx context.Context, address, reason, actor string, expires *time.Time) (int64, error) {
@@ -65,7 +56,7 @@ func (s Service) AddAllow(ctx context.Context, address, reason, actor string, ex
 	if p.Addr().Is4() {
 		family = "ipv4"
 	}
-	return s.Store.AddClaim(ctx, state.Claim{Address: p.Masked().String(), Family: family, Source: "allow", Reason: reason, Actor: actor, ExpiresAt: expires})
+	return s.Store.AddClaimBounded(ctx, state.Claim{Address: p.Masked().String(), Family: family, Source: "allow", Reason: reason, Actor: actor, ExpiresAt: expires}, s.Max)
 }
 
 func (s Service) Remove(ctx context.Context, id int64, actor string) error {

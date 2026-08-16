@@ -63,6 +63,21 @@ func TestApplyDestroysOnlyOwnedTables(t *testing.T) {
 		t.Fatalf("check/apply did not use the exact owned-table transaction: %#v", f.scripts)
 	}
 }
+
+func TestCheckCandidateUsesApplyTransactionWithoutApplying(t *testing.T) {
+	f := &fakeRunner{tables: `{"nftables":[{"table":{"family":"inet","name":"nftfw_filter"}}]}`}
+	if err := New(f).CheckCandidate(context.Background(), "table inet nftfw_filter { }\n"); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.scripts) != 1 || !strings.HasPrefix(f.scripts[0], "destroy table inet nftfw_filter\n") {
+		t.Fatalf("candidate check did not model replacement: %#v", f.scripts)
+	}
+	for _, call := range f.calls {
+		if len(call) > 0 && call[0] == "--file" {
+			t.Fatal("candidate check applied the transaction")
+		}
+	}
+}
 func TestDestroyOwnedNoopsWhenAbsent(t *testing.T) {
 	f := &fakeRunner{tables: `{"nftables":[]}`}
 	if err := New(f).DestroyOwned(context.Background()); err != nil {
@@ -93,6 +108,21 @@ func TestReplaceSetsRejectsWrongFamilyAndUsesOneApply(t *testing.T) {
 	}
 	if checks != 1 || applies != 1 {
 		t.Fatalf("runtime sets were not one checked transaction: checks=%d applies=%d calls=%v", checks, applies, f.calls)
+	}
+}
+
+func TestReplaceContainerNetworksUsesOneCrossTableTransaction(t *testing.T) {
+	f := &fakeRunner{}
+	if err := New(f).ReplaceContainerNetworks(context.Background(), []string{"172.19.0.0/16"}, []string{"fd00:19::/64"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.scripts) != 2 || f.scripts[0] != f.scripts[1] {
+		t.Fatalf("container update was not checked and applied as one transaction: %#v", f.scripts)
+	}
+	for _, want := range []string{"flush set inet nftfw_filter docker_nets", "flush set ip nftfw_nat docker_nets_nat", "172.19.0.0/16", "fd00:19::/64"} {
+		if !strings.Contains(f.scripts[0], want) {
+			t.Fatalf("container transaction missing %q: %s", want, f.scripts[0])
+		}
 	}
 }
 
@@ -128,6 +158,8 @@ func (r integrityRunner) Run(_ context.Context, args ...string) (string, string,
 			}
 		}
 	case "ip/nftfw_nat":
+		addChain("prerouting", "nat", "prerouting", "accept", "")
+		addRule("prerouting", "nftfw:dnat-chain")
 		addChain("postrouting", "nat", "postrouting", "accept", "")
 		addRule("postrouting", "nftfw:vpn-only-nat")
 	case "ip6/nftfw_filter6":

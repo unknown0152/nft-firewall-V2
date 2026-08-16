@@ -8,6 +8,7 @@ import (
 	"io"
 	"net/http"
 	"net/netip"
+	"net/url"
 	"strings"
 	"time"
 )
@@ -20,9 +21,12 @@ type Feed struct {
 }
 
 func (f Feed) Fetch(ctx context.Context) ([]string, error) {
-	if !strings.HasPrefix(strings.ToLower(f.URL), "https://") {
+	u, err := url.Parse(f.URL)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
 		return nil, errors.New("threat feed must use HTTPS")
 	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
 	max := f.MaxEntries
 	if max <= 0 {
 		max = 10000
@@ -38,14 +42,14 @@ func (f Feed) Fetch(ctx context.Context) ([]string, error) {
 	clientCopy := *client
 	previousRedirect := clientCopy.CheckRedirect
 	clientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many threat feed redirects")
+		}
 		if req.URL.Scheme != "https" {
 			return errors.New("threat feed redirect left HTTPS")
 		}
 		if previousRedirect != nil {
 			return previousRedirect(req, via)
-		}
-		if len(via) >= 5 {
-			return errors.New("too many threat feed redirects")
 		}
 		return nil
 	}
@@ -96,9 +100,10 @@ func Parse(body []byte, max int) ([]string, error) {
 		if p.Bits() == 0 {
 			return nil, fmt.Errorf("feed entry %q is /0", line)
 		}
-		if !seen[p.String()] {
-			seen[p.String()] = true
-			result = append(result, p.String())
+		canonical := p.Masked().String()
+		if !seen[canonical] {
+			seen[canonical] = true
+			result = append(result, canonical)
 			if len(result) > max {
 				return nil, errors.New("feed entry limit exceeded")
 			}

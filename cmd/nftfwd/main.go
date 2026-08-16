@@ -13,6 +13,9 @@ import (
 
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
 	"github.com/unknown0152/nft-firewall-v2/internal/app"
+	"github.com/unknown0152/nft-firewall-v2/internal/nft"
+	"github.com/unknown0152/nft-firewall-v2/internal/reconcile"
+	"github.com/unknown0152/nft-firewall-v2/internal/state"
 )
 
 func main() {
@@ -20,19 +23,21 @@ func main() {
 	status := flag.String("status-socket", "/run/nftfw/status.sock", "read-only socket")
 	control := flag.String("control-socket", "/run/nftfw/control.sock", "mutation socket")
 	expired := flag.Bool("rollback-expired", false, "rollback an expired pending generation and exit")
+	stateDB := flag.String("state-db", "/var/lib/nftfw/state.db", "state database for rollback-only mode")
 	flag.Parse()
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
-	rt, err := app.Open(ctx, *config, nil)
-	if err != nil {
-		fmt.Fprintln(os.Stderr, "nftfwd:", err)
-		os.Exit(1)
-	}
-	defer rt.Close()
 	if *expired {
-		ok, err := rt.RollbackExpired(ctx)
+		st, err := state.Open(ctx, *stateDB)
 		if err != nil {
-			fmt.Fprintln(os.Stderr, "nftfwd:", err)
+			fmt.Fprintln(os.Stderr, "nftfwd rollback:", err)
+			os.Exit(1)
+		}
+		defer st.Close()
+		manager := &reconcile.Manager{Backend: nft.New(nil), Store: st}
+		ok, err := manager.RollbackExpired(ctx)
+		if err != nil {
+			fmt.Fprintln(os.Stderr, "nftfwd rollback:", err)
 			os.Exit(1)
 		}
 		if ok {
@@ -40,6 +45,12 @@ func main() {
 		}
 		return
 	}
+	rt, err := app.Open(ctx, *config, nil)
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "nftfwd:", err)
+		os.Exit(1)
+	}
+	defer rt.Close()
 	if drift, reconcileErr := rt.Manager.Reconcile(ctx, true); reconcileErr != nil && !errors.Is(reconcileErr, sql.ErrNoRows) {
 		fmt.Fprintln(os.Stderr, "nftfwd: initial reconciliation failed:", reconcileErr)
 		os.Exit(1)
@@ -87,6 +98,9 @@ func rollbackLoop(ctx context.Context, rt *app.Runtime) {
 		case <-claimTicker.C:
 			if _, err := rt.RefreshClaimSets(ctx); err != nil {
 				fmt.Fprintln(os.Stderr, "nftfwd claim refresh:", err)
+			}
+			if _, err := rt.RefreshContainerSets(ctx); err != nil {
+				fmt.Fprintln(os.Stderr, "nftfwd container refresh:", err)
 			}
 		case <-integrationTicker.C:
 			if err := rt.RefreshIntegrations(ctx); err != nil {

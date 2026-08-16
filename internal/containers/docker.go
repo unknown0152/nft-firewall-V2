@@ -1,10 +1,12 @@
 package containers
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/netip"
 	"os"
 	"os/exec"
@@ -37,6 +39,9 @@ func (o Observer) FirewallPolicy() (bool, string, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return false, "Docker daemon config must be a regular, non-symlink file", errors.New("unsafe daemon config path")
 	}
+	if info.Mode().Perm()&0o022 != 0 || info.Size() > 1<<20 {
+		return false, "Docker daemon config must be bounded and not group/other writable", errors.New("unsafe daemon config permissions or size")
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return false, "Docker daemon config unavailable; Docker firewall ownership is unknown", err
@@ -57,7 +62,7 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	out, err := exec.CommandContext(ctx, bin, "network", "ls", "--format", "{{.Name}}").Output()
+	out, err := boundedOutput(ctx, 128<<10, bin, "network", "ls", "--format", "{{.Name}}")
 	if err != nil {
 		return nil, err
 	}
@@ -70,7 +75,7 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 		if !dockerName.MatchString(name) {
 			return nil, fmt.Errorf("Docker returned unsafe network name %q", name)
 		}
-		raw, err := exec.CommandContext(ctx, bin, "network", "inspect", "--", name).Output()
+		raw, err := boundedOutput(ctx, 1<<20, bin, "network", "inspect", "--", name)
 		if err != nil {
 			return nil, fmt.Errorf("inspect Docker network %s: %w", name, err)
 		}
@@ -89,14 +94,60 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 		}
 		for _, item := range items {
 			for _, c := range item.IPAM.Config {
-				if p, err := netip.ParsePrefix(c.Subnet); err == nil && p.Bits() != 0 {
-					result = append(result, Network{Name: name, CIDR: p.String()})
+				p, err := netip.ParsePrefix(c.Subnet)
+				if err != nil || p.Bits() == 0 {
+					return nil, fmt.Errorf("Docker network %s returned invalid subnet", name)
 				}
+				result = append(result, Network{Name: name, CIDR: p.Masked().String()})
 			}
 		}
 	}
 	sort.Slice(result, func(i, j int) bool { return result[i].CIDR < result[j].CIDR })
 	return result, nil
+}
+
+func boundedOutput(ctx context.Context, limit int64, bin string, args ...string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, bin, args...)
+	pipe, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &limitedBuffer{Buffer: &stderr, Remaining: 4096}
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	out, readErr := io.ReadAll(io.LimitReader(pipe, limit+1))
+	if int64(len(out)) > limit {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		return nil, errors.New("Docker command output exceeds limit")
+	}
+	waitErr := cmd.Wait()
+	if readErr != nil {
+		return nil, readErr
+	}
+	if waitErr != nil {
+		return nil, fmt.Errorf("Docker command failed: %w", waitErr)
+	}
+	return out, nil
+}
+
+type limitedBuffer struct {
+	Buffer    *bytes.Buffer
+	Remaining int
+}
+
+func (w *limitedBuffer) Write(p []byte) (int, error) {
+	original := len(p)
+	if len(p) > w.Remaining {
+		p = p[:w.Remaining]
+	}
+	if len(p) > 0 {
+		_, _ = w.Buffer.Write(p)
+		w.Remaining -= len(p)
+	}
+	return original, nil
 }
 func ValidateDestination(ip string, nets []Network) error {
 	a, err := netip.ParseAddr(ip)

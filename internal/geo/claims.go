@@ -22,6 +22,9 @@ func LoadCIDRs(path string, max int) ([]string, error) {
 	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 		return nil, fmt.Errorf("GeoIP source must be a regular, non-symlink file")
 	}
+	if info.Mode().Perm()&0o022 != 0 {
+		return nil, fmt.Errorf("GeoIP source must not be group/other writable")
+	}
 	if info.Size() > 64<<20 {
 		return nil, fmt.Errorf("GeoIP source exceeds 64 MiB")
 	}
@@ -43,9 +46,10 @@ func LoadCIDRs(path string, max int) ([]string, error) {
 		if err != nil || p.Bits() == 0 {
 			return nil, fmt.Errorf("invalid GeoIP CIDR %q", line)
 		}
-		if !seen[p.String()] {
-			seen[p.String()] = true
-			out = append(out, p.String())
+		canonical := p.Masked().String()
+		if !seen[canonical] {
+			seen[canonical] = true
+			out = append(out, canonical)
 			if len(out) > max {
 				return nil, fmt.Errorf("GeoIP CIDR limit exceeded (%d)", max)
 			}

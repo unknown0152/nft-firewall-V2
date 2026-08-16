@@ -24,6 +24,7 @@ type Config struct {
 	Zones        []Zone             `toml:"zones"`
 	Services     []Service          `toml:"services"`
 	Policies     []Policy           `toml:"policies"`
+	NAT          []NATRule          `toml:"nat"`
 	WireGuard    WireGuardConfig    `toml:"wireguard"`
 	Runtime      RuntimeConfig      `toml:"runtime"`
 	State        StateConfig        `toml:"state"`
@@ -62,6 +63,16 @@ type Policy struct {
 	To      string `toml:"to"`
 	Service string `toml:"service"`
 	Action  string `toml:"action"`
+}
+
+type NATRule struct {
+	Name              string `toml:"name"`
+	Source            string `toml:"source"`
+	ExternalInterface string `toml:"external_interface"`
+	Protocol          string `toml:"protocol"`
+	ExternalPort      int    `toml:"external_port"`
+	Destination       string `toml:"destination"`
+	DestinationPort   int    `toml:"destination_port"`
 }
 
 type WireGuardConfig struct {
@@ -105,11 +116,12 @@ type ThreatFeedConfig struct {
 }
 
 type GeoSetConfig struct {
-	Name       string `toml:"name"`
-	Country    string `toml:"country"`
-	CIDRFile   string `toml:"cidr_file"`
-	MaxEntries int    `toml:"max_entries"`
-	MinEntries int    `toml:"min_entries"`
+	Name           string `toml:"name"`
+	Country        string `toml:"country"`
+	CIDRFile       string `toml:"cidr_file"`
+	MaxEntries     int    `toml:"max_entries"`
+	MinEntries     int    `toml:"min_entries"`
+	RefreshSeconds int    `toml:"refresh_seconds"`
 }
 
 var namePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,62}$`)
@@ -189,8 +201,8 @@ func secureConfigPath(path string) error {
 		return errors.New("configuration path contains a symlink")
 	}
 	parent := filepath.Dir(path)
-	if p, err := os.Stat(parent); err == nil && p.Mode().Perm()&0o002 != 0 && p.Mode().Perm()&0o1000 == 0 {
-		return errors.New("configuration parent is world-writable without sticky bit")
+	if p, err := os.Stat(parent); err != nil || !p.IsDir() || p.Mode().Perm()&0o022 != 0 {
+		return errors.New("configuration parent must not be group/other writable")
 	}
 	if abs == "/etc/nftfw/nftfw.toml" || strings.HasPrefix(abs, "/etc/nftfw/") {
 		stat, ok := info.Sys().(*syscall.Stat_t)
@@ -263,6 +275,9 @@ func Validate(c Config) error {
 		if set.MaxEntries < 0 || set.MaxEntries > c.Runtime.MaxBlockClaims || set.MinEntries < 0 || (set.MaxEntries > 0 && set.MinEntries > set.MaxEntries) {
 			return fmt.Errorf("GeoIP set %s has invalid entry bounds", set.Name)
 		}
+		if set.RefreshSeconds < 0 || (set.RefreshSeconds > 0 && set.RefreshSeconds < 60) {
+			return fmt.Errorf("GeoIP set %s has invalid refresh interval", set.Name)
+		}
 	}
 	if len(c.Interfaces) == 0 {
 		return errors.New("at least one interface is required")
@@ -327,6 +342,27 @@ func Validate(c Config) error {
 			}
 		}
 	}
+	for _, in := range c.Interfaces {
+		if in.Zone != "" {
+			if _, ok := zones[in.Zone]; !ok {
+				return fmt.Errorf("interface %s references unknown zone %q", in.Name, in.Zone)
+			}
+		}
+	}
+	for name, zone := range zones {
+		hasInterface := len(zone.Interfaces) > 0
+		if !hasInterface {
+			for _, in := range c.Interfaces {
+				if in.Zone == name {
+					hasInterface = true
+					break
+				}
+			}
+		}
+		if len(zone.Networks) == 0 && !hasInterface {
+			return fmt.Errorf("zone %s has no networks or interfaces", name)
+		}
+	}
 	services := map[string]Service{}
 	for _, s := range c.Services {
 		if !namePattern.MatchString(s.Name) {
@@ -381,6 +417,49 @@ func Validate(c Config) error {
 			return fmt.Errorf("policy %s duplicates flow tuple from policy %s", p.Name, previous)
 		}
 		policyFlows[flow] = p.Name
+	}
+	natNames := map[string]bool{}
+	natBindings := map[string]string{}
+	for _, rule := range c.NAT {
+		if !namePattern.MatchString(rule.Name) || natNames[rule.Name] {
+			return fmt.Errorf("invalid or duplicate NAT rule %q", rule.Name)
+		}
+		natNames[rule.Name] = true
+		if rule.Source != "any" {
+			sourceZone, ok := zones[rule.Source]
+			if !ok {
+				return fmt.Errorf("NAT rule %s references unknown source zone %q", rule.Name, rule.Source)
+			}
+			hasIPv4 := false
+			for _, raw := range sourceZone.Networks {
+				if prefix, err := netip.ParsePrefix(raw); err == nil && prefix.Addr().Is4() {
+					hasIPv4 = true
+					break
+				}
+			}
+			if !hasIPv4 {
+				return fmt.Errorf("NAT rule %s source zone must contain an IPv4 network or use source=any", rule.Name)
+			}
+		}
+		incoming, ok := interfaces[rule.ExternalInterface]
+		if !ok || (incoming.Role != "uplink" && incoming.Role != "lan") {
+			return fmt.Errorf("NAT rule %s external_interface must be a declared uplink or lan interface", rule.Name)
+		}
+		if rule.Protocol != "tcp" && rule.Protocol != "udp" {
+			return fmt.Errorf("NAT rule %s protocol must be tcp or udp", rule.Name)
+		}
+		if rule.ExternalPort < 1 || rule.ExternalPort > 65535 || rule.DestinationPort < 1 || rule.DestinationPort > 65535 {
+			return fmt.Errorf("NAT rule %s has invalid port", rule.Name)
+		}
+		destination, err := netip.ParseAddr(rule.Destination)
+		if err != nil || !destination.Is4() || destination.IsUnspecified() || destination.IsMulticast() {
+			return fmt.Errorf("NAT rule %s destination must be a unicast IPv4 address", rule.Name)
+		}
+		binding := rule.ExternalInterface + "\x00" + rule.Protocol + "\x00" + fmt.Sprint(rule.ExternalPort) + "\x00" + rule.Source
+		if previous, ok := natBindings[binding]; ok {
+			return fmt.Errorf("NAT rule %s conflicts with rule %s", rule.Name, previous)
+		}
+		natBindings[binding] = rule.Name
 	}
 	if c.WireGuard.Interface == "" {
 		return errors.New("wireguard.interface is required")

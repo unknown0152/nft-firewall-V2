@@ -12,6 +12,9 @@ Sections:
 - `zones`: named networks/interfaces.
 - `services`: protocol plus ports.
 - `policies`: named `from`, `to`, `service`, and `allow`/`deny` action.
+- `nat`: explicit IPv4 DNAT bindings. Targets must be inside an observed
+  container network, and a separate forward policy must allow the translated
+  destination service.
 - `wireguard`: interface, endpoint, fwmark, bounded bootstrap addresses/cache,
   and a bidirectional container TCP MSS clamp (`tcp_mss`, default `1360`).
 - `runtime`: claim and nft set size limits.

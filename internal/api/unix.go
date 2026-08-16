@@ -17,6 +17,7 @@ import (
 )
 
 const MaxRequestBytes = 64 << 10
+const MaxConcurrentConnections = 64
 
 type Request struct {
 	Op         string `json:"op"`
@@ -39,10 +40,15 @@ type Handler interface {
 	Control(context.Context, Request) (any, error)
 }
 
+type securityEventHandler interface {
+	SecurityEvent(context.Context, string, string)
+}
+
 type Server struct {
 	Handler                 Handler
 	StatusPath, ControlPath string
 	listeners               []net.Listener
+	connections             chan struct{}
 }
 
 func (s *Server) Serve(ctx context.Context) error {
@@ -67,8 +73,19 @@ func (s *Server) Serve(ctx context.Context) error {
 		return fmt.Errorf("listen control socket: %w", err)
 	}
 	s.listeners = []net.Listener{status, control}
-	_ = os.Chmod(s.StatusPath, 0o660)
-	_ = os.Chmod(s.ControlPath, 0o600)
+	if err := os.Chmod(s.StatusPath, 0o660); err != nil {
+		status.Close()
+		control.Close()
+		return fmt.Errorf("secure status socket: %w", err)
+	}
+	if err := os.Chmod(s.ControlPath, 0o600); err != nil {
+		status.Close()
+		control.Close()
+		return fmt.Errorf("secure control socket: %w", err)
+	}
+	defer os.Remove(s.StatusPath)
+	defer os.Remove(s.ControlPath)
+	s.connections = make(chan struct{}, MaxConcurrentConnections)
 	errCh := make(chan error, 2)
 	go s.acceptLoop(ctx, status, false, errCh)
 	go s.acceptLoop(ctx, control, true, errCh)
@@ -95,14 +112,26 @@ func (s *Server) acceptLoop(ctx context.Context, l net.Listener, control bool, e
 				return
 			}
 		}
-		go s.handle(ctx, conn, control)
+		select {
+		case s.connections <- struct{}{}:
+			go func() {
+				defer func() { <-s.connections }()
+				s.handle(ctx, conn, control)
+			}()
+		default:
+			writeResponse(conn, Response{Error: "server connection limit reached"})
+			_ = conn.Close()
+			s.securityEvent(ctx, "privileged_request_rejected", "connection limit reached")
+		}
 	}
 }
 
 func (s *Server) handle(ctx context.Context, conn net.Conn, control bool) {
 	defer conn.Close()
 	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
-	if control && !authorizedControl(conn) {
+	uid, havePeer := peerUcred(conn)
+	if control && (!havePeer || uid != 0) {
+		s.securityEvent(ctx, "control_access_denied", fmt.Sprintf("peer_uid=%d credential_available=%t", uid, havePeer))
 		writeResponse(conn, Response{Error: "control socket requires root peer credentials"})
 		return
 	}
@@ -126,6 +155,9 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, control bool) {
 		return
 	}
 	if err := validateRequest(req, control); err != nil {
+		if control {
+			s.securityEvent(ctx, "privileged_request_rejected", "operation="+req.Op)
+		}
 		writeResponse(conn, Response{Error: "invalid request: " + err.Error()})
 		return
 	}
@@ -141,10 +173,19 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, control bool) {
 		data, handlerErr = s.Handler.Status(ctx)
 	}
 	if handlerErr != nil {
+		if control {
+			s.securityEvent(ctx, "privileged_request_failed", "operation="+req.Op)
+		}
 		writeResponse(conn, Response{Error: handlerErr.Error()})
 		return
 	}
 	writeResponse(conn, Response{OK: true, Data: data})
+}
+
+func (s *Server) securityEvent(ctx context.Context, event, detail string) {
+	if handler, ok := s.Handler.(securityEventHandler); ok {
+		handler.SecurityEvent(ctx, event, detail)
+	}
 }
 
 func validateRequest(r Request, control bool) error {
@@ -199,7 +240,6 @@ func decodeRequest(r io.Reader) (Request, error) {
 
 func writeResponse(w io.Writer, r Response) { _ = json.NewEncoder(w).Encode(r) }
 
-func authorizedControl(conn net.Conn) bool { u, ok := peerUcred(conn); return ok && u == 0 }
 func peerUcred(conn net.Conn) (uint32, bool) {
 	uc, ok := conn.(*net.UnixConn)
 	if !ok {
@@ -223,15 +263,31 @@ func prepareSocketPath(path string) error {
 	if path == "" {
 		return errors.New("empty socket path")
 	}
-	if fi, err := os.Lstat(path); err == nil {
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return errors.New("socket path symlink refused")
+	abs, err := filepath.Abs(path)
+	if err != nil || abs != path {
+		return errors.New("socket path must be absolute")
+	}
+	parent := filepath.Dir(abs)
+	if err := os.MkdirAll(parent, 0o750); err != nil {
+		return err
+	}
+	resolved, err := filepath.EvalSymlinks(parent)
+	if err != nil || resolved != parent {
+		return errors.New("socket parent path contains a symlink")
+	}
+	parentInfo, err := os.Stat(parent)
+	if err != nil || !parentInfo.IsDir() || parentInfo.Mode().Perm()&0o022 != 0 {
+		return errors.New("socket parent must not be group/other writable")
+	}
+	if fi, err := os.Lstat(abs); err == nil {
+		stat, ok := fi.Sys().(*syscall.Stat_t)
+		if fi.Mode()&os.ModeSymlink != 0 || fi.Mode()&os.ModeSocket == 0 || !ok || stat.Uid != uint32(os.Geteuid()) {
+			return errors.New("existing socket path is not an owned socket")
 		}
-		if err := os.Remove(path); err != nil {
+		if err := os.Remove(abs); err != nil {
 			return err
 		}
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+	} else if !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	return nil

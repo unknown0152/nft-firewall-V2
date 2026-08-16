@@ -133,3 +133,40 @@ func TestContainerIPv6KillSwitchSet(t *testing.T) {
 		}
 	}
 }
+
+func TestInterfaceOnlyZoneCompilesToInterfaceSelectors(t *testing.T) {
+	c := config.Defaults()
+	c.Interfaces = []config.Interface{{Name: "eth0", Role: "uplink"}, {Name: "wg0", Role: "vpn"}, {Name: "lan0", Role: "lan", Zone: "lan"}}
+	c.Zones = []config.Zone{{Name: "lan", Interfaces: []string{"lan0"}}}
+	c.Services = []config.Service{{Name: "ssh", Protocol: "tcp", Ports: []int{22}}}
+	c.Policies = []config.Policy{{Name: "lan-ssh", From: "lan", To: "host", Service: "ssh", Action: "allow"}}
+	e, err := policy.Compile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	a, err := Compile(Input{Policy: e}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(a.Script, `iifname "lan0" meta nfproto ipv4 tcp dport { 22 } accept`) || !strings.Contains(a.Script, `iifname "lan0" meta nfproto ipv6 tcp dport { 22 } accept`) {
+		t.Fatalf("interface-only zone was not compiled: %s", a.Script)
+	}
+}
+
+func TestNATRequiresObservedContainerTargetAndDoesNotAllowForwarding(t *testing.T) {
+	e := testEffective(t)
+	e.Config.NAT = []config.NATRule{{Name: "web", Source: "any", ExternalInterface: "eth0", Protocol: "tcp", ExternalPort: 8443, Destination: "172.19.0.5", DestinationPort: 443}}
+	if _, err := Compile(Input{Policy: e}, 1); err == nil {
+		t.Fatal("NAT destination outside observed container networks accepted")
+	}
+	a, err := Compile(Input{Policy: e, DockerNets: []string{"172.19.0.0/16"}}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(a.Script, `tcp dport 8443 dnat to 172.19.0.5:443 comment "nftfw-nat:web"`) {
+		t.Fatalf("DNAT rule missing: %s", a.Script)
+	}
+	if strings.Contains(a.Script, `nftfw-nat:web" accept`) {
+		t.Fatal("DNAT rule implicitly allowed forwarding")
+	}
+}

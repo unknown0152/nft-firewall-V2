@@ -6,18 +6,24 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
 	"github.com/unknown0152/nft-firewall-v2/internal/app"
 	"github.com/unknown0152/nft-firewall-v2/internal/compiler"
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
+	"github.com/unknown0152/nft-firewall-v2/internal/health"
+	"github.com/unknown0152/nft-firewall-v2/internal/nft"
 	"github.com/unknown0152/nft-firewall-v2/internal/policy"
+	"github.com/unknown0152/nft-firewall-v2/internal/recovery"
+	"github.com/unknown0152/nft-firewall-v2/internal/state"
 	"github.com/unknown0152/nft-firewall-v2/internal/version"
 )
 
@@ -30,7 +36,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: nftfw <version|config|plan|apply|commit|rollback|reconcile|status|health|doctor|explain|audit|blocks|block|allow>")
+		return errors.New("usage: nftfw <version|config|plan|apply|commit|rollback|reconcile|status|health|doctor|explain|audit|blocks|block|allow|wg|state>")
 	}
 	configPath := os.Getenv("NFTFW_CONFIG")
 	if configPath == "" {
@@ -62,6 +68,11 @@ func run(args []string) error {
 		fmt.Printf("Configuration valid: %s (ipv6=%s strict_vpn=%t)\n", path, c.System.IPv6Mode, c.System.StrictVPN)
 		return nil
 	case "plan":
+		for _, arg := range args[1:] {
+			if arg != "--json" && arg != "--show-nft" {
+				return fmt.Errorf("unknown plan option %q", arg)
+			}
+		}
 		rt, err := app.Open(context.Background(), configPath, nil)
 		if err != nil {
 			return err
@@ -71,13 +82,31 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
+		if err := rt.Backend.CheckCandidate(context.Background(), a.Script); err != nil {
+			return fmt.Errorf("kernel validation failed; no firewall changes were made: %w", err)
+		}
 		current := "none"
 		if g, currentErr := rt.Store.LastKnownGood(context.Background()); currentErr == nil {
 			current = strconv.FormatUint(g.ID, 10)
 		}
-		fmt.Printf("Current generation: %s\nProposed generation: %d\nChecksum: %s\n\nSecurity invariants:\n[PASS] owned tables only\n[PASS] input default deny\n[PASS] forward default deny\n[PASS] output VPN egress pin\n[PASS] IPv6 mode explicit\n\nCompiled nft transaction:\n%s", current, a.Generation, a.Checksum, a.Script)
+		if has(args, "--json") {
+			result := map[string]any{"current_generation": current, "proposed_generation": a.Generation, "checksum": a.Checksum, "kernel_validation": "PASS", "management_path": "NOT PROVEN", "zones": len(rt.Config.Zones), "policies": len(rt.Config.Policies)}
+			if has(args, "--show-nft") {
+				result["nft_transaction"] = a.Script
+			}
+			return printJSONOr(result, true)
+		}
+		fmt.Printf("Current generation: %s\nProposed generation: %d\nChecksum: %s\n\nPolicy summary:\nZones: %d\nPolicies: %d\n\nSecurity invariants:\n[PASS] owned tables only\n[PASS] input default deny\n[PASS] forward default deny\n[PASS] output VPN egress pin\n[PASS] IPv6 mode explicit\n[NOT PROVEN] management reachability depends on declared policy\n\nKernel validation:\n[PASS] nft --check\n", current, a.Generation, a.Checksum, len(rt.Config.Zones), len(rt.Config.Policies))
+		if has(args, "--show-nft") {
+			fmt.Printf("\nCompiled nft transaction:\n%s", a.Script)
+		}
 		return nil
 	case "apply":
+		for _, arg := range args[1:] {
+			if arg != "--safe" && arg != "--unsafe" {
+				return fmt.Errorf("unknown apply option %q", arg)
+			}
+		}
 		if has(args, "--safe") && has(args, "--unsafe") {
 			return errors.New("apply accepts only one of --safe or --unsafe")
 		}
@@ -110,7 +139,22 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return printJSONOr(resp.Data, has(args, "--json"))
+		if has(args, "--json") {
+			return printJSONOr(resp.Data, true)
+		}
+		var snapshot health.Snapshot
+		encoded, marshalErr := json.Marshal(resp.Data)
+		if marshalErr != nil || json.Unmarshal(encoded, &snapshot) != nil {
+			return errors.New("status response could not be decoded")
+		}
+		fmt.Printf("Status: %s\nActive generation: %d\nKill switch: %s\nDrift: %t\nWireGuard healthy: %t\nBlocked addresses: %d\nDatabase: %s\n", snapshot.Status, snapshot.ActiveGeneration, snapshot.KillSwitch, snapshot.Drift, snapshot.WireGuard.Healthy, snapshot.BlockedAddresses, snapshot.Database)
+		if snapshot.Reason != "" {
+			fmt.Printf("Reason: %s\n", snapshot.Reason)
+		}
+		if args[0] == "health" && snapshot.Status != "HEALTHY" {
+			return errors.New("health check is degraded")
+		}
+		return nil
 	case "doctor":
 		return doctor(configPath)
 	case "explain":
@@ -141,9 +185,57 @@ func run(args []string) error {
 			return errors.New("usage: nftfw wg <status|refresh>")
 		}
 		return wgStatus(configPath)
+	case "state":
+		return stateCommand(args[1:])
 	default:
 		return fmt.Errorf("unknown command %q", args[0])
 	}
+}
+
+func stateCommand(args []string) error {
+	if len(args) < 1 || (args[0] != "backup" && args[0] != "verify") {
+		return errors.New("usage: nftfw state backup <destination> --database <path> | state verify --database <path>")
+	}
+	database := os.Getenv("NFTFW_STATE_DB")
+	var destination string
+	for i := 1; i < len(args); i++ {
+		if args[i] == "--database" {
+			if i+1 >= len(args) || database != "" {
+				return errors.New("--database requires one path")
+			}
+			database = args[i+1]
+			i++
+			continue
+		}
+		if args[0] == "backup" && destination == "" {
+			destination = args[i]
+			continue
+		}
+		return fmt.Errorf("unexpected state argument %q", args[i])
+	}
+	if database == "" {
+		database = "/var/lib/nftfw/state.db"
+	}
+	store, err := state.Open(context.Background(), database)
+	if err != nil {
+		return err
+	}
+	defer store.Close()
+	if err := store.QuickCheck(context.Background()); err != nil {
+		return err
+	}
+	if args[0] == "verify" {
+		fmt.Println("SQLite state: PASS")
+		return nil
+	}
+	if destination == "" || !filepath.IsAbs(destination) {
+		return errors.New("backup destination must be an absolute path")
+	}
+	if err := store.Backup(context.Background(), destination); err != nil {
+		return err
+	}
+	fmt.Printf("SQLite backup created: %s\n", destination)
+	return nil
 }
 
 func wgStatus(path string) error {
@@ -183,7 +275,8 @@ func doctor(path string) error {
 	if err != nil {
 		return err
 	}
-	if _, err := compiler.Compile(compiler.Input{Policy: e, BootstrapV4: c.WireGuard.BootstrapIPs, BootstrapV6: c.WireGuard.BootstrapIPsV6}, 0); err != nil {
+	artifact, err := compiler.Compile(compiler.Input{Policy: e, BootstrapV4: c.WireGuard.BootstrapIPs, BootstrapV6: c.WireGuard.BootstrapIPsV6}, 0)
+	if err != nil {
 		return fmt.Errorf("policy compile: %w", err)
 	}
 	for _, bin := range []string{"nft", "wg", "ip"} {
@@ -191,14 +284,131 @@ func doctor(path string) error {
 			return fmt.Errorf("required command %s is missing", bin)
 		}
 	}
-	if fi, err := os.Stat(filepath.Dir(c.State.Database)); err == nil && fi.Mode().Perm()&0o002 != 0 {
-		return fmt.Errorf("state directory is world-writable: %s", filepath.Dir(c.State.Database))
+	uplink := ""
+	containerConfigured := false
+	for _, configured := range c.Interfaces {
+		if configured.Role == "uplink" {
+			uplink = configured.Name
+		}
+		if configured.Role == "container" {
+			containerConfigured = true
+		}
+	}
+	if _, err := net.InterfaceByName(uplink); err != nil {
+		return fmt.Errorf("declared uplink %s is not present", uplink)
+	}
+	routeDevices, err := defaultRouteDevices(context.Background(), "-4")
+	if err != nil {
+		return err
+	}
+	if !contains(routeDevices, uplink) {
+		return fmt.Errorf("declared uplink %s does not own an IPv4 default route", uplink)
+	}
+	if err := secureExistingDirectory(filepath.Dir(c.State.Database)); err != nil {
+		return fmt.Errorf("state directory: %w", err)
+	}
+	if err := secureCurrentExecutable(); err != nil {
+		return err
+	}
+	if containerConfigured {
+		forwarding, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward")
+		if err != nil || strings.TrimSpace(string(forwarding)) != "1" {
+			return errors.New("container networking is configured but net.ipv4.ip_forward is not 1")
+		}
+	}
+	if err := nft.New(nil).CheckCandidate(context.Background(), artifact.Script); err != nil {
+		return fmt.Errorf("kernel candidate validation failed: %w", err)
+	}
+	if err := (recovery.SystemdGuard{}).Verify(context.Background()); err != nil {
+		return fmt.Errorf("safe-apply rollback guard: %w", err)
 	}
 	fmt.Println("[ok] configuration schema and semantics")
 	fmt.Println("[ok] deterministic policy compilation")
 	fmt.Println("[ok] nft, wg, and ip commands available")
+	fmt.Printf("[ok] declared uplink %s owns the IPv4 default route\n", uplink)
+	if _, err := net.InterfaceByName(c.WireGuard.Interface); err != nil {
+		fmt.Printf("[warn] WireGuard interface %s is absent; policy remains fail-closed until it appears\n", c.WireGuard.Interface)
+	} else {
+		fmt.Printf("[ok] WireGuard interface %s exists\n", c.WireGuard.Interface)
+	}
+	fmt.Println("[ok] state and executable ownership/permissions")
+	fmt.Println("[ok] independent rollback timer enabled and active")
+	fmt.Println("[ok] exact candidate passed nft --check")
 	fmt.Println("[ok] no firewall changes were made")
 	return nil
+}
+
+func defaultRouteDevices(ctx context.Context, family string) ([]string, error) {
+	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	output, err := exec.CommandContext(ctx, "ip", "-j", family, "route", "show", "default").Output()
+	if err != nil {
+		return nil, errors.New("could not inspect default routes with ip -j")
+	}
+	if len(output) > 1<<20 {
+		return nil, errors.New("default route JSON exceeds limit")
+	}
+	var routes []struct {
+		Device string `json:"dev"`
+	}
+	if err := json.Unmarshal(output, &routes); err != nil {
+		return nil, fmt.Errorf("decode default route JSON: %w", err)
+	}
+	var devices []string
+	for _, route := range routes {
+		if route.Device != "" && !contains(devices, route.Device) {
+			devices = append(devices, route.Device)
+		}
+	}
+	if len(devices) == 0 {
+		return nil, errors.New("no IPv4 default route is present")
+	}
+	return devices, nil
+}
+
+func secureExistingDirectory(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil || resolved != abs {
+		return errors.New("path is absent or contains a symlink")
+	}
+	info, err := os.Stat(abs)
+	if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
+		return errors.New("path must be a directory and not group/other writable")
+	}
+	return nil
+}
+
+func secureCurrentExecutable() error {
+	path, err := os.Executable()
+	if err != nil {
+		return err
+	}
+	path, err = filepath.EvalSymlinks(path)
+	if err != nil {
+		return err
+	}
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o022 != 0 {
+		return errors.New("nftfw executable is not a protected regular file")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != 0 {
+		return errors.New("nftfw executable must be owned by root")
+	}
+	return nil
+}
+
+func contains(values []string, want string) bool {
+	for _, value := range values {
+		if value == want {
+			return true
+		}
+	}
+	return false
 }
 
 func controlOrLocal(sock, path string, req api.Request, local func(*app.Runtime) (any, error)) error {

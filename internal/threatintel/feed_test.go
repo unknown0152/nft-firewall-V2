@@ -2,6 +2,8 @@ package threatintel
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -9,6 +11,22 @@ func TestFeedRequiresHTTPS(t *testing.T) {
 	_, err := (Feed{URL: "http://example.test"}).Fetch(context.Background())
 	if err == nil {
 		t.Fatal("HTTP feed accepted")
+	}
+}
+
+func TestFeedRejectsCredentialsAndAlwaysEnforcesRedirectLimit(t *testing.T) {
+	if _, err := (Feed{URL: "https://user@example.test/feed"}).Fetch(context.Background()); err == nil {
+		t.Fatal("credential-bearing feed URL accepted")
+	}
+	var server *httptest.Server
+	server = httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Redirect(w, r, server.URL, http.StatusFound)
+	}))
+	defer server.Close()
+	client := server.Client()
+	client.CheckRedirect = func(*http.Request, []*http.Request) error { return nil }
+	if _, err := (Feed{URL: server.URL, Client: client}).Fetch(context.Background()); err == nil {
+		t.Fatal("custom redirect policy bypassed the feed redirect cap")
 	}
 }
 func TestFeedParserBoundsAndValidates(t *testing.T) {
