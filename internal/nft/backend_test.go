@@ -152,7 +152,7 @@ func (r integrityRunner) Run(_ context.Context, args ...string) (string, string,
 		for _, chain := range []string{"input", "output", "forward"} {
 			addChain(chain, "filter", chain, policy, "")
 		}
-		for _, item := range [][2]string{{"input", "nftfw:input-default-deny"}, {"output", "nftfw:output-default-deny"}, {"forward", "nftfw:forward-default-deny"}, {"forward", "nftfw:forward-physical-deny"}, {"forward", "nftfw:container-vpn-mss-out-v4"}, {"forward", "nftfw:container-vpn-mss-out-v6"}, {"forward", "nftfw:container-vpn-mss-in-v4"}, {"forward", "nftfw:container-vpn-mss-in-v6"}, {"output", "nftfw:vpn-only-egress"}} {
+		for _, item := range [][2]string{{"input", "nftfw:input-default-deny"}, {"output", "nftfw:output-default-deny"}, {"forward", "nftfw:forward-default-deny"}, {"forward", "nftfw:forward-physical-deny"}, {"forward", "nftfw:container-vpn-mss-out-v4"}, {"forward", "nftfw:container-vpn-mss-out-v6"}, {"forward", "nftfw:container-vpn-mss-in-v4"}, {"forward", "nftfw:container-vpn-mss-in-v6"}, {"forward", "nftfw:forward-uplink-reply-only"}, {"output", "nftfw:vpn-only-egress"}} {
 			if !r.missingMarker || item[1] != "nftfw:vpn-only-egress" {
 				addRule(item[0], item[1])
 			}
@@ -189,4 +189,12 @@ func TestIntegrityDetectsRuleTampering(t *testing.T) {
 	if ok || !strings.Contains(detail, "unsafe") {
 		t.Fatalf("unsafe base-chain policy not detected: ok=%t detail=%s", ok, detail)
 	}
+}
+
+func FuzzValidateScript(f *testing.F) {
+	f.Add("table inet nftfw_filter { }\n")
+	f.Add("flush ruleset\n")
+	f.Fuzz(func(t *testing.T, script string) {
+		_ = validateScript(script)
+	})
 }

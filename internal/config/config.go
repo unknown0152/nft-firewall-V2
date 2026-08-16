@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 	"syscall"
 
@@ -186,8 +187,15 @@ func secureConfigPath(path string) error {
 	if !info.Mode().IsRegular() {
 		return errors.New("configuration is not a regular file")
 	}
+	if info.Size() > 1<<20 {
+		return errors.New("configuration exceeds 1 MiB")
+	}
 	if info.Mode().Perm()&0o022 != 0 {
 		return fmt.Errorf("configuration is writable by group/other (%#o)", info.Mode().Perm())
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return errors.New("configuration must be owned by the current service user")
 	}
 	abs, err := filepath.Abs(path)
 	if err != nil {
@@ -201,11 +209,15 @@ func secureConfigPath(path string) error {
 		return errors.New("configuration path contains a symlink")
 	}
 	parent := filepath.Dir(path)
-	if p, err := os.Stat(parent); err != nil || !p.IsDir() || p.Mode().Perm()&0o022 != 0 {
+	p, err := os.Stat(parent)
+	if err != nil || !p.IsDir() || p.Mode().Perm()&0o022 != 0 {
 		return errors.New("configuration parent must not be group/other writable")
 	}
+	pstat, ok := p.Sys().(*syscall.Stat_t)
+	if !ok || pstat.Uid != uint32(os.Geteuid()) {
+		return errors.New("configuration parent must be owned by the current service user")
+	}
 	if abs == "/etc/nftfw/nftfw.toml" || strings.HasPrefix(abs, "/etc/nftfw/") {
-		stat, ok := info.Sys().(*syscall.Stat_t)
 		if !ok || stat.Uid != 0 {
 			return errors.New("system configuration must be owned by root")
 		}
@@ -222,6 +234,9 @@ func secureConfigPath(path string) error {
 }
 
 func Validate(c Config) error {
+	if len(c.Interfaces) > 64 || len(c.Zones) > 256 || len(c.Services) > 1024 || len(c.Policies) > 10000 || len(c.NAT) > 10000 || len(c.ThreatFeeds) > 64 || len(c.GeoSets) > 64 {
+		return errors.New("configuration collection limit exceeded")
+	}
 	if c.System.IPv6Mode != "disabled" && c.System.IPv6Mode != "vpn" && c.System.IPv6Mode != "native" {
 		return fmt.Errorf("system.ipv6_mode must be disabled, vpn, or native")
 	}
@@ -233,6 +248,12 @@ func Validate(c Config) error {
 	}
 	if c.Runtime.MaxSetMembers <= 0 || c.Runtime.MaxSetMembers > 1000000 {
 		return fmt.Errorf("runtime.max_set_members must be 1..1000000")
+	}
+	if !filepath.IsAbs(c.State.Directory) || filepath.Clean(c.State.Directory) == "/" {
+		return errors.New("state.directory must be an absolute non-root directory")
+	}
+	if !filepath.IsAbs(c.State.Database) || filepath.Dir(filepath.Clean(c.State.Database)) != filepath.Clean(c.State.Directory) {
+		return errors.New("state.database must be an absolute file directly inside state.directory")
 	}
 	if c.Integrations.Notifications {
 		return errors.New("integrations.notifications is not implemented in the core; use a separate audit adapter")
@@ -486,6 +507,15 @@ func Validate(c Config) error {
 	if !fwmarkPattern.MatchString(c.WireGuard.Fwmark) {
 		return fmt.Errorf("wireguard.fwmark %q is invalid", c.WireGuard.Fwmark)
 	}
+	markBase := 10
+	markValue := c.WireGuard.Fwmark
+	if strings.HasPrefix(markValue, "0x") {
+		markBase = 16
+		markValue = strings.TrimPrefix(markValue, "0x")
+	}
+	if _, err := strconv.ParseUint(markValue, markBase, 32); err != nil {
+		return fmt.Errorf("wireguard.fwmark %q exceeds 32 bits", c.WireGuard.Fwmark)
+	}
 	if c.WireGuard.KeepRecent < 0 || c.WireGuard.KeepRecent > 16 {
 		return errors.New("wireguard.keep_recent must be 0..16")
 	}
@@ -503,8 +533,8 @@ func Validate(c Config) error {
 			return fmt.Errorf("wireguard.bootstrap_ips: %w", err)
 		}
 		prefix, _ := netip.ParsePrefix(raw)
-		if !prefix.Addr().Is4() {
-			return fmt.Errorf("wireguard.bootstrap_ips contains non-IPv4 prefix %q", raw)
+		if !prefix.Addr().Is4() || prefix.Bits() != 32 {
+			return fmt.Errorf("wireguard.bootstrap_ips requires IPv4 host prefixes, got %q", raw)
 		}
 	}
 	for _, raw := range c.WireGuard.BootstrapIPsV6 {
@@ -512,14 +542,22 @@ func Validate(c Config) error {
 			return fmt.Errorf("wireguard.bootstrap_ips_v6: %w", err)
 		}
 		prefix, _ := netip.ParsePrefix(raw)
-		if !prefix.Addr().Is6() {
-			return fmt.Errorf("wireguard.bootstrap_ips_v6 contains non-IPv6 prefix %q", raw)
+		if !prefix.Addr().Is6() || prefix.Bits() != 128 {
+			return fmt.Errorf("wireguard.bootstrap_ips_v6 requires IPv6 host prefixes, got %q", raw)
 		}
 	}
 	for _, h := range c.WireGuard.BootstrapHosts {
 		if !validHostname(h) {
 			return fmt.Errorf("wireguard.bootstrap_hosts %q is invalid", h)
 		}
+	}
+	if c.WireGuard.ConfigPath != "" {
+		if !filepath.IsAbs(c.WireGuard.ConfigPath) || filepath.Base(c.WireGuard.ConfigPath) != c.WireGuard.Interface+".conf" {
+			return errors.New("wireguard.config_path must be an absolute <interface>.conf path")
+		}
+	}
+	if c.WireGuard.HandshakeSecond < 30 || c.WireGuard.HandshakeSecond > 3600 {
+		return errors.New("wireguard.handshake_timeout_seconds must be 30..3600")
 	}
 	if c.System.StrictVPN && c.WireGuard.Interface == "" {
 		return errors.New("strict VPN mode requires wireguard.interface")

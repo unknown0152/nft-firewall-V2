@@ -5,7 +5,9 @@ import (
 	"fmt"
 	"net/netip"
 	"os"
+	"path/filepath"
 	"strings"
+	"syscall"
 )
 
 // LoadCIDRs reads an operator-supplied country database export. Country
@@ -24,6 +26,26 @@ func LoadCIDRs(path string, max int) ([]string, error) {
 	}
 	if info.Mode().Perm()&0o022 != 0 {
 		return nil, fmt.Errorf("GeoIP source must not be group/other writable")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return nil, fmt.Errorf("GeoIP source has unsafe ownership")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil || resolved != abs {
+		return nil, fmt.Errorf("GeoIP source path contains a symlink")
+	}
+	parent, err := os.Stat(filepath.Dir(abs))
+	if err != nil || !parent.IsDir() || parent.Mode().Perm()&0o022 != 0 {
+		return nil, fmt.Errorf("GeoIP source parent is unsafe")
+	}
+	parentStat, ok := parent.Sys().(*syscall.Stat_t)
+	if !ok || parentStat.Uid != uint32(os.Geteuid()) {
+		return nil, fmt.Errorf("GeoIP source parent has unsafe ownership")
 	}
 	if info.Size() > 64<<20 {
 		return nil, fmt.Errorf("GeoIP source exceeds 64 MiB")

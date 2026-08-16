@@ -14,6 +14,7 @@ import (
 	"sort"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -29,6 +30,7 @@ type Store struct {
 type Generation struct {
 	ID               uint64
 	Checksum         string
+	ObservedHash     string
 	ScriptPath       string
 	Status           string
 	CreatedAt        time.Time
@@ -111,10 +113,18 @@ func prepareStatePath(path string) (string, error) {
 	if !parentInfo.IsDir() || parentInfo.Mode().Perm()&0o022 != 0 {
 		return "", errors.New("state directory must be a directory and not group/other writable")
 	}
+	parentStat, ok := parentInfo.Sys().(*syscall.Stat_t)
+	if !ok || parentStat.Uid != uint32(os.Geteuid()) {
+		return "", errors.New("state directory must be owned by the current service user")
+	}
 	for _, candidate := range []string{abs, abs + "-wal", abs + "-shm", abs + "-journal"} {
 		if info, statErr := os.Lstat(candidate); statErr == nil {
 			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
 				return "", fmt.Errorf("state file %s must be regular and non-symlink", filepath.Base(candidate))
+			}
+			stat, valid := info.Sys().(*syscall.Stat_t)
+			if !valid || stat.Uid != uint32(os.Geteuid()) {
+				return "", fmt.Errorf("state file %s has unsafe ownership", filepath.Base(candidate))
 			}
 		} else if !errors.Is(statErr, os.ErrNotExist) {
 			return "", fmt.Errorf("stat state file: %w", statErr)
@@ -215,6 +225,14 @@ INSERT INTO schema_migrations(version, applied_at) VALUES(2, datetime('now'));`)
 			return fmt.Errorf("migration 2: %w", err)
 		}
 	}
+	if version < 3 {
+		_, err = tx.ExecContext(ctx, `
+ALTER TABLE generations ADD COLUMN observed_hash TEXT NOT NULL DEFAULT '';
+INSERT INTO schema_migrations(version, applied_at) VALUES(3, datetime('now'));`)
+		if err != nil {
+			return fmt.Errorf("migration 3: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)
 	}
@@ -284,6 +302,25 @@ func (s *Store) MarkApplied(ctx context.Context, id uint64) error {
 	_, err := s.DB.ExecContext(ctx, "UPDATE generations SET status='applied' WHERE id=?", id)
 	return err
 }
+
+func (s *Store) SetObservedHash(ctx context.Context, id uint64, hash string) error {
+	decoded, err := hex.DecodeString(hash)
+	if err != nil || len(decoded) != sha256.Size {
+		return errors.New("observed nftables hash is malformed")
+	}
+	result, err := s.DB.ExecContext(ctx, "UPDATE generations SET observed_hash=? WHERE id=?", hash, id)
+	if err != nil {
+		return err
+	}
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
+}
 func (s *Store) Commit(ctx context.Context, id uint64) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
@@ -308,13 +345,26 @@ func (s *Store) MarkRolledBack(ctx context.Context, id uint64) error {
 }
 
 func (s *Store) Pending(ctx context.Context) (*Generation, error) {
-	row := s.DB.QueryRowContext(ctx, `SELECT id,checksum,script_path,status,created_at,rollback_deadline,previous_id FROM generations WHERE status IN ('pending','applied') ORDER BY id DESC LIMIT 1`)
+	row := s.DB.QueryRowContext(ctx, `SELECT id,checksum,observed_hash,script_path,status,created_at,rollback_deadline,previous_id FROM generations WHERE status IN ('pending','applied') ORDER BY id DESC LIMIT 1`)
 	return scanGeneration(row)
 }
 
 func (s *Store) LastKnownGood(ctx context.Context) (*Generation, error) {
-	row := s.DB.QueryRowContext(ctx, `SELECT id,checksum,script_path,status,created_at,rollback_deadline,previous_id FROM generations WHERE status='committed' ORDER BY id DESC LIMIT 1`)
+	row := s.DB.QueryRowContext(ctx, `SELECT id,checksum,observed_hash,script_path,status,created_at,rollback_deadline,previous_id FROM generations WHERE status='committed' ORDER BY id DESC LIMIT 1`)
 	return scanGeneration(row)
+}
+
+// ExpectedGeneration is the generation that should currently be represented
+// in the kernel. A merely persisted (status=pending) candidate is excluded.
+func (s *Store) ExpectedGeneration(ctx context.Context) (*Generation, error) {
+	pending, err := s.Pending(ctx)
+	if err == nil && pending.Status == "applied" {
+		return pending, nil
+	}
+	if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return nil, err
+	}
+	return s.LastKnownGood(ctx)
 }
 
 func scanGeneration(row interface{ Scan(...any) error }) (*Generation, error) {
@@ -322,7 +372,7 @@ func scanGeneration(row interface{ Scan(...any) error }) (*Generation, error) {
 	var created string
 	var previous sql.NullInt64
 	var deadlineVal sql.NullString
-	if err := row.Scan(&g.ID, &g.Checksum, &g.ScriptPath, &g.Status, &created, &deadlineVal, &previous); err != nil {
+	if err := row.Scan(&g.ID, &g.Checksum, &g.ObservedHash, &g.ScriptPath, &g.Status, &created, &deadlineVal, &previous); err != nil {
 		return nil, err
 	}
 	var err error
@@ -469,8 +519,15 @@ func (s *Store) RemoveClaim(ctx context.Context, id int64, actor string) error {
 // ReplaceSourceClaims atomically replaces exactly one integration's claims.
 // Validation completes before the old claims are touched.
 func (s *Store) ReplaceSourceClaims(ctx context.Context, source, reason, actor string, addresses []string) (int, error) {
+	return s.ReplaceSourceClaimsBounded(ctx, source, reason, actor, addresses, 0)
+}
+
+func (s *Store) ReplaceSourceClaimsBounded(ctx context.Context, source, reason, actor string, addresses []string, max int) (int, error) {
 	if source == "" || actor == "" {
 		return 0, errors.New("claim source and actor are required")
+	}
+	if len(source) > 129 || len(actor) > 128 || len(reason) > 1024 {
+		return 0, errors.New("claim source, actor, or reason exceeds its size limit")
 	}
 	if reason == "" {
 		reason = "integration"
@@ -503,6 +560,15 @@ func (s *Store) ReplaceSourceClaims(ctx context.Context, source, reason, actor s
 	defer tx.Rollback()
 	if _, err := tx.ExecContext(ctx, "DELETE FROM claims WHERE source=?", source); err != nil {
 		return 0, err
+	}
+	if max > 0 {
+		var remaining int
+		if err := tx.QueryRowContext(ctx, "SELECT COUNT(*) FROM claims WHERE expires_at IS NULL OR expires_at>?", time.Now().UTC().Format(time.RFC3339Nano)).Scan(&remaining); err != nil {
+			return 0, err
+		}
+		if remaining+len(canonical) > max {
+			return 0, fmt.Errorf("claim limit would be exceeded (%d)", max)
+		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	for _, address := range canonical {
@@ -752,8 +818,13 @@ func (s *Store) Backup(ctx context.Context, destination string) error {
 	if err != nil || resolved != parent {
 		return errors.New("backup directory path is unsafe")
 	}
-	if info, statErr := os.Stat(parent); statErr != nil || info.Mode().Perm()&0o022 != 0 {
+	info, statErr := os.Stat(parent)
+	if statErr != nil || info.Mode().Perm()&0o022 != 0 {
 		return errors.New("backup directory is group/other writable")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return errors.New("backup directory has unsafe ownership")
 	}
 	if _, err := os.Lstat(abs); err == nil {
 		return errors.New("backup destination already exists")

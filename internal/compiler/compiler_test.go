@@ -29,7 +29,7 @@ func TestCompileOwnsOnlyNamedTables(t *testing.T) {
 	if strings.Contains(a.Script, "flush ruleset") {
 		t.Fatal("flush ruleset emitted")
 	}
-	for _, name := range []string{"table inet nftfw_filter", "table ip nftfw_nat", "table ip6 nftfw_filter6", "nftfw:input-default-deny", "nftfw:container-physical-deny", "nftfw:container-vpn-mss-out-v4", "nftfw:container-vpn-mss-in-v4", "nftfw:container-path-errors-v4"} {
+	for _, name := range []string{"table inet nftfw_filter", "table ip nftfw_nat", "table ip6 nftfw_filter6", "nftfw:input-default-deny", "nftfw:container-physical-deny", "nftfw:container-vpn-mss-out-v4", "nftfw:container-vpn-mss-in-v4", "nftfw:container-path-errors-v4", "nftfw:forward-uplink-reply-only"} {
 		if !strings.Contains(a.Script, name) {
 			t.Errorf("missing %s", name)
 		}
@@ -40,12 +40,29 @@ func TestCompileOwnsOnlyNamedTables(t *testing.T) {
 	if strings.Contains(a.Script, `oifname "eth0" ct state established,related accept`) {
 		t.Fatal("broad uplink established exception emitted")
 	}
+	if strings.Index(a.Script, "nftfw:forward-uplink-reply-only") > strings.Index(a.Script, "nftfw:container-physical-deny") {
+		t.Fatal("published-service replies must be admitted before physical egress deny")
+	}
 	if strings.Count(a.Script, "nftfw:vpn-only-egress") != 1 {
 		t.Fatal("unexpected VPN egress rule count")
 	}
 	if !strings.Contains(a.Script, `ip saddr @docker_nets oifname "wg0" tcp flags syn tcp option maxseg size set 1360`) ||
 		!strings.Contains(a.Script, `iifname "wg0" ip daddr @docker_nets tcp flags syn tcp option maxseg size set 1360`) {
 		t.Fatal("bidirectional container/VPN TCP MSS clamp missing")
+	}
+}
+
+func FuzzCompileRuntimePrefix(f *testing.F) {
+	f.Add("203.0.113.8/32", uint64(1))
+	f.Add("not-a-prefix", uint64(2))
+	f.Fuzz(func(t *testing.T, raw string, generation uint64) {
+		_, _ = Compile(Input{Policy: testEffective(t), BlockedV4: []string{raw}}, generation)
+	})
+}
+
+func TestCompileRejectsBroadRuntimeBootstrapPrefix(t *testing.T) {
+	if _, err := Compile(Input{Policy: testEffective(t), BootstrapV4: []string{"198.51.100.0/24"}}, 1); err == nil {
+		t.Fatal("broad runtime bootstrap prefix accepted")
 	}
 }
 func TestCompilePolicyAndIPv6Mode(t *testing.T) {

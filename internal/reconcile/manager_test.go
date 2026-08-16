@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"path/filepath"
 	"testing"
 	"time"
@@ -22,6 +24,9 @@ type runner struct {
 func (r *runner) Run(_ context.Context, args ...string) (string, string, error) {
 	if len(args) >= 3 && args[0] == "-j" && args[1] == "list" && args[2] == "tables" {
 		return `{"nftables":[]}`, "", nil
+	}
+	if len(args) == 5 && args[0] == "-j" && args[1] == "list" && args[2] == "table" {
+		return fmt.Sprintf(`{"nftables":[{"table":{"family":%q,"name":%q}}]}`, args[3], args[4]), "", nil
 	}
 	if len(args) > 0 && args[0] == "--file" && r.failApply {
 		return "", "synthetic", sql.ErrConnDone
@@ -192,5 +197,39 @@ func TestSafeApplyRequiresIndependentGuard(t *testing.T) {
 	m.SafeGuard = func(context.Context) error { return context.Canceled }
 	if _, err := m.Apply(context.Background(), artifact(1), true); err == nil {
 		t.Fatal("safe apply with failed rollback guard was accepted")
+	}
+}
+
+func TestPersistedButUnappliedGenerationRollsBackOnStartup(t *testing.T) {
+	ctx := context.Background()
+	m, store, _ := newManager(t)
+	defer store.Close()
+	if _, err := m.Apply(ctx, artifact(1), false); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(time.Minute)
+	previous := uint64(1)
+	if err := store.SaveGeneration(ctx, 2, artifact(2).Checksum, artifact(2).Script, &previous, &deadline); err != nil {
+		t.Fatal(err)
+	}
+	drift, err := m.Reconcile(ctx, true)
+	if err != nil || !drift.Repaired {
+		t.Fatalf("incomplete candidate was not rolled back: %#v %v", drift, err)
+	}
+	pending, err := store.Pending(ctx)
+	if !errors.Is(err, sql.ErrNoRows) || pending != nil {
+		t.Fatalf("incomplete candidate remains pending: %#v %v", pending, err)
+	}
+}
+
+func TestCommitRejectsPersistedButUnappliedGeneration(t *testing.T) {
+	ctx := context.Background()
+	m, store, _ := newManager(t)
+	defer store.Close()
+	if err := store.SaveGeneration(ctx, 1, artifact(1).Checksum, artifact(1).Script, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Commit(ctx, 1); err == nil {
+		t.Fatal("unapplied generation was committed")
 	}
 }

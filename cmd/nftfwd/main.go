@@ -58,6 +58,9 @@ func main() {
 		fmt.Fprintln(os.Stderr, "nftfwd: restored committed firewall generation at startup")
 	}
 	server := &api.Server{Handler: rt, StatusPath: *status, ControlPath: *control}
+	if err := rt.RefreshWireGuardHealth(ctx); err != nil {
+		fmt.Fprintln(os.Stderr, "nftfwd WireGuard health:", err)
+	}
 	go rollbackLoop(ctx, rt)
 	if err := server.Serve(ctx); err != nil && ctx.Err() == nil {
 		fmt.Fprintln(os.Stderr, "nftfwd:", err)
@@ -94,6 +97,9 @@ func rollbackLoop(ctx context.Context, rt *app.Runtime) {
 		case <-endpointTicker.C:
 			if _, err := rt.RefreshEndpoints(ctx); err != nil {
 				fmt.Fprintln(os.Stderr, "nftfwd endpoint refresh:", err)
+			}
+			if err := rt.RefreshWireGuardHealth(ctx); err != nil {
+				fmt.Fprintln(os.Stderr, "nftfwd WireGuard health:", err)
 			}
 		case <-claimTicker.C:
 			if _, err := rt.RefreshClaimSets(ctx); err != nil {

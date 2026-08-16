@@ -169,6 +169,9 @@ func (b *Backend) UpdateSet(ctx context.Context, name string, add bool, elements
 		if (family == "ipv4" && !p.Addr().Is4()) || (family == "ipv6" && !p.Addr().Is6()) {
 			return fmt.Errorf("set %s contains wrong-family element %q", name, raw)
 		}
+		if strings.HasPrefix(name, "wg_bootstrap_") && p.Bits() != p.Addr().BitLen() {
+			return fmt.Errorf("set %s requires host-prefix elements", name)
+		}
 		clean = append(clean, raw)
 	}
 	action := "delete"
@@ -222,6 +225,9 @@ func (b *Backend) ReplaceSets(ctx context.Context, sets map[string][]string) err
 			}
 			if (allowed[name] == "ipv4" && !p.Addr().Is4()) || (allowed[name] == "ipv6" && !p.Addr().Is6()) {
 				return fmt.Errorf("set %s contains wrong-family element %q", name, raw)
+			}
+			if strings.HasPrefix(name, "wg_bootstrap_") && p.Bits() != p.Addr().BitLen() {
+				return fmt.Errorf("set %s requires host-prefix elements", name)
 			}
 		}
 		fmt.Fprintf(&script, "flush set inet %s %s\n", FilterTable, name)
@@ -452,6 +458,7 @@ func validateOwnedTableJSON(data []byte, table Table) (bool, string, error) {
 			"nftfw:container-vpn-mss-out-v6",
 			"nftfw:container-vpn-mss-in-v4",
 			"nftfw:container-vpn-mss-in-v6",
+			"nftfw:forward-uplink-reply-only",
 			"nftfw:vpn-only-egress",
 		} {
 			if ok, detail := requireComment(comment); !ok {

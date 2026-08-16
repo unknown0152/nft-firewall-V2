@@ -1,8 +1,9 @@
 package policy
 
 import (
-	"github.com/unknown0152/nft-firewall-v2/internal/config"
 	"testing"
+
+	"github.com/unknown0152/nft-firewall-v2/internal/config"
 )
 
 func TestExplainUsesCompilerModel(t *testing.T) {
@@ -23,6 +24,26 @@ func TestExplainUsesCompilerModel(t *testing.T) {
 	if d.Action != "deny" || d.Matched != nil {
 		t.Fatalf("unexpected deny: %#v", d)
 	}
+}
+
+func FuzzExplainAlwaysReturnsAVerdict(f *testing.F) {
+	f.Add("192.168.1.5", "host", "tcp", 22)
+	f.Add("invalid", "unknown", "udp", -1)
+	f.Fuzz(func(t *testing.T, from, to, protocol string, port int) {
+		c := config.Defaults()
+		c.Interfaces = []config.Interface{{Name: "eth0", Role: "uplink"}, {Name: "wg0", Role: "vpn"}}
+		c.Zones = []config.Zone{{Name: "lan", Networks: []string{"192.168.1.0/24"}}}
+		c.Services = []config.Service{{Name: "ssh", Protocol: "tcp", Ports: []int{22}}}
+		c.Policies = []config.Policy{{Name: "lan-ssh", From: "lan", To: "host", Service: "ssh", Action: "allow"}}
+		e, err := Compile(c)
+		if err != nil {
+			t.Fatal(err)
+		}
+		decision := e.Explain(Query{From: from, To: to, Protocol: protocol, Port: port})
+		if decision.Action != "allow" && decision.Action != "deny" {
+			t.Fatalf("unexpected verdict %q", decision.Action)
+		}
+	})
 }
 
 func TestExplicitDenyPrecedesAllowDeterministically(t *testing.T) {

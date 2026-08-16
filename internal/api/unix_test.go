@@ -62,6 +62,8 @@ func TestOperationSpecificRequestSchema(t *testing.T) {
 		{Op: "status", Address: "203.0.113.1"},
 		{Op: "commit"},
 		{Op: "allow-add", Address: "203.0.113.1", Source: "manual"},
+		{Op: "allow-add", Address: "203.0.113.1", ExpiresSec: 365*24*60*60 + 1},
+		{Op: "block-add", Address: "203.0.113.1", Source: "threatfeed/forged"},
 		{Op: "block-remove", ClaimID: -1},
 	} {
 		if err := validateRequest(req, true); err == nil {
@@ -69,6 +71,9 @@ func TestOperationSpecificRequestSchema(t *testing.T) {
 		}
 	}
 	if err := validateRequest(Request{Op: "block-add", Address: "203.0.113.1", Source: "manual"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRequest(Request{Op: "allow-add", Address: "203.0.113.1", ExpiresSec: 900}, true); err != nil {
 		t.Fatal(err)
 	}
 }

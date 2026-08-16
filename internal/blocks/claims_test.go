@@ -12,6 +12,9 @@ import (
 )
 
 func TestBlockCannotClaimAllowProvenance(t *testing.T) {
+	if _, err := (Service{}).AddAllow(context.Background(), "203.0.113.9", "lease", "admin", nil); err == nil {
+		t.Fatal("nil allow store accepted")
+	}
 	store, err := state.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
 	if err != nil {
 		t.Fatal(err)

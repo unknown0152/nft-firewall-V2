@@ -34,3 +34,15 @@ func TestIntegrationRefreshScheduleUsesDurableState(t *testing.T) {
 		t.Fatal("stale integration was not due")
 	}
 }
+
+func TestClaimExpiryBounds(t *testing.T) {
+	if expires, err := claimExpiry(0); err != nil || expires != nil {
+		t.Fatalf("permanent expiry rejected: %v %v", expires, err)
+	}
+	if expires, err := claimExpiry(60); err != nil || expires == nil || time.Until(*expires) <= 0 {
+		t.Fatalf("temporary expiry rejected: %v %v", expires, err)
+	}
+	if _, err := claimExpiry(365*24*60*60 + 1); err == nil {
+		t.Fatal("unbounded claim expiry accepted")
+	}
+}

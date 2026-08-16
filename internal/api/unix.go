@@ -27,6 +27,7 @@ type Request struct {
 	ClaimID    int64  `json:"claim_id,omitempty"`
 	Source     string `json:"source,omitempty"`
 	Reason     string `json:"reason,omitempty"`
+	ExpiresSec int64  `json:"expires_seconds,omitempty"`
 }
 
 type Response struct {
@@ -192,30 +193,30 @@ func validateRequest(r Request, control bool) error {
 	if !control && r.Op != "status" {
 		return errors.New("status socket is read-only")
 	}
-	plain := r.Generation == 0 && !r.Safe && r.Address == "" && r.ClaimID == 0 && r.Source == "" && r.Reason == ""
+	plain := r.Generation == 0 && !r.Safe && r.Address == "" && r.ClaimID == 0 && r.Source == "" && r.Reason == "" && r.ExpiresSec == 0
 	switch r.Op {
 	case "status", "claims", "audit", "plan", "reconcile", "wg-refresh":
 		if !plain {
 			return errors.New("operation does not accept fields")
 		}
 	case "apply":
-		if r.Generation != 0 || r.Address != "" || r.ClaimID != 0 || r.Source != "" || r.Reason != "" {
+		if r.Generation != 0 || r.Address != "" || r.ClaimID != 0 || r.Source != "" || r.Reason != "" || r.ExpiresSec != 0 {
 			return errors.New("apply accepts only safe")
 		}
 	case "commit", "rollback":
-		if r.Generation == 0 || r.Safe || r.Address != "" || r.ClaimID != 0 || r.Source != "" || r.Reason != "" {
+		if r.Generation == 0 || r.Safe || r.Address != "" || r.ClaimID != 0 || r.Source != "" || r.Reason != "" || r.ExpiresSec != 0 {
 			return errors.New("generation operation requires only a positive generation")
 		}
 	case "block-add":
-		if r.Address == "" || r.Generation != 0 || r.Safe || r.ClaimID != 0 {
-			return errors.New("block-add requires an address and optional source/reason")
+		if r.Address == "" || r.Generation != 0 || r.Safe || r.ClaimID != 0 || r.Source != "manual" || r.ExpiresSec < 0 || r.ExpiresSec > 365*24*60*60 {
+			return errors.New("block-add requires an address, source=manual, optional reason, and a bounded expiry")
 		}
 	case "allow-add":
-		if r.Address == "" || r.Generation != 0 || r.Safe || r.ClaimID != 0 || r.Source != "" {
-			return errors.New("allow-add requires an address and optional reason")
+		if r.Address == "" || r.Generation != 0 || r.Safe || r.ClaimID != 0 || r.Source != "" || r.ExpiresSec < 0 || r.ExpiresSec > 365*24*60*60 {
+			return errors.New("allow-add requires an address, optional reason, and a bounded expiry")
 		}
 	case "block-remove":
-		if r.ClaimID <= 0 || r.Generation != 0 || r.Safe || r.Address != "" || r.Source != "" || r.Reason != "" {
+		if r.ClaimID <= 0 || r.Generation != 0 || r.Safe || r.Address != "" || r.Source != "" || r.Reason != "" || r.ExpiresSec != 0 {
 			return errors.New("block-remove requires only a positive claim_id")
 		}
 	default:

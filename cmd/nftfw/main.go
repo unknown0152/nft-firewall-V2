@@ -85,6 +85,7 @@ func run(args []string) error {
 		if err := rt.Backend.CheckCandidate(context.Background(), a.Script); err != nil {
 			return fmt.Errorf("kernel validation failed; no firewall changes were made: %w", err)
 		}
+		_ = rt.Store.Audit(context.Background(), "operator", "firewall_plan_generated", fmt.Sprintf("generation=%d checksum=%s", a.Generation, a.Checksum))
 		current := "none"
 		if g, currentErr := rt.Store.LastKnownGood(context.Background()); currentErr == nil {
 			current = strconv.FormatUint(g.ID, 10)
@@ -197,13 +198,15 @@ func stateCommand(args []string) error {
 		return errors.New("usage: nftfw state backup <destination> --database <path> | state verify --database <path>")
 	}
 	database := os.Getenv("NFTFW_STATE_DB")
+	databaseFlag := false
 	var destination string
 	for i := 1; i < len(args); i++ {
 		if args[i] == "--database" {
-			if i+1 >= len(args) || database != "" {
+			if i+1 >= len(args) || databaseFlag {
 				return errors.New("--database requires one path")
 			}
 			database = args[i+1]
+			databaseFlag = true
 			i++
 			continue
 		}
@@ -310,6 +313,11 @@ func doctor(path string) error {
 	if err := secureCurrentExecutable(); err != nil {
 		return err
 	}
+	if c.WireGuard.ConfigPath != "" {
+		if err := secureSecretFile(c.WireGuard.ConfigPath); err != nil {
+			return fmt.Errorf("WireGuard configuration: %w", err)
+		}
+	}
 	if containerConfigured {
 		forwarding, err := os.ReadFile("/proc/sys/net/ipv4/ip_forward")
 		if err != nil || strings.TrimSpace(string(forwarding)) != "1" {
@@ -332,6 +340,9 @@ func doctor(path string) error {
 		fmt.Printf("[ok] WireGuard interface %s exists\n", c.WireGuard.Interface)
 	}
 	fmt.Println("[ok] state and executable ownership/permissions")
+	if c.WireGuard.ConfigPath != "" {
+		fmt.Println("[ok] WireGuard profile ownership/permissions (content not read)")
+	}
 	fmt.Println("[ok] independent rollback timer enabled and active")
 	fmt.Println("[ok] exact candidate passed nft --check")
 	fmt.Println("[ok] no firewall changes were made")
@@ -402,6 +413,26 @@ func secureCurrentExecutable() error {
 	return nil
 }
 
+func secureSecretFile(path string) error {
+	abs, err := filepath.Abs(path)
+	if err != nil || abs != path {
+		return errors.New("path must be absolute")
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil || resolved != abs {
+		return errors.New("path is absent or contains a symlink")
+	}
+	info, err := os.Lstat(abs)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0o077 != 0 {
+		return errors.New("file must be regular and mode 0600 or stricter")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != 0 {
+		return errors.New("file must be owned by root")
+	}
+	return nil
+}
+
 func contains(values []string, want string) bool {
 	for _, value := range values {
 		if value == want {
@@ -468,7 +499,7 @@ func blocksCommand(sock, path string, args []string) error {
 }
 func claimSubcommand(sock, path string, args []string, addOp, removeOp string) error {
 	if len(args) < 2 {
-		return errors.New("usage: nftfw block|allow add <address> [source] [reason] | remove <claim-id>")
+		return errors.New("usage: nftfw block|allow add <address> [--ttl duration] [reason] | remove <claim-id>")
 	}
 	if args[0] == "remove" {
 		id, err := strconv.ParseInt(args[1], 10, 64)
@@ -483,19 +514,24 @@ func claimSubcommand(sock, path string, args []string, addOp, removeOp string) e
 		return errors.New("subcommand must be add or remove")
 	}
 	req := api.Request{Op: addOp, Address: args[1], Source: "manual", Reason: "operator block"}
+	defaultTTL := "0"
 	if addOp == "allow-add" {
 		req.Source = ""
 		req.Reason = "temporary access"
-		if len(args) > 2 {
-			req.Reason = strings.Join(args[2:], " ")
-		}
-	} else {
-		if len(args) > 2 {
-			req.Source = args[2]
-		}
-		if len(args) > 3 {
-			req.Reason = strings.Join(args[3:], " ")
-		}
+		defaultTTL = "15m"
+	}
+	fs := flag.NewFlagSet(addOp, flag.ContinueOnError)
+	ttlText := fs.String("ttl", defaultTTL, "claim lifetime; zero is permanent")
+	if err := fs.Parse(args[2:]); err != nil {
+		return err
+	}
+	ttl, err := time.ParseDuration(*ttlText)
+	if err != nil || ttl < 0 || ttl > 365*24*time.Hour || ttl%time.Second != 0 {
+		return errors.New("--ttl must be a whole-second duration from 0 through 8760h")
+	}
+	req.ExpiresSec = int64(ttl / time.Second)
+	if reason := strings.TrimSpace(strings.Join(fs.Args(), " ")); reason != "" {
+		req.Reason = reason
 	}
 	return controlOrLocal(sock, path, req, func(rt *app.Runtime) (any, error) {
 		return rt.Control(context.Background(), req)

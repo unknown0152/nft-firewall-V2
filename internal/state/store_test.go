@@ -58,6 +58,14 @@ func TestClaimProvenanceUnion(t *testing.T) {
 	}
 }
 
+func FuzzValidateClaim(f *testing.F) {
+	f.Add("203.0.113.1/32", "ipv4")
+	f.Add("::/0", "ipv6")
+	f.Fuzz(func(t *testing.T, address, family string) {
+		_ = ValidateClaim(address, family)
+	})
+}
+
 func TestReplaceSourceClaimsIsAtomicAndPreservesOtherSources(t *testing.T) {
 	ctx := context.Background()
 	s, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
@@ -82,6 +90,31 @@ func TestReplaceSourceClaimsIsAtomicAndPreservesOtherSources(t *testing.T) {
 		t.Fatalf("failed replacement changed known-good claims: %v", got)
 	}
 }
+
+func TestBoundedSourceReplacementRollsBackOnTotalLimit(t *testing.T) {
+	ctx := context.Background()
+	s, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	if _, err := s.AddClaim(ctx, Claim{Address: "203.0.113.1/32", Family: "ipv4", Source: "manual", Reason: "operator", Actor: "admin"}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReplaceSourceClaimsBounded(ctx, "threatfeed/test", "feed", "integration", []string{"198.51.100.1/32"}, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.ReplaceSourceClaimsBounded(ctx, "threatfeed/test", "feed", "integration", []string{"198.51.100.2/32", "198.51.100.3/32"}, 2); err == nil {
+		t.Fatal("replacement exceeding the global claim limit succeeded")
+	}
+	claims, err := s.Claims(ctx, time.Now())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := EffectiveAddresses(claims, "ipv4"); len(got) != 2 || got[0] != "198.51.100.1/32" || got[1] != "203.0.113.1/32" {
+		t.Fatalf("failed bounded replacement changed known-good claims: %v", got)
+	}
+}
 func TestMigrationAndCorruptDatabase(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "state.db")
 	s, err := Open(context.Background(), path)
@@ -100,7 +133,7 @@ func TestMigrationAndCorruptDatabase(t *testing.T) {
 	}(); err != nil {
 		t.Fatal(err)
 	}
-	if version != 2 {
+	if version != 3 {
 		t.Fatalf("migration version %d", version)
 	}
 	bad := filepath.Join(t.TempDir(), "bad.db")

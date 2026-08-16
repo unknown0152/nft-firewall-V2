@@ -73,6 +73,24 @@ func (p Provider) Snapshot(ctx context.Context) (Snapshot, error) {
 				s.Reason = detail
 			}
 		}
+		if !s.Drift {
+			expected, expectedErr := p.Store.ExpectedGeneration(ctx)
+			if expectedErr == nil {
+				if expected.ObservedHash == "" {
+					s.Drift = true
+					s.Reason = fmt.Sprintf("generation %d lacks an observed-state fingerprint", expected.ID)
+				} else if observedHash, fingerprintErr := p.Backend.Fingerprint(ctx); fingerprintErr != nil {
+					s.Drift = true
+					s.Reason = "owned table fingerprint failed: " + fingerprintErr.Error()
+				} else if observedHash != expected.ObservedHash {
+					s.Drift = true
+					s.Reason = fmt.Sprintf("owned nftables fingerprint differs from generation %d", expected.ID)
+				}
+			} else if !errors.Is(expectedErr, sql.ErrNoRows) {
+				s.Drift = true
+				s.Reason = "expected generation read failed: " + expectedErr.Error()
+			}
+		}
 		if s.Drift {
 			s.Status = "DEGRADED"
 			s.KillSwitch = "degraded"

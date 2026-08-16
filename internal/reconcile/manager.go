@@ -80,6 +80,11 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 		_ = m.Store.MarkRolledBack(ctx, artifact.Generation)
 		return Result{}, err
 	}
+	if err := m.recordFingerprint(ctx, artifact.Generation); err != nil {
+		_ = m.restore(ctx, previous)
+		_ = m.Store.MarkRolledBack(ctx, artifact.Generation)
+		return Result{}, fmt.Errorf("record applied nftables fingerprint: %w", err)
+	}
 	if m.HealthCheck != nil {
 		if err := m.HealthCheck(ctx); err != nil {
 			rollbackErr := m.Rollback(ctx, artifact.Generation)
@@ -110,7 +115,18 @@ func (m *Manager) restore(ctx context.Context, previous *state.Generation) error
 	if err != nil {
 		return err
 	}
-	return m.Backend.Apply(ctx, script)
+	if err := m.Backend.Apply(ctx, script); err != nil {
+		return err
+	}
+	return m.recordFingerprint(ctx, previous.ID)
+}
+
+func (m *Manager) recordFingerprint(ctx context.Context, id uint64) error {
+	hash, err := m.Backend.Fingerprint(ctx)
+	if err != nil {
+		return err
+	}
+	return m.Store.SetObservedHash(ctx, id, hash)
 }
 
 func (m *Manager) Commit(ctx context.Context, id uint64) error {
@@ -120,6 +136,9 @@ func (m *Manager) Commit(ctx context.Context, id uint64) error {
 	}
 	if pending.ID != id {
 		return fmt.Errorf("generation %d is not pending", id)
+	}
+	if pending.Status != "applied" {
+		return fmt.Errorf("generation %d was persisted but not applied and cannot be committed", id)
 	}
 	return m.Store.Commit(ctx, id)
 }
@@ -181,15 +200,27 @@ type Drift struct {
 }
 
 func (m *Manager) Reconcile(ctx context.Context, repair bool) (Drift, error) {
+	if pending, err := m.Store.Pending(ctx); err == nil && pending.Status == "pending" {
+		drift := Drift{Missing: true, Detail: fmt.Sprintf("generation %d was not fully applied before process exit", pending.ID)}
+		if repair {
+			if err := m.Rollback(ctx, pending.ID); err != nil {
+				return drift, err
+			}
+			drift.Repaired = true
+		}
+		return drift, nil
+	} else if err != nil && !errors.Is(err, sql.ErrNoRows) {
+		return Drift{}, err
+	}
 	observed, err := m.Backend.ListOwned(ctx)
 	if err != nil {
 		return Drift{}, err
 	}
-	expected := len(m.Backend.Owned)
+	expectedCount := len(m.Backend.Owned)
 	d := Drift{OwnedTables: observed}
-	if len(observed) != expected {
+	if len(observed) != expectedCount {
 		d.Missing = true
-		d.Detail = fmt.Sprintf("owned table count %d/%d", len(observed), expected)
+		d.Detail = fmt.Sprintf("owned table count %d/%d", len(observed), expectedCount)
 	}
 	if !d.Missing {
 		ok, detail, inspectErr := m.Backend.Integrity(ctx)
@@ -201,9 +232,32 @@ func (m *Manager) Reconcile(ctx context.Context, repair bool) (Drift, error) {
 			d.Detail = detail
 		}
 	}
+	expected, expectedErr := m.expectedGeneration(ctx)
+	if expectedErr != nil && !errors.Is(expectedErr, sql.ErrNoRows) {
+		return d, expectedErr
+	}
+	if !d.Missing && expected != nil {
+		if expected.ObservedHash == "" {
+			d.Missing = true
+			d.Detail = fmt.Sprintf("generation %d lacks an observed-state fingerprint", expected.ID)
+		} else {
+			observedHash, fingerprintErr := m.Backend.Fingerprint(ctx)
+			if fingerprintErr != nil {
+				return d, fingerprintErr
+			}
+			if observedHash != expected.ObservedHash {
+				d.Missing = true
+				d.Detail = fmt.Sprintf("owned nftables fingerprint differs from generation %d", expected.ID)
+			}
+		}
+	}
 	if d.Missing && repair {
-		g, err := m.Store.LastKnownGood(ctx)
-		if err != nil {
+		_ = m.Store.Audit(ctx, "system", "drift_detected", d.Detail)
+		g := expected
+		if g == nil {
+			g, err = m.Store.LastKnownGood(ctx)
+		}
+		if err != nil || g == nil {
 			return d, err
 		}
 		script, err := m.Store.ReadScript(g)
@@ -213,14 +267,23 @@ func (m *Manager) Reconcile(ctx context.Context, repair bool) (Drift, error) {
 		if err := m.Backend.Apply(ctx, script); err != nil {
 			return d, err
 		}
+		if err := m.recordFingerprint(ctx, g.ID); err != nil {
+			return d, err
+		}
 		d.Repaired = true
 		_ = m.Store.Audit(ctx, "system", "drift_repaired", d.Detail)
+	} else if d.Missing {
+		_ = m.Store.Audit(ctx, "system", "drift_detected", d.Detail)
 	}
 	return d, nil
 }
 
+func (m *Manager) expectedGeneration(ctx context.Context) (*state.Generation, error) {
+	return m.Store.ExpectedGeneration(ctx)
+}
+
 func generationByID(s *state.Store, id uint64) (*state.Generation, error) {
-	row := s.DB.QueryRow("SELECT id,checksum,script_path,status,created_at,rollback_deadline,previous_id FROM generations WHERE id=?", id)
+	row := s.DB.QueryRow("SELECT id,checksum,observed_hash,script_path,status,created_at,rollback_deadline,previous_id FROM generations WHERE id=?", id)
 	return scan(row)
 }
 func scan(row interface{ Scan(...any) error }) (*state.Generation, error) {
@@ -228,7 +291,7 @@ func scan(row interface{ Scan(...any) error }) (*state.Generation, error) {
 	var created string
 	var deadline sql.NullString
 	var prev sql.NullInt64
-	if err := row.Scan(&g.ID, &g.Checksum, &g.ScriptPath, &g.Status, &created, &deadline, &prev); err != nil {
+	if err := row.Scan(&g.ID, &g.Checksum, &g.ObservedHash, &g.ScriptPath, &g.Status, &created, &deadline, &prev); err != nil {
 		return nil, err
 	}
 	g.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)

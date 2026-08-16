@@ -64,6 +64,9 @@ func Compile(in Input, generation uint64) (Artifact, error) {
 			if (item.family == "ipv4" && !p.Addr().Is4()) || (item.family == "ipv6" && !p.Addr().Is6()) {
 				return Artifact{}, fmt.Errorf("%s contains address from wrong family: %q", item.name, raw)
 			}
+			if strings.HasPrefix(item.name, "wg_bootstrap_") && p.Bits() != p.Addr().BitLen() {
+				return Artifact{}, fmt.Errorf("%s contains non-host endpoint prefix: %q", item.name, raw)
+			}
 		}
 	}
 	if err := validateNATTargets(in.Policy.Config.NAT, in.DockerNets); err != nil {
@@ -158,6 +161,7 @@ func emitFilter(b *strings.Builder, in Input) {
 	line(fmt.Sprintf("        ip6 saddr @docker_nets6 oifname %s tcp flags syn tcp option maxseg size set %d comment \"nftfw:container-vpn-mss-out-v6\"", strconv.Quote(c.WireGuard.Interface), c.WireGuard.TCPMSS))
 	line(fmt.Sprintf("        iifname %s ip daddr @docker_nets tcp flags syn tcp option maxseg size set %d comment \"nftfw:container-vpn-mss-in-v4\"", strconv.Quote(c.WireGuard.Interface), c.WireGuard.TCPMSS))
 	line(fmt.Sprintf("        iifname %s ip6 daddr @docker_nets6 tcp flags syn tcp option maxseg size set %d comment \"nftfw:container-vpn-mss-in-v6\"", strconv.Quote(c.WireGuard.Interface), c.WireGuard.TCPMSS))
+	line(fmt.Sprintf("        oifname %s ct direction reply ct state established,related accept comment \"nftfw:forward-uplink-reply-only\"", quote(c.Interfaces, "uplink")))
 	line(fmt.Sprintf("        ip saddr @docker_nets oifname %s drop comment \"nftfw:container-physical-deny\"", quote(c.Interfaces, "uplink")))
 	line(fmt.Sprintf("        ip6 saddr @docker_nets6 oifname %s drop comment \"nftfw:container-physical-deny-v6\"", quote(c.Interfaces, "uplink")))
 	line(fmt.Sprintf("        oifname %s drop comment \"nftfw:forward-physical-deny\"", quote(c.Interfaces, "uplink")))

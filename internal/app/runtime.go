@@ -68,6 +68,7 @@ func Open(ctx context.Context, configPath string, runner nft.Runner) (*Runtime, 
 	}
 	resolver := &wireguard.Resolver{CachePath: filepath.Join(st.Dir, "wg-endpoints.json"), KeepRecent: c.WireGuard.KeepRecent, Max: 64, MaxStale: 24 * time.Hour}
 	controller := &wireguard.Controller{}
+	_ = st.Audit(ctx, "system", "configuration_loaded", fmt.Sprintf("ipv6=%s zones=%d policies=%d", c.System.IPv6Mode, len(c.Zones), len(c.Policies)))
 	return &Runtime{Config: c, Effective: e, Store: st, Backend: be, Manager: m, EndpointResolver: resolver, WGController: controller}, nil
 }
 func (r *Runtime) Close() error {
@@ -164,10 +165,10 @@ func (r *Runtime) containerNets(ctx context.Context) (v4, v6 []string, err error
 		observer := containers.Observer{}
 		ok, detail, policyErr := observer.FirewallPolicy()
 		if policyErr != nil {
-			return nil, nil, fmt.Errorf("Docker integration refused: %s: %w", detail, policyErr)
+			return nil, nil, fmt.Errorf("docker integration refused: %s: %w", detail, policyErr)
 		}
 		if !ok {
-			return nil, nil, fmt.Errorf("Docker integration refused: %s", detail)
+			return nil, nil, fmt.Errorf("docker integration refused: %s", detail)
 		}
 		networks, observeErr := observer.Networks(ctx)
 		if observeErr != nil {
@@ -215,6 +216,7 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
+		_ = r.Store.Audit(ctx, "uid:0", "firewall_plan_generated", fmt.Sprintf("generation=%d checksum=%s", a.Generation, a.Checksum))
 		return map[string]any{"generation": a.Generation, "checksum": a.Checksum, "script": a.Script}, nil
 	case "apply":
 		a, err := r.Artifact(ctx)
@@ -232,13 +234,21 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 		refreshed, err := r.RefreshEndpoints(ctx)
 		return map[string]any{"refreshed": refreshed}, err
 	case "block-add":
-		id, err := blocks.Service{Store: r.Store, Max: r.Config.Runtime.MaxBlockClaims}.Add(ctx, req.Address, req.Source, req.Reason, "uid:0", nil)
+		expires, err := claimExpiry(req.ExpiresSec)
+		if err != nil {
+			return nil, err
+		}
+		id, err := blocks.Service{Store: r.Store, Max: r.Config.Runtime.MaxBlockClaims}.Add(ctx, req.Address, req.Source, req.Reason, "uid:0", expires)
 		if err == nil {
 			_, err = r.RefreshClaimSets(ctx)
 		}
 		return map[string]any{"claim_id": id}, err
 	case "allow-add":
-		id, err := blocks.Service{Store: r.Store, Max: r.Config.Runtime.MaxBlockClaims}.AddAllow(ctx, req.Address, req.Reason, "uid:0", nil)
+		expires, err := claimExpiry(req.ExpiresSec)
+		if err != nil {
+			return nil, err
+		}
+		id, err := blocks.Service{Store: r.Store, Max: r.Config.Runtime.MaxBlockClaims}.AddAllow(ctx, req.Address, req.Reason, "uid:0", expires)
 		if err == nil {
 			_, err = r.RefreshClaimSets(ctx)
 		}
@@ -253,6 +263,17 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 	default:
 		return nil, fmt.Errorf("unknown control operation %q", req.Op)
 	}
+}
+
+func claimExpiry(seconds int64) (*time.Time, error) {
+	if seconds < 0 || seconds > 365*24*60*60 {
+		return nil, errors.New("claim expiry must be between zero and one year")
+	}
+	if seconds == 0 {
+		return nil, nil
+	}
+	expires := time.Now().UTC().Add(time.Duration(seconds) * time.Second)
+	return &expires, nil
 }
 
 func (r *Runtime) RollbackExpired(ctx context.Context) (bool, error) {
@@ -276,6 +297,10 @@ func (r *Runtime) RefreshEndpoints(ctx context.Context) (bool, error) {
 	}
 	changed := false
 	if preferred != "" && r.WGController != nil {
+		observation := r.WGController.Observe(ctx, r.Config.WireGuard.Interface, time.Duration(r.Config.WireGuard.HandshakeSecond)*time.Second)
+		if !observation.Healthy {
+			_ = r.Store.Audit(ctx, "system", "wireguard_recovery_attempted", "bounded endpoint refresh")
+		}
 		changed, err = r.WGController.SetEndpoint(ctx, r.Config.WireGuard.Interface, preferred, r.Config.WireGuard.EndpointPort)
 		if err != nil {
 			_ = r.Store.Audit(ctx, "system", "wireguard_endpoint_update_failed", "live peer update rejected")
@@ -287,6 +312,31 @@ func (r *Runtime) RefreshEndpoints(ctx context.Context) (bool, error) {
 		_ = r.Store.Audit(ctx, "system", "wireguard_endpoint_changed", "live peer endpoint updated")
 	}
 	return true, nil
+}
+
+func (r *Runtime) RefreshWireGuardHealth(ctx context.Context) error {
+	if r.WGController == nil {
+		return nil
+	}
+	name := "wireguard/" + r.Config.WireGuard.Interface
+	observation := r.WGController.Observe(ctx, r.Config.WireGuard.Interface, time.Duration(r.Config.WireGuard.HandshakeSecond)*time.Second)
+	previous, previousErr := r.Store.IntegrationState(ctx, name)
+	if observation.Healthy {
+		if err := r.Store.SetIntegrationState(ctx, name, "healthy", observation.PeerCount, true); err != nil {
+			return err
+		}
+		if previousErr == nil && previous.Status == "degraded" {
+			_ = r.Store.Audit(ctx, "system", "vpn_recovered", "WireGuard handshake healthy")
+		}
+		return nil
+	}
+	if err := r.Store.SetIntegrationState(ctx, name, "degraded", observation.PeerCount, false); err != nil {
+		return err
+	}
+	if errors.Is(previousErr, sql.ErrNoRows) || previousErr == nil && previous.Status != "degraded" {
+		_ = r.Store.Audit(ctx, "system", "vpn_failure_detected", observation.Reason)
+	}
+	return nil
 }
 
 func (r *Runtime) RefreshClaimSets(ctx context.Context) (bool, error) {
@@ -364,14 +414,6 @@ func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
 		if err == nil && len(addresses) < min {
 			err = fmt.Errorf("entry sanity threshold not met: got %d, require %d", len(addresses), min)
 		}
-		if err == nil {
-			other, countErr := r.Store.ClaimCountExcludingSource(ctx, name)
-			if countErr != nil {
-				err = countErr
-			} else if other+len(addresses) > r.Config.Runtime.MaxBlockClaims {
-				err = fmt.Errorf("claim limit would be exceeded")
-			}
-		}
 		if err != nil {
 			oldCount, _ := r.Store.SourceClaimCount(ctx, name)
 			_ = r.Store.SetIntegrationState(ctx, name, "degraded", oldCount, false)
@@ -379,7 +421,7 @@ func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
 			failures = append(failures, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		count, err := r.Store.ReplaceSourceClaims(ctx, name, "threat intelligence", "integration", addresses)
+		count, err := r.Store.ReplaceSourceClaimsBounded(ctx, name, "threat intelligence", "integration", addresses, r.Config.Runtime.MaxBlockClaims)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", name, err))
 			continue
@@ -411,7 +453,7 @@ func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
 			failures = append(failures, fmt.Errorf("%s: %w", name, err))
 			continue
 		}
-		count, err := r.Store.ReplaceSourceClaims(ctx, name, "GeoIP "+geoConfig.Country, "integration", addresses)
+		count, err := r.Store.ReplaceSourceClaimsBounded(ctx, name, "GeoIP "+geoConfig.Country, "integration", addresses, r.Config.Runtime.MaxBlockClaims)
 		if err != nil {
 			failures = append(failures, fmt.Errorf("%s: %w", name, err))
 			continue

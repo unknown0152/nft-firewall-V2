@@ -118,6 +118,10 @@ ports = [8080]
 name = "active-udp"
 protocol = "udp"
 ports = [9090]
+[[services]]
+name = "dnat-probe"
+protocol = "tcp"
+ports = [10080]
 [[policies]]
 name = "host-to-internet-probe"
 from = "host"
@@ -154,6 +158,20 @@ from = "lan"
 to = "any"
 service = "probe"
 action = "allow"
+[[policies]]
+name = "published-probe"
+from = "any"
+to = "lan"
+service = "dnat-probe"
+action = "allow"
+[[nat]]
+name = "published-probe"
+source = "any"
+external_interface = "h-ext"
+protocol = "tcp"
+external_port = 18080
+destination = "172.30.0.2"
+destination_port = 10080
 [wireguard]
 interface = "wg-test"
 endpoint_port = 51820
@@ -188,10 +206,16 @@ ip netns exec "$host_ns" nft list chain inet nftfw_filter output | grep -F 'nftf
 echo "DRIFT DELETED RULE: PASS"
 
 marker_handle=$(ip netns exec "$host_ns" nft -a list chain inet nftfw_filter output | awk '/nftfw:vpn-only-egress/ { print $NF }')
-ip netns exec "$host_ns" nft replace rule inet nftfw_filter output handle "$marker_handle" counter accept comment "tampered"
+ip netns exec "$host_ns" nft -f - <<NFT
+replace rule inet nftfw_filter output handle $marker_handle counter accept comment "nftfw:vpn-only-egress"
+NFT
 ip netns exec "$host_ns" "${nftfw_local[@]}" reconcile >/dev/null
 ip netns exec "$host_ns" nft list chain inet nftfw_filter output | grep -F 'nftfw:vpn-only-egress' >/dev/null
-echo "DRIFT MODIFIED RULE: PASS"
+if ip netns exec "$host_ns" nft list chain inet nftfw_filter output | grep -F 'accept comment "nftfw:vpn-only-egress"' >/dev/null; then
+    echo "FAIL: marker-preserving rule tampering was not repaired"
+    exit 1
+fi
+echo "DRIFT MODIFIED RULE WITH MARKER RETAINED: PASS"
 
 ip netns exec "$host_ns" nft delete table ip6 nftfw_filter6
 ip netns exec "$host_ns" "${nftfw_local[@]}" reconcile >/dev/null
@@ -199,6 +223,14 @@ ip netns exec "$host_ns" nft list table ip6 nftfw_filter6 >/dev/null
 ip netns exec "$host_ns" nft list table inet third_party_test | grep -F 'third-party-preserve' >/dev/null
 echo "DRIFT DELETED TABLE: PASS"
 echo "UNRELATED TABLE PRESERVED: PASS"
+
+dnat_ready="$lab_tmp/dnat-ready"
+ip netns exec "$ctr_ns" python3 "$root_dir/tests/namespaces/dnat_probe.py" server 172.30.0.2 10080 "$dnat_ready" & dnat_server_pid=$!; lab_pids+=("$dnat_server_pid")
+for _ in $(seq 1 100); do [[ -e "$dnat_ready" ]] && break; sleep 0.05; done
+[[ -e "$dnat_ready" ]] || { echo "FAIL: DNAT probe server did not bind"; exit 1; }
+ip netns exec "$inet_ns" python3 "$root_dir/tests/namespaces/dnat_probe.py" client 198.18.0.2 18080
+wait "$dnat_server_pid" || { echo "FAIL: DNAT probe server failed"; exit 1; }
+echo "TYPED DNAT ROUND TRIP: PASS"
 
 sleep 2
 if ! ip netns exec "$host_ns" ping -c 2 -W 2 203.0.113.1 >/dev/null; then

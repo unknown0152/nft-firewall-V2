@@ -167,6 +167,22 @@ func TestValidateNATSchema(t *testing.T) {
 	}
 }
 
+func TestWireGuardBootstrapRequiresHostPrefixes(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.WireGuard.BootstrapIPs = []string{"198.51.100.0/24"}
+	if err := Validate(c); err == nil {
+		t.Fatal("broad IPv4 bootstrap prefix accepted")
+	}
+	c.WireGuard.BootstrapIPs = nil
+	c.WireGuard.BootstrapIPsV6 = []string{"2001:db8::/64"}
+	if err := Validate(c); err == nil {
+		t.Fatal("broad IPv6 bootstrap prefix accepted")
+	}
+}
+
 func FuzzDecode(f *testing.F) {
 	f.Add([]byte(validTOML))
 	f.Add([]byte("[system]\nunknown=true\n"))

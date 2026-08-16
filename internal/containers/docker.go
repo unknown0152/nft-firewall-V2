@@ -10,9 +10,11 @@ import (
 	"net/netip"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -42,6 +44,26 @@ func (o Observer) FirewallPolicy() (bool, string, error) {
 	if info.Mode().Perm()&0o022 != 0 || info.Size() > 1<<20 {
 		return false, "Docker daemon config must be bounded and not group/other writable", errors.New("unsafe daemon config permissions or size")
 	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || stat.Uid != uint32(os.Geteuid()) {
+		return false, "Docker daemon config must be owned by the service user", errors.New("unsafe daemon config ownership")
+	}
+	abs, err := filepath.Abs(path)
+	if err != nil {
+		return false, "Docker daemon config path is invalid", err
+	}
+	resolved, err := filepath.EvalSymlinks(abs)
+	if err != nil || resolved != abs {
+		return false, "Docker daemon config path contains a symlink", errors.New("unsafe daemon config path")
+	}
+	parent, err := os.Stat(filepath.Dir(abs))
+	if err != nil || !parent.IsDir() || parent.Mode().Perm()&0o022 != 0 {
+		return false, "Docker daemon config parent is unsafe", errors.New("unsafe daemon config parent")
+	}
+	parentStat, ok := parent.Sys().(*syscall.Stat_t)
+	if !ok || parentStat.Uid != uint32(os.Geteuid()) {
+		return false, "Docker daemon config parent has unsafe ownership", errors.New("unsafe daemon config parent ownership")
+	}
 	b, err := os.ReadFile(path)
 	if err != nil {
 		return false, "Docker daemon config unavailable; Docker firewall ownership is unknown", err
@@ -69,11 +91,11 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 	var result []Network
 	names := splitLines(string(out))
 	if len(names) > 1024 {
-		return nil, errors.New("Docker network count exceeds 1024")
+		return nil, errors.New("docker network count exceeds 1024")
 	}
 	for _, name := range names {
 		if !dockerName.MatchString(name) {
-			return nil, fmt.Errorf("Docker returned unsafe network name %q", name)
+			return nil, fmt.Errorf("docker returned unsafe network name %q", name)
 		}
 		raw, err := boundedOutput(ctx, 1<<20, bin, "network", "inspect", "--", name)
 		if err != nil {
@@ -96,7 +118,7 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 			for _, c := range item.IPAM.Config {
 				p, err := netip.ParsePrefix(c.Subnet)
 				if err != nil || p.Bits() == 0 {
-					return nil, fmt.Errorf("Docker network %s returned invalid subnet", name)
+					return nil, fmt.Errorf("docker network %s returned invalid subnet", name)
 				}
 				result = append(result, Network{Name: name, CIDR: p.Masked().String()})
 			}
@@ -121,14 +143,14 @@ func boundedOutput(ctx context.Context, limit int64, bin string, args ...string)
 	if int64(len(out)) > limit {
 		_ = cmd.Process.Kill()
 		_ = cmd.Wait()
-		return nil, errors.New("Docker command output exceeds limit")
+		return nil, errors.New("docker command output exceeds limit")
 	}
 	waitErr := cmd.Wait()
 	if readErr != nil {
 		return nil, readErr
 	}
 	if waitErr != nil {
-		return nil, fmt.Errorf("Docker command failed: %w", waitErr)
+		return nil, fmt.Errorf("docker command failed: %w", waitErr)
 	}
 	return out, nil
 }

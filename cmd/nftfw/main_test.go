@@ -32,3 +32,10 @@ func TestStateCommandRejectsUnknownArguments(t *testing.T) {
 		t.Fatal("unexpected state argument accepted")
 	}
 }
+
+func TestStateDatabaseFlagOverridesEnvironment(t *testing.T) {
+	t.Setenv("NFTFW_STATE_DB", filepath.Join(t.TempDir(), "environment.db"))
+	if err := stateCommand([]string{"verify", "--database", filepath.Join(t.TempDir(), "flag.db")}); err != nil {
+		t.Fatal(err)
+	}
+}
