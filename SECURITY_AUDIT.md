@@ -1,6 +1,6 @@
 # NFT Firewall V2 Security Audit
 
-Audit date: 2026-08-16 UTC. Scope: production Go, configuration/compiler,
+Audit date: 2026-08-16 and 2026-08-17 UTC. Scope: production Go, configuration/compiler,
 nftables ownership, Unix APIs, persistence/rollback, systemd, integrations,
 web, installers, tests, dependencies, Git history, and release contents.
 
@@ -23,6 +23,7 @@ Status at release: no unresolved `CRITICAL` or `HIGH` finding.
 | NFV2-011 | A vulnerable indirect `x/sys` version remained in the module graph | MEDIUM | Platform-specific dependency vulnerability, unreachable on tested Linux path | Upgrade to `golang.org/x/sys v0.47.0` | `go mod verify`, full tests, govulncheck no reachable findings | CLOSED |
 | NFV2-012 | Debian staging root inherited mode `0700`; package output was published directly | HIGH | Package metadata could carry unsafe root mode and readers could see partial output | Force stage root `0755`, build to temporary, inspect fully, atomically rename | `dpkg-deb --contents/info` for amd64 and arm64 | CLOSED |
 | NFV2-013 | Malformed privileged frames were rejected but not audited | MEDIUM | Repeated parse abuse could lack durable security evidence | Emit bounded content-free rejection events for frame, size, JSON, and missing-op failures | Root-peer API regression plus malformed/oversized socket chaos | CLOSED |
+| NFV2-014 | Release staging copied ignored Python bytecode from the working tree | MEDIUM | Local cache artifacts could disclose build paths or enter an otherwise clean release | Populate duplicate release trees only from `git archive`; reject cache, runtime, secret, and symlink entries before manifesting | Dirty-cache regression build plus extracted final archive inspection | CLOSED |
 
 ## Adversarial review areas
 
@@ -72,5 +73,5 @@ unresolved high/critical implementation findings.
 - Gitleaks 8.16.0 complete V2 Git history: PASS, no leaks found.
 - Gitleaks current worktree and extracted release: PASS, no leaks found.
 - Sensitive filename/content pattern checks: PASS.
-- Archive contains no `.git`, real WireGuard fixture, database, WAL, log, or
-  credential file: PASS.
+- Archive contains no `.git`, build cache, real WireGuard fixture, database,
+  WAL, log, symlink, or credential file: PASS.

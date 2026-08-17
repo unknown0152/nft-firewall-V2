@@ -33,7 +33,7 @@ topology details are excluded.
 | systemd verify/hardening | PASS | Unit verification and exposure analysis |
 | Source installer | PASS | Verified checksums/config/units, online state backup, service restart, no policy apply |
 | Debian packages | PASS | amd64/arm64 control, contents, root mode, scripts, architecture, and atomic output inspected |
-| Release manifests | PASS | 162-file JSON manifest plus 105-file source manifest and internal sums verified |
+| Release manifests | PASS | Full-tree JSON manifest, tracked-source manifest, and internal sums verified |
 | Archive integrity | PASS | `unzip -t`, `tar -tzf`, internal/source SHA256, extracted CLI execution |
 | Reproducibility | PASS | Two builds from the same commit produced byte-identical ZIP and tar.gz hashes |
 | Full VPS reboot | NOT EXECUTED | Preserved live SSH; real early-boot unit ordering/snapshot paths tested without reboot |
@@ -124,9 +124,9 @@ then rejected its intentionally absent `/etc/wireguard/wg0.conf`, as expected
 before operator configuration; it made no firewall change.
 
 The release builder was run twice from the same clean commit and produced
-identical ZIP and tar.gz SHA256 values. The extracted ZIP contained 164 files:
-162 records in `RELEASE_MANIFEST.json` (the manifest excludes itself and its
-checksum file) and 105 source-manifest records. Every internal checksum passed.
+identical ZIP and tar.gz SHA256 values. The extracted ZIP's full-tree JSON
+manifest, tracked-source manifest, and internal checksums covered every
+applicable file. Every checksum passed.
 
 Gitleaks 8.16.0 scanned the complete V2 history with redaction enabled, then the
 working tree and extracted release independently. All reported no leaks. A

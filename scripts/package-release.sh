@@ -56,17 +56,17 @@ for arch in amd64 arm64; do
     done
     install -m 0644 "dist/nft-firewall-v2_${version}_${arch}.deb" "$release_root/packages/"
 done
-cp -a packaging "$release_root/packaging"
-cp -a configs "$release_root/configs"
-cp -a docs "$release_root/docs"
-cp -a tests "$release_root/tests"
+cp -a "$release_root/source/packaging" "$release_root/packaging"
+cp -a "$release_root/source/configs" "$release_root/configs"
+cp -a "$release_root/source/docs" "$release_root/docs"
+cp -a "$release_root/source/tests" "$release_root/tests"
 for document in README.md START-HERE.md INSTALL.md SECURITY.md LICENSE \
     FINAL_ACCEPTANCE_REPORT.md SECURITY_AUDIT.md TEST_RESULTS.md; do
-    install -m 0644 "$document" "$release_root/$document"
+    install -m 0644 "$release_root/source/$document" "$release_root/$document"
 done
-install -m 0644 docs/ARCHITECTURE.md "$release_root/ARCHITECTURE.md"
-install -m 0644 docs/V1_FEATURE_PARITY.md "$release_root/V1_FEATURE_PARITY.md"
-install -m 0644 docs/V1_SECURITY_INVARIANTS.md "$release_root/SECURITY_INVARIANTS.md"
+install -m 0644 "$release_root/source/docs/ARCHITECTURE.md" "$release_root/ARCHITECTURE.md"
+install -m 0644 "$release_root/source/docs/V1_FEATURE_PARITY.md" "$release_root/V1_FEATURE_PARITY.md"
+install -m 0644 "$release_root/source/docs/V1_SECURITY_INVARIANTS.md" "$release_root/SECURITY_INVARIANTS.md"
 sed -i \
     -e "s#@RELEASE_VERSION@#$version#g" \
     -e "s#@GIT_COMMIT@#$commit#g" \
@@ -84,6 +84,17 @@ sed -i \
     )
     echo '```'
 } >> "$release_root/FINAL_ACCEPTANCE_REPORT.md"
+
+mapfile -d '' release_debris < <(find "$release_root" \
+    \( -type d \( -name .git -o -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .cache \) \) -o \
+    \( -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '.DS_Store' -o -name '*~' -o \
+        -name '*.swp' -o -name '*.tmp' -o -name '*.log' -o -name '*.db' -o -name '*.db-wal' -o \
+        -name '*.db-shm' -o -name 'wg-test.conf' \) \) -o -type l \) -print0)
+if (( ${#release_debris[@]} > 0 )); then
+    echo "Release tree contains forbidden cache, runtime, secret, or symlink entries:" >&2
+    printf '  %s\n' "${release_debris[@]}" >&2
+    exit 1
+fi
 
 (
     cd "$release_root"
