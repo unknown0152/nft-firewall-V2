@@ -85,11 +85,18 @@ sed -i \
     echo '```'
 } >> "$release_root/FINAL_ACCEPTANCE_REPORT.md"
 
-mapfile -d '' release_debris < <(find "$release_root" \
+debris_file="$temporary/release-debris"
+if ! find "$release_root" \
+    \( -type l -o \
     \( -type d \( -name .git -o -name __pycache__ -o -name .pytest_cache -o -name .mypy_cache -o -name .cache \) \) -o \
     \( -type f \( -name '*.pyc' -o -name '*.pyo' -o -name '.DS_Store' -o -name '*~' -o \
         -name '*.swp' -o -name '*.tmp' -o -name '*.log' -o -name '*.db' -o -name '*.db-wal' -o \
-        -name '*.db-shm' -o -name 'wg-test.conf' \) \) -o -type l \) -print0)
+        -name '*.db-shm' -o -name 'wg-test.conf' \) \) \) -print0 > "$debris_file"; then
+    echo "Could not validate the release tree for forbidden entries" >&2
+    exit 1
+fi
+release_debris=()
+mapfile -d '' release_debris < "$debris_file"
 if (( ${#release_debris[@]} > 0 )); then
     echo "Release tree contains forbidden cache, runtime, secret, or symlink entries:" >&2
     printf '  %s\n' "${release_debris[@]}" >&2
