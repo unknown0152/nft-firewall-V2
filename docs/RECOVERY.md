@@ -42,14 +42,17 @@ Verify and restore an operator backup offline:
 ```bash
 sudo systemctl stop nftfwd nftfw-rollback.timer
 sudo nftfw state verify --database /var/lib/nftfw/backups/<backup>.db
-sudo install -o root -g root -m 0600 /var/lib/nftfw/backups/<backup>.db /var/lib/nftfw/state.db.recovered
-sudo mv /var/lib/nftfw/state.db /var/lib/nftfw/state.db.failed
-sudo mv /var/lib/nftfw/state.db.recovered /var/lib/nftfw/state.db
+sudo install -d -o root -g root -m 0700 /var/lib/nftfw/recovery
+sudo mv /var/lib/nftfw/state.db /var/lib/nftfw/recovery/state.db.failed
+sudo test ! -e /var/lib/nftfw/state.db-wal || sudo mv /var/lib/nftfw/state.db-wal /var/lib/nftfw/recovery/state.db.failed-wal
+sudo test ! -e /var/lib/nftfw/state.db-shm || sudo mv /var/lib/nftfw/state.db-shm /var/lib/nftfw/recovery/state.db.failed-shm
+sudo install -o root -g root -m 0600 /var/lib/nftfw/backups/<backup>.db /var/lib/nftfw/state.db
 sudo systemctl start nftfw-rollback.timer nftfwd
 sudo nftfw health
 ```
 
-Preserve the failed database and WAL files for diagnosis. Never use `nft flush
+Use a unique recovery directory if prior failed files already exist. Preserve
+the failed database and WAL/SHM files for diagnosis. Never use `nft flush
 ruleset`; it can remove unrelated protections.
 
 ## Boot enforcement

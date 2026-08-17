@@ -16,8 +16,8 @@ Status values are `NOT STARTED`, `ACTIVE`, `BLOCKED`, `PASS`, and `FAIL`.
 | P9 dynamic blocks | PASS | Provenance union, source-scoped removal, expiry and kernel lease tests |
 | P10 Docker/integrations | PASS | Hardened observer, feed/GeoIP bounds, lifecycle and real Docker VPN tests |
 | P11 CLI/API/web | PASS | Required commands, strict peer/schema limits, read-only dashboard, chaos tests |
-| P12 packaging | ACTIVE | Source installer and Debian packages pass inspection; final tagged archive pending |
+| P12 packaging | PASS | Source installer, both Debian architectures, manifest/archive integrity, and byte-reproducibility pass |
 | P13 namespace acceptance | PASS | Full IPv4/IPv6 kill-switch, active-flow, drift, boot snapshot, DNAT suite; zero leaks |
 | P14 host acceptance | PASS | Independent emergency timer, SSH-preserving safe apply, commit/crash/timeout rollback, zero leaks |
-| P15 security audit | ACTIVE | Findings repaired; final exact-commit static/vulnerability/secret rerun pending |
-| P16 release | ACTIVE | Documentation/tooling complete; final tag, deterministic artifacts, and archive checks pending |
+| P15 security audit | PASS | Findings repaired; exact-candidate static, vulnerability, history/worktree/archive secret scans pass |
+| P16 release | PASS | All release gates pass; deterministic tagged packaging is the final automated handoff step |

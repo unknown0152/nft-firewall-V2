@@ -1,6 +1,6 @@
 # NFT Firewall V2 Test Results
 
-Executed on 2026-08-16 UTC. Sanitized raw evidence is retained outside Git at
+Executed on 2026-08-16 and 2026-08-17 UTC. Sanitized raw evidence is retained outside Git at
 `/root/nft-firewall-work/test-results/`. Provider key material and private
 topology details are excluded.
 
@@ -17,6 +17,7 @@ topology details are excluded.
 | Vulnerability scan | PASS | govulncheck v1.7.0 with Go 1.25.13; no reachable vulnerabilities |
 | Go security scan | PASS | gosec v2.28.0 focused scan, zero untriaged findings |
 | Shell analysis | PASS | ShellCheck 0.10.0 over install/package/acceptance scripts |
+| Secret scan | PASS | Gitleaks over complete Git history, worktree, and extracted archive; independent filename scan |
 | Fuzz/property | PASS | Eight parser/policy/nft/state targets, five seconds each |
 | Namespace firewall | PASS | Actual nftables/WireGuard traffic suite |
 | Simulated VPN kill switch | PASS | Healthy and removed tunnel, host and container |
@@ -30,6 +31,11 @@ topology details are excluded.
 | Database | PASS | Create, migrations, constraints, concurrent WAL, backup/restore, corruption |
 | Service crash | PASS | SIGTERM, SIGKILL, repeated restart, sockets, malformed/oversized API |
 | systemd verify/hardening | PASS | Unit verification and exposure analysis |
+| Source installer | PASS | Verified checksums/config/units, online state backup, service restart, no policy apply |
+| Debian packages | PASS | amd64/arm64 control, contents, root mode, scripts, architecture, and atomic output inspected |
+| Release manifests | PASS | 162-file JSON manifest plus 105-file source manifest and internal sums verified |
+| Archive integrity | PASS | `unzip -t`, `tar -tzf`, internal/source SHA256, extracted CLI execution |
+| Reproducibility | PASS | Two builds from the same commit produced byte-identical ZIP and tar.gz hashes |
 | Full VPS reboot | NOT EXECUTED | Preserved live SSH; real early-boot unit ordering/snapshot paths tested without reboot |
 | Optional live threat/GeoIP source | NOT APPLICABLE | Integrations disabled; parsers/refresh failure/atomic state tested locally |
 
@@ -103,6 +109,30 @@ HOST SAFE-APPLY ACCEPTANCE: PASS
 ```
 
 Cleanup left the host NFT Firewall ruleset empty and preserved SSH.
+
+## Packaging and secret result
+
+The source installer backed up existing SQLite state, installed the exact
+candidate metadata, restarted all three active services, retained the SSH
+session, and left zero owned tables because no candidate was applied. Both
+Debian packages contain the expected three binaries, five units, protected
+configuration, documentation, and upgrade/removal scripts. The package data
+root is mode `0755`; output is validated before atomic publication.
+
+The installed example configuration passed strict schema validation. `doctor`
+then rejected its intentionally absent `/etc/wireguard/wg0.conf`, as expected
+before operator configuration; it made no firewall change.
+
+The release builder was run twice from the same clean commit and produced
+identical ZIP and tar.gz SHA256 values. The extracted ZIP contained 164 files:
+162 records in `RELEASE_MANIFEST.json` (the manifest excludes itself and its
+checksum file) and 105 source-manifest records. Every internal checksum passed.
+
+Gitleaks 8.16.0 scanned the complete V2 history with redaction enabled, then the
+working tree and extracted release independently. All reported no leaks. A
+separate sensitive-filename scan also found no key, credential, secret, or
+real WireGuard fixture file. The operator's profile remained outside Git and
+the archive as root:root mode `0600`.
 
 ## Fuzz targets
 

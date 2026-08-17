@@ -67,6 +67,9 @@ rationale. Extracted guarantees are in `SECURITY_INVARIANTS.md`.
 | Service/API crash and abuse | PASS |
 | systemd verification/hardening | PASS |
 | Security audit | PASS, no unresolved high/critical |
+| Secret/history/archive scan | PASS, no leaks found |
+| Debian amd64/arm64 packages | PASS |
+| Archive integrity and reproducibility | PASS |
 | Full VPS reboot | NOT EXECUTED; see limitation below |
 
 Detailed non-secret evidence is in `TEST_RESULTS.md`. Raw sanitized logs remain
@@ -118,6 +121,11 @@ conntrack/IPv6/physical bypass, rollback races, parser/resource bounds,
 database injection/concurrency, HTTP XSS/CSRF/timeouts, and secret handling.
 All high findings discovered during implementation were repaired and
 regression tested. See `SECURITY_AUDIT.md`.
+
+Gitleaks scanned the complete V2 history, current tree, and extracted release
+with redaction enabled and found no leak. Independent filename/content checks
+also passed. The release builder produced byte-identical ZIP and tar.gz files
+on two builds from the same commit before the final tagged run.
 
 ## Limitations
 

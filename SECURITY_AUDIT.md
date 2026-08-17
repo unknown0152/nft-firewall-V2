@@ -61,3 +61,16 @@ Status at release: no unresolved `CRITICAL` or `HIGH` finding.
 
 These are documented operating assumptions or low/medium residual risks, not
 unresolved high/critical implementation findings.
+
+## Final scan evidence
+
+- staticcheck v0.7.0: PASS, zero findings.
+- govulncheck v1.7.0 with Go 1.25.13: PASS, no vulnerabilities found.
+- gosec v2.28.0 focused scan: PASS, zero untriaged findings.
+- Go race detector: PASS across all packages.
+- ShellCheck 0.10.0: PASS across production packaging and privileged tests.
+- Gitleaks 8.16.0 complete V2 Git history: PASS, no leaks found.
+- Gitleaks current worktree and extracted release: PASS, no leaks found.
+- Sensitive filename/content pattern checks: PASS.
+- Archive contains no `.git`, real WireGuard fixture, database, WAL, log, or
+  credential file: PASS.
