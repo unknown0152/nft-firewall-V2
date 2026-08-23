@@ -6,157 +6,133 @@
 | Git commit | `@GIT_COMMIT@` |
 | Git tag | `@GIT_TAG@` |
 | Build date | `@BUILD_DATE@` |
-| Product repository | `/root/nft-firewall-work/nft-firewall-v2` |
-| Host baseline | `/root/nft-firewall-work/HOST_BASELINE.md` |
+| Release source | `source/` inside the release bundle |
+| Detailed test record | `TEST_RESULTS.md` |
 
-The packaging process replaces the metadata tokens in this report inside the
-release tree. The tracked source keeps tokens because a Git commit cannot
+The packaging process replaces the metadata tokens in the copy placed in a
+release bundle. The tracked source retains tokens because a commit cannot
 contain its own final hash.
 
-## Environment
+## Acceptance status
 
-Baseline: Debian GNU/Linux 13.5, Linux 6.12.94 amd64, systemd 257.13,
-nftables 1.1.3, iproute2 6.15.0, WireGuard tools 1.0.20210914, native IPv4
-and IPv6, KVM guest. Docker was absent and Go was 1.24.4 at baseline.
+`2.0.1` is a security-hardening release candidate. Its complete unprivileged
+source gate passes: unit/package and full race tests, vet, formatting, module
+integrity, pinned analyzers, fuzzing, shell analysis, staged systemd-unit
+verification, and worktree/history secret scanning. Committed/tagged
+cross-architecture builds, package/archive inspection, extracted-archive
+secret scanning, and two-build reproducibility remain release gates until
+they are recorded against the exact final commit.
 
-Build/acceptance: Go 1.25.13, Docker 26.1.5 with firewall/routing/proxy
-ownership disabled, and 2 GiB temporary build swap. The host started and ended
-guarded firewall acceptance with no V2-owned host table active.
+Privileged/live acceptance has not been executed for `2.0.1`. This report does
+not assert that the firewall is installed, enabled, or validated on the
+current NUC/server. Installation and host/network mutation require a separate
+approved deployment plan and the documented safety controls.
 
-## Architecture acceptance
+## Architecture and hardening review
 
-PASS. V2 is an independent Go repository. Desired, observed, and effective
-state are separate. The compiler is deterministic and pure. `nftfwd` is the
-single mutation boundary over root-only control and read-only status Unix
-sockets. Owned operation is limited to `inet nftfw_filter`, `ip nftfw_nat`,
-and `ip6 nftfw_filter6`; no normal operation uses `flush ruleset`.
+The candidate remains an independent Go implementation with deterministic
+policy compilation, SQLite generations, bounded runtime state, and a single
+privileged nftables mutation boundary. Normal operation is limited to the
+owned `inet nftfw_filter`, `ip nftfw_nat`, and `ip6 nftfw_filter6` tables; the
+backend rejects global flushes and unsupported or foreign management commands.
 
-SQLite stores migrations, generations, pending/committed state, provenance
-claims, endpoint/integration state, reconciliation and audit. Safe apply uses
-a persistent deadline, daemon enforcement, independent systemd timer, and
-pre-network committed snapshot.
+The `2.0.1` remediation set adds or strengthens:
 
-## V1 parity and invariants
+- canonical interface-to-zone ownership;
+- bounded public-only threat feeds with cross-feed aggregate limits,
+  protected topology/WireGuard endpoints, rollback compensation, and safe
+  rule ordering for management recovery and VPN bootstrap;
+- first-use collision refusal for product-named nftables tables;
+- fail-closed peer credentials and independent status/control quotas;
+- bounded audit retention and recoverable rollback accounting;
+- cross-process claim publication serialization, compensating mutations, and
+  durable desired/applied revision health;
+- bounded lock and request waits with independently timed emergency deny;
+- the typed `nftfw.status.v1` health contract and fail-closed consumers;
+- explicit administrator opt-in for root-equivalent Docker socket access; and
+- deterministic manifests plus unsigned in-toto/SLSA provenance generation;
+  and
+- mutation-free source-install preflight against staged systemd executables.
 
-PASS. The frozen V1 checkout, full source manifest, test assertion index, and
-history inventory were reviewed. Every significant capability is classified
-in `V1_FEATURE_PARITY.md`; deliberate drops include technical/security
-rationale. Extracted guarantees are in `SECURITY_INVARIANTS.md`.
+See `SECURITY_AUDIT.md`, `SECURITY.md`, and `CHANGELOG.md` for the detailed
+findings, operating assumptions, and release delta.
 
 ## Gate summary
 
-| Gate | Result |
+| Gate | `2.0.1` result |
 | --- | --- |
-| Build, amd64 and arm64 | PASS |
-| Unit tests | PASS |
-| Race tests | PASS |
-| Vet/static analysis | PASS |
-| Vulnerability analysis | PASS, no reachable findings |
-| Fuzz/property tests | PASS |
-| Namespace firewall | PASS |
-| Simulated WireGuard kill switch | PASS |
-| Real provider WireGuard | PASS |
-| IPv4 leak capture | PASS, zero packets |
-| IPv6 leak capture | PASS, zero packets |
-| Active TCP/UDP connection failure | PASS |
-| Docker lifecycle and real container | PASS |
-| Provenance union/removal | PASS |
-| Safe apply, commit, crash, timeout rollback | PASS |
-| Drift and unrelated-table preservation | PASS |
-| Database migration/corruption/backup | PASS |
-| Service/API crash and abuse | PASS |
-| systemd verification/hardening | PASS |
-| Security audit | PASS, no unresolved high/critical |
-| Secret/history/archive scan | PASS, no leaks found |
-| Debian amd64/arm64 packages | PASS |
-| Archive integrity and reproducibility | PASS |
-| Full VPS reboot | NOT EXECUTED; see limitation below |
+| Unit/package tests | PASS |
+| Changed-path race tests | PASS |
+| Vet, formatting, module integrity | PASS |
+| Shell analysis | PASS |
+| systemd staged static verification | PASS; units not installed or started |
+| Full race suite | PASS |
+| Staticcheck, govulncheck, and gosec | PASS |
+| Fuzz/property suite | PASS; all eight targets, 10 seconds each |
+| Worktree and Git-history secret scans | PASS |
+| Final extracted-archive secret scan | PENDING FINAL BUILD |
+| amd64/arm64 static binaries | PENDING FINAL BUILD |
+| Debian amd64/arm64 packages | PENDING FINAL BUILD/INSPECTION |
+| Release manifests and provenance | PENDING FINAL BUILD/INSPECTION |
+| ZIP/tar integrity and reproducibility | PENDING TWO FINAL BUILDS |
+| Namespace firewall/WireGuard | NOT EXECUTED FOR `2.0.1` |
+| Real provider and Docker lifecycle | NOT EXECUTED FOR `2.0.1` |
+| Guarded host safe apply/rollback | NOT EXECUTED FOR `2.0.1` |
+| Actual NUC/server installation | NOT EXECUTED |
+| Full host reboot | NOT EXECUTED |
 
-Detailed non-secret evidence is in `TEST_RESULTS.md`. Raw sanitized logs remain
-under `/root/nft-firewall-work/test-results` and are not archived because they
-contain host/provider topology diagnostics.
+Passing privileged acceptance recorded for `v2.0.0` is historical evidence,
+not a substitute for rerunning changed `2.0.1` code. See `TEST_RESULTS.md` for
+the exact separation.
 
-## Network acceptance
+## Deployment prerequisites
 
-The namespace suite used actual nftables rules and an in-kernel WireGuard
-tunnel. Healthy host/container IPv4 and IPv6 passed. After tunnel removal,
-new and established TCP/UDP host/container traffic failed without appearing
-on the physical capture:
+Before any production installation, an operator must:
 
-```text
-LEAKED INTERNET PACKETS: 0
-LEAKED IPV6 INTERNET PACKETS: 0
-```
+1. review and validate the machine-specific configuration and paths;
+2. back up existing firewall, service, database, and network configuration;
+3. confirm the management recovery path and arm an independent rollback;
+4. decide whether access is LAN-only, VPN-only, or public with an approved
+   authentication/TLS design;
+5. verify WireGuard ownership, endpoint bootstrap, DNS, IPv4/IPv6 modes, and
+   any container topology; and
+6. explicitly approve the exact installation and any disruptive validation.
 
-The supplied real provider profile was root-owned mode `0600` and its key was
-never printed. It passed handshake, changed public IPv4, DNS, IPv6, namespace
-container, actual Docker container, endpoint refresh, daemon restart, loss,
-physical capture, WireGuard recovery, and Docker recovery:
+Docker integration is disabled by default. Enabling it requires both the safe
+Docker daemon settings documented in `docs/CONFIGURATION.md` and installation
+of the separate systemd socket-access drop-in, acknowledging that Docker
+socket access is effectively host-root trust.
 
-```text
-REAL LEAKED PHYSICAL PACKETS: 0
-REAL WIREGUARD ACCEPTANCE: PASS
-```
+## Limitations and residual risk
 
-Guarded host acceptance separately proved an independent transient rollback,
-retained the declared active SSH connection, captured direct IPv4/IPv6
-attempts with an absent test VPN, committed and explicitly rolled back, killed
-the test daemon, and observed independent timeout rollback. Both host capture
-counts were zero and an unrelated table survived.
+1. Checksums and generated provenance are not cryptographically signed. A
+   release operator must add a signature using an independently controlled
+   identity if authenticated distribution is required.
+2. No full-machine reboot has been run for this candidate.
+3. A privileged competing firewall manager can install higher-priority rules;
+   this product detects and repairs only its owned objects.
+4. WireGuard tunnel creation, private keys, policy routing, and provider
+   availability remain operator responsibilities.
+5. Docker integration, when explicitly enabled, expands the daemon trust
+   boundary to the root-equivalent Docker API.
+6. The loopback dashboard has no application login and must not be exposed
+   publicly without a separately approved authentication/TLS layer.
 
-## Systemd hardening
-
-`systemd-analyze verify` passed. Exposure scores on the acceptance host were
-2.8 for the web service and 3.9 for the privileged daemon, rollback, and early
-restore services. The daemon receives only `CAP_NET_ADMIN`; the dashboard has
-an empty capability set and status-only access. Exceptions are documented in
-`docs/ARCHITECTURE.md` and are required for netlink, local sockets, endpoint
-DNS, and the loopback HTTP listener.
-
-## Security audit
-
-The review covered command injection, argument injection, temp/path/symlink
-safety, socket authorization, capabilities, nft ownership, hidden allows,
-conntrack/IPv6/physical bypass, rollback races, parser/resource bounds,
-database injection/concurrency, HTTP XSS/CSRF/timeouts, and secret handling.
-All high findings discovered during implementation were repaired and
-regression tested. See `SECURITY_AUDIT.md`.
-
-Gitleaks scanned the complete V2 history, current tree, and extracted release
-with redaction enabled and found no leak. Independent filename/content checks
-also passed. The release builder produced byte-identical ZIP and tar.gz files
-on two builds from the same commit before the final tagged run.
-
-## Limitations
-
-1. No full VPS reboot was executed because this was the only live SSH
-   management host. Boot ordering and every early snapshot branch were tested
-   through the real systemd unit and namespace/state harness.
-2. The real provider test was isolated in namespaces; its tunnel did not
-   replace the VPS management namespace's default route. Host-level firewall
-   mutation was tested separately under two independent rollback mechanisms.
-3. DNS authoritative TTLs are not available through the current standard Go
-   resolver; endpoint refresh uses a documented 60-second cadence and bounded
-   age/history.
-4. IPv6 NAT, remote ChatOps, notifications, Prometheus export, report images,
-   and intrusion-event adapters are not implemented in v2.0.0.
-5. V2 observes and can update one WireGuard peer endpoint, but tunnel creation,
-   private keys, and policy routing remain operator responsibilities.
-
-No limitation is an unresolved high or critical finding. The reboot item is
-reported `NOT EXECUTED`, not PASS.
+No pending gate should be represented as PASS. A final release handoff should
+update this report and `TEST_RESULTS.md` with only evidence collected against
+the exact tagged commit.
 
 ## Release artifacts
 
-Expected enclosing paths:
+Expected artifact names in the enclosing release directory are:
 
 ```text
-/root/nft-firewall-work/releases/nft-firewall-v2-@RELEASE_VERSION@.zip
-/root/nft-firewall-work/releases/nft-firewall-v2-@RELEASE_VERSION@.tar.gz
-/root/nft-firewall-work/releases/SHA256SUMS
+nft-firewall-v2-@RELEASE_VERSION@.zip
+nft-firewall-v2-@RELEASE_VERSION@.tar.gz
+SHA256SUMS
 ```
 
-The release builder appends exact binary/package checksums to the embedded
-copy of this report before manifest generation. It appends the enclosing ZIP
-and tar checksum to the external copy after archive creation, because an
-archive cannot contain its own checksum.
+The release builder appends binary and package checksums to the embedded copy
+of this report before manifest generation. It appends the enclosing ZIP and
+tar checksum to the external copy after archive creation, because an archive
+cannot contain its own checksum.

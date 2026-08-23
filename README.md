@@ -10,6 +10,9 @@ V2 is an independent Go implementation. V1 was used only as a read-only
 behavioral and security reference. See `docs/V1_FEATURE_PARITY.md` and
 `docs/V1_SECURITY_INVARIANTS.md`.
 
+External dashboards must consume the fail-closed, versioned status contract
+documented in `docs/STATUS-API.md`.
+
 ## Implemented capabilities
 
 - Default-deny input and forwarding, plus strict VPN-pinned output.
@@ -32,7 +35,12 @@ behavioral and security reference. See `docs/V1_FEATURE_PARITY.md` and
 
 ## First workflow
 
+When using the source installer from an extracted release bundle, enter its
+`source/` directory first. A Git checkout already starts at that source root.
+
 ```bash
+cd source # release bundle only
+GOTOOLCHAIN=go1.25.13 make release VERSION=2.0.1
 sudo ./scripts/install.sh
 sudoedit /etc/nftfw/nftfw.toml
 sudo nftfw config validate
@@ -43,9 +51,10 @@ sudo nftfw status
 sudo nftfw commit <generation>
 ```
 
-The installer validates prerequisites, files, units, and checksums but never
-applies a candidate firewall. Safe apply is the default. Disabling rollback
-requires the explicit `--unsafe` flag.
+The installer validates prerequisites, files, checksums, and staged systemd
+units before changing host paths or services, and it never applies a candidate
+firewall. Safe apply is the default. Disabling rollback requires the explicit
+`--unsafe` flag.
 
 ## Security boundaries
 
@@ -61,12 +70,13 @@ tunnel.
 
 ## Build and test
 
-Go 1.25.13 or newer in the Go 1.25 line is required for the audited release.
+The audited release is built and tested with exactly Go 1.25.13, as pinned by
+`go.mod`.
 
 ```bash
 make check
 make static vuln security
-make release VERSION=2.0.0
+make release VERSION=2.0.1
 sudo ./tests/namespaces/run.sh
 ```
 

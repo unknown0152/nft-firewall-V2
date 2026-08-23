@@ -7,7 +7,7 @@ import (
 )
 
 func TestLoadCIDRsCanonicalizesAndRejectsWritableInput(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "geo.txt")
+	path := filepath.Join(secureTestDir(t), "geo.txt")
 	if err := os.WriteFile(path, []byte("203.0.113.4/24\n203.0.113.9/24\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

@@ -64,14 +64,29 @@ func (w *boundedStringWriter) Write(p []byte) (int, error) {
 }
 
 type Backend struct {
-	Runner  Runner
-	TempDir string
-	Timeout time.Duration
-	Owned   []Table
-	mu      sync.Mutex
+	Runner          Runner
+	TempDir         string
+	Timeout         time.Duration
+	Owned           []Table
+	mu              sync.Mutex
+	protectFirstUse bool
 }
 
 type Table struct{ Family, Name string }
+
+// ApplyExecutionError means nft --file was invoked and returned an error. The
+// atomic batch may have reached the kernel before userspace observed a
+// timeout, cancellation, or output-limit failure, so callers must treat the
+// resulting live state as ambiguous until restoration is confirmed.
+type ApplyExecutionError struct{ Err error }
+
+func (e *ApplyExecutionError) Error() string { return e.Err.Error() }
+func (e *ApplyExecutionError) Unwrap() error { return e.Err }
+
+func MutationAttempted(err error) bool {
+	var executionErr *ApplyExecutionError
+	return errors.As(err, &executionErr)
+}
 
 const (
 	FilterTable = "nftfw_filter"
@@ -86,6 +101,55 @@ func New(r Runner) *Backend {
 		r = OSRunner{}
 	}
 	return &Backend{Runner: r, Timeout: 15 * time.Second, Owned: append([]Table(nil), OwnedTables...)}
+}
+
+func (b *Backend) commandContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	timeout := b.Timeout
+	if timeout <= 0 {
+		timeout = 15 * time.Second
+	}
+	return context.WithTimeout(ctx, timeout)
+}
+
+func (b *Backend) acquireMutationLock(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("wait for nft mutation lock: %w", err)
+	}
+	retry := time.NewTicker(10 * time.Millisecond)
+	defer retry.Stop()
+	for !b.mu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("wait for nft mutation lock: %w", ctx.Err())
+		case <-retry.C:
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		b.mu.Unlock()
+		return nil, fmt.Errorf("wait for nft mutation lock: %w", err)
+	}
+	return b.mu.Unlock, nil
+}
+
+// ProtectFirstUse arms a one-shot collision guard for a fresh installation.
+// It refuses to adopt or remove any pre-existing table with a product-owned
+// name, both now and when the first Apply is executed. The guard remains armed
+// until an apply succeeds, so a failed or raced first attempt stays protected.
+func (b *Backend) ProtectFirstUse(ctx context.Context) error {
+	release, err := b.acquireMutationLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	existing, err := b.ExistingOwned(ctx)
+	if err != nil {
+		return fmt.Errorf("inspect first-use nft table collisions: %w", err)
+	}
+	if err := firstUseCollision(existing, b.Owned); err != nil {
+		return err
+	}
+	b.protectFirstUse = true
+	return nil
 }
 
 func (b *Backend) Check(ctx context.Context, script string) error {
@@ -107,14 +171,22 @@ func (b *Backend) Check(ctx context.Context, script string) error {
 }
 
 func (b *Backend) Apply(ctx context.Context, script string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	release, err := b.acquireMutationLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := validateScript(script); err != nil {
 		return err
 	}
 	owned, err := b.ExistingOwned(ctx)
 	if err != nil {
 		return fmt.Errorf("inspect owned nft tables: %w", err)
+	}
+	if b.protectFirstUse {
+		if err := firstUseCollision(owned, b.Owned); err != nil {
+			return err
+		}
 	}
 	transaction := prependDestroy(script, owned, b.Owned)
 	if err := validateScript(transaction); err != nil {
@@ -132,20 +204,31 @@ func (b *Backend) Apply(ctx context.Context, script string) error {
 	defer cancel()
 	_, stderr, runErr := b.Runner.Run(ctx, "--file", path)
 	if runErr != nil {
-		return fmt.Errorf("nft apply failed: %s: %w", strings.TrimSpace(stderr), runErr)
+		return &ApplyExecutionError{Err: fmt.Errorf("nft apply failed: %s: %w", strings.TrimSpace(stderr), runErr)}
 	}
+	b.protectFirstUse = false
 	return nil
 }
 
 // CheckCandidate validates the exact destroy-owned/create transaction Apply
 // would execute, but does not mutate nftables.
 func (b *Backend) CheckCandidate(ctx context.Context, script string) error {
+	release, err := b.acquireMutationLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	if err := validateScript(script); err != nil {
 		return err
 	}
 	owned, err := b.ExistingOwned(ctx)
 	if err != nil {
 		return fmt.Errorf("inspect owned nft tables: %w", err)
+	}
+	if b.protectFirstUse {
+		if err := firstUseCollision(owned, b.Owned); err != nil {
+			return err
+		}
 	}
 	transaction := prependDestroy(script, owned, b.Owned)
 	if err := validateScript(transaction); err != nil {
@@ -157,8 +240,11 @@ func (b *Backend) CheckCandidate(ctx context.Context, script string) error {
 // DestroyOwned removes only tables belonging to this product. It is used when
 // rolling back the first generation or uninstalling with explicit intent.
 func (b *Backend) DestroyOwned(ctx context.Context) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	release, err := b.acquireMutationLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	existing, err := b.ExistingOwned(ctx)
 	if err != nil {
 		return err
@@ -187,8 +273,11 @@ func (b *Backend) DestroyOwned(ctx context.Context) error {
 }
 
 func (b *Backend) UpdateSet(ctx context.Context, name string, add bool, elements []string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	release, err := b.acquireMutationLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	allowed := map[string]string{"blocked_v4": "ipv4", "blocked_v6": "ipv6", "trusted_v4": "ipv4", "trusted_v6": "ipv6", "wg_bootstrap_v4": "ipv4", "wg_bootstrap_v6": "ipv6", "docker_nets": "ipv4", "docker_nets6": "ipv6"}
 	family, ok := allowed[name]
 	if !ok {
@@ -239,8 +328,11 @@ func (b *Backend) UpdateSet(ctx context.Context, name string, add bool, elements
 // ReplaceSets atomically replaces bounded runtime-set contents without
 // recompiling chains. Only compiler-owned inet sets are accepted.
 func (b *Backend) ReplaceSets(ctx context.Context, sets map[string][]string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	release, err := b.acquireMutationLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	allowed := map[string]string{
 		"blocked_v4": "ipv4", "blocked_v6": "ipv6", "trusted_v4": "ipv4", "trusted_v6": "ipv6",
 		"wg_bootstrap_v4": "ipv4", "wg_bootstrap_v6": "ipv6", "docker_nets": "ipv4", "docker_nets6": "ipv6",
@@ -297,8 +389,11 @@ func (b *Backend) ReplaceSets(ctx context.Context, sets map[string][]string) err
 // ReplaceContainerNetworks updates filter and NAT membership in one atomic
 // transaction so a recreated bridge never has split enforcement state.
 func (b *Backend) ReplaceContainerNetworks(ctx context.Context, v4, v6 []string) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	release, err := b.acquireMutationLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
 	sets := []struct {
 		family string
 		table  string
@@ -343,6 +438,8 @@ func (b *Backend) ReplaceContainerNetworks(ctx context.Context, v4, v6 []string)
 }
 
 func (b *Backend) ListOwned(ctx context.Context) ([]Table, error) {
+	ctx, cancel := b.commandContext(ctx)
+	defer cancel()
 	out, stderr, err := b.Runner.Run(ctx, "-j", "list", "tables")
 	if err != nil {
 		return nil, fmt.Errorf("nft list tables: %s: %w", strings.TrimSpace(stderr), err)
@@ -399,7 +496,9 @@ func (b *Backend) Integrity(ctx context.Context) (bool, string, error) {
 		}
 	}
 	for _, table := range b.Owned {
-		out, stderr, runErr := b.Runner.Run(ctx, "-j", "list", "table", table.Family, table.Name)
+		commandCtx, cancel := b.commandContext(ctx)
+		out, stderr, runErr := b.Runner.Run(commandCtx, "-j", "list", "table", table.Family, table.Name)
+		cancel()
 		if runErr != nil {
 			return false, fmt.Sprintf("cannot inspect %s/%s: %s", table.Family, table.Name, strings.TrimSpace(stderr)), runErr
 		}
@@ -549,30 +648,53 @@ func validateScript(script string) error {
 	if strings.TrimSpace(script) == "" {
 		return errors.New("empty nft script")
 	}
-	clean := stripNftComments(script)
-	lower := strings.ToLower(clean)
-	if strings.Contains(lower, "flush ruleset") {
-		return errors.New("flush ruleset is forbidden")
+	clean, err := stripNftComments(script)
+	if err != nil {
+		return err
 	}
-	for _, line := range strings.Split(clean, "\n") {
-		trim := strings.TrimSpace(line)
+	allFields := strings.Fields(strings.ReplaceAll(clean, ";", " "))
+	for i := 0; i+1 < len(allFields); i++ {
+		if nftKeyword(allFields[i]) == "flush" && nftKeyword(allFields[i+1]) == "ruleset" {
+			return errors.New("flush ruleset is forbidden")
+		}
+	}
+	for _, statement := range strings.FieldsFunc(clean, func(r rune) bool { return r == '\n' || r == ';' }) {
+		trim := strings.TrimSpace(statement)
 		if trim == "" {
 			continue
 		}
 		parts := strings.Fields(trim)
-		if parts[0] == "include" || parts[0] == "define" || parts[0] == "redefine" {
-			return fmt.Errorf("nft directive %q is forbidden", parts[0])
+		command := nftKeyword(parts[0])
+		object := ""
+		if len(parts) > 1 {
+			object = nftObject(parts[1])
+		}
+		if nftManagementCommands[command] {
+			if !nftMutationCommands[command] {
+				return fmt.Errorf("nft management command %q is forbidden", command)
+			}
+			if len(parts) < 4 || !nftManagedObjects[object] {
+				return fmt.Errorf("nft mutation command %q has an unsupported or malformed object", command)
+			}
 		}
 		for i, token := range parts {
-			if token == "table" {
-				if i+2 >= len(parts) || !isOwnedFamilyName(parts[i+1], strings.TrimSuffix(parts[i+2], ";")) {
+			keyword := nftKeyword(token)
+			if nftDirectives[keyword] {
+				return fmt.Errorf("nft directive %q is forbidden", keyword)
+			}
+			if keyword == "table" {
+				if i+2 >= len(parts) || !isOwnedFamilyName(nftKeyword(parts[i+1]), nftIdentifier(parts[i+2])) {
 					return fmt.Errorf("script addresses malformed or unowned table")
 				}
 			}
 		}
-		if len(parts) >= 4 && isObjectCommand(parts[0], parts[1]) {
-			if !isOwnedFamilyName(parts[2], strings.TrimSuffix(parts[3], ";")) {
-				return fmt.Errorf("script command addresses unowned table %s/%s", parts[2], parts[3])
+		if len(parts) >= 4 && isObjectCommand(command, object) {
+			family, table := nftKeyword(parts[2]), nftIdentifier(parts[3])
+			if !isOwnedFamilyName(family, table) {
+				return fmt.Errorf("script command addresses unowned table %s/%s", family, table)
+			}
+			if command == "rename" && object == "table" {
+				return errors.New("renaming an owned table is forbidden")
 			}
 		}
 	}
@@ -580,21 +702,93 @@ func validateScript(script string) error {
 }
 
 func isObjectCommand(command, object string) bool {
-	commands := map[string]bool{"add": true, "delete": true, "destroy": true, "flush": true, "insert": true, "replace": true, "reset": true}
-	objects := map[string]bool{"chain": true, "rule": true, "set": true, "map": true, "element": true, "counter": true, "quota": true, "flowtable": true}
-	return commands[command] && objects[object]
+	return nftMutationCommands[command] && nftManagedObjects[object]
 }
 
-func stripNftComments(script string) string {
-	var b strings.Builder
-	for _, line := range strings.Split(script, "\n") {
-		if i := strings.IndexByte(line, '#'); i >= 0 {
-			line = line[:i]
-		}
-		b.WriteString(line)
-		b.WriteByte('\n')
+var nftManagementCommands = map[string]bool{
+	"add": true, "create": true, "delete": true, "destroy": true,
+	"flush": true, "get": true, "insert": true, "list": true,
+	"rename": true, "replace": true, "reset": true,
+	"import": true, "export": true, "monitor": true, "describe": true,
+}
+
+var nftDirectives = map[string]bool{"include": true, "define": true, "redefine": true}
+
+var nftMutationCommands = map[string]bool{
+	"add": true, "create": true, "delete": true, "destroy": true,
+	"flush": true, "insert": true, "rename": true, "replace": true,
+	"reset": true,
+}
+
+var nftManagedObjects = map[string]bool{
+	"table": true, "chain": true, "rule": true, "set": true,
+	"map": true, "element": true, "counter": true, "quota": true,
+	"limit": true, "flowtable": true, "synproxy": true,
+}
+
+var nftPluralObjects = map[string]string{
+	"tables": "table", "chains": "chain", "rules": "rule",
+	"sets": "set", "maps": "map", "elements": "element",
+	"counters": "counter", "quotas": "quota", "limits": "limit",
+	"flowtables": "flowtable", "synproxies": "synproxy",
+}
+
+func nftObject(token string) string {
+	object := nftKeyword(token)
+	if singular, ok := nftPluralObjects[object]; ok {
+		return singular
 	}
-	return b.String()
+	return object
+}
+
+func nftKeyword(token string) string {
+	return strings.ToLower(strings.Trim(token, "{};,"))
+}
+
+func nftIdentifier(token string) string {
+	return strings.Trim(token, "{};,")
+}
+
+func stripNftComments(script string) (string, error) {
+	var b strings.Builder
+	inDoubleQuote := false
+	for i := 0; i < len(script); i++ {
+		character := script[i]
+		if inDoubleQuote {
+			if character == '\n' {
+				return "", errors.New("newline in quoted nft string is forbidden")
+			}
+			// nft's file lexer does not give backslash shell-style quote
+			// escaping semantics. Every double quote terminates the string, even
+			// when immediately preceded by a backslash. Matching that behavior is
+			// security critical: otherwise a following command could be hidden
+			// from ownership validation but executed by nft.
+			if character == '"' {
+				b.WriteByte(character)
+				inDoubleQuote = false
+			}
+			continue
+		}
+		if character == '\\' && i+1 < len(script) && (script[i+1] == '\n' || script[i+1] == '\r' && i+2 < len(script) && script[i+2] == '\n') {
+			return "", errors.New("nft line continuations are forbidden")
+		}
+		switch character {
+		case '"':
+			inDoubleQuote = true
+			b.WriteByte(character)
+			b.WriteByte('_')
+		case '#':
+			for i+1 < len(script) && script[i+1] != '\n' {
+				i++
+			}
+		default:
+			b.WriteByte(character)
+		}
+	}
+	if inDoubleQuote {
+		return "", errors.New("unterminated quoted nft string")
+	}
+	return b.String(), nil
 }
 
 func isOwnedFamilyName(family, name string) bool {
@@ -615,6 +809,21 @@ func prependDestroy(script string, existing map[string]bool, owned []Table) stri
 	}
 	b.WriteString(script)
 	return b.String()
+}
+
+func firstUseCollision(existing map[string]bool, owned []Table) error {
+	var collisions []string
+	for _, table := range owned {
+		name := table.Family + "/" + table.Name
+		if existing[name] {
+			collisions = append(collisions, name)
+		}
+	}
+	if len(collisions) == 0 {
+		return nil
+	}
+	sort.Strings(collisions)
+	return fmt.Errorf("first-use nft table collision: refusing to adopt or destroy %s", strings.Join(collisions, ", "))
 }
 
 func (b *Backend) tempScript(script, prefix string) (string, func(), error) {

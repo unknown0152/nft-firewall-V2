@@ -1,0 +1,5 @@
+# Installing this file as
+# /etc/systemd/system/nftfwd.service.d/docker-access.conf grants nftfwd access
+# to the root-equivalent Docker API. Read docs/CONFIGURATION.md first.
+[Service]
+InaccessiblePaths=

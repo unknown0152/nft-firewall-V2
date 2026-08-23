@@ -304,8 +304,8 @@ func Validate(c Config) error {
 		}
 		feedNames[feed.Name] = true
 		u, err := url.Parse(feed.URL)
-		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
-			return fmt.Errorf("threat feed %s must use a credential-free HTTPS URL", feed.Name)
+		if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil || u.RawQuery != "" || u.ForceQuery || strings.Contains(feed.URL, "#") {
+			return fmt.Errorf("threat feed %s must use an HTTPS URL without userinfo, query, or fragment", feed.Name)
 		}
 		if feed.MaxEntries < 0 || feed.MaxEntries > c.Runtime.MaxBlockClaims || feed.MinEntries < 0 || (feed.MaxEntries > 0 && feed.MinEntries > feed.MaxEntries) {
 			return fmt.Errorf("threat feed %s has invalid entry bounds", feed.Name)
@@ -364,6 +364,14 @@ func Validate(c Config) error {
 		return fmt.Errorf("exactly one uplink interface is required, got %d", uplinks)
 	}
 	zones := map[string]Zone{}
+	interfaceZones := map[string]string{}
+	assignInterfaceZone := func(interfaceName, zoneName string) error {
+		if existing, ok := interfaceZones[interfaceName]; ok && existing != zoneName {
+			return fmt.Errorf("interface %q is assigned to multiple zones %q and %q", interfaceName, existing, zoneName)
+		}
+		interfaceZones[interfaceName] = zoneName
+		return nil
+	}
 	type zonePrefix struct {
 		zone   string
 		prefix netip.Prefix
@@ -394,12 +402,18 @@ func Validate(c Config) error {
 			if _, ok := interfaces[name]; !ok {
 				return fmt.Errorf("zone %s references unknown interface %q", z.Name, name)
 			}
+			if err := assignInterfaceZone(name, z.Name); err != nil {
+				return err
+			}
 		}
 	}
 	for _, in := range c.Interfaces {
 		if in.Zone != "" {
 			if _, ok := zones[in.Zone]; !ok {
 				return fmt.Errorf("interface %s references unknown zone %q", in.Name, in.Zone)
+			}
+			if err := assignInterfaceZone(in.Name, in.Zone); err != nil {
+				return err
 			}
 		}
 	}

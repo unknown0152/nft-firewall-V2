@@ -5,6 +5,8 @@ import (
 	"crypto/sha256"
 	"database/sql"
 	"encoding/hex"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -20,7 +22,7 @@ func testChecksum(text string) string {
 
 func TestClaimProvenanceUnion(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	s, err := Open(ctx, filepath.Join(secureTestDir(t), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -62,7 +64,7 @@ func TestClaimProvenanceUnion(t *testing.T) {
 
 func TestClaimPaginationAndInvalidRecordHandling(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	s, err := Open(ctx, filepath.Join(secureTestDir(t), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -97,7 +99,7 @@ func FuzzValidateClaim(f *testing.F) {
 
 func TestReplaceSourceClaimsIsAtomicAndPreservesOtherSources(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	s, err := Open(ctx, filepath.Join(secureTestDir(t), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -122,7 +124,7 @@ func TestReplaceSourceClaimsIsAtomicAndPreservesOtherSources(t *testing.T) {
 
 func TestBoundedSourceReplacementRollsBackOnTotalLimit(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	s, err := Open(ctx, filepath.Join(secureTestDir(t), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -145,7 +147,7 @@ func TestBoundedSourceReplacementRollsBackOnTotalLimit(t *testing.T) {
 	}
 }
 func TestMigrationAndCorruptDatabase(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "state.db")
+	path := filepath.Join(secureTestDir(t), "state.db")
 	s, err := Open(context.Background(), path)
 	if err != nil {
 		t.Fatal(err)
@@ -162,10 +164,10 @@ func TestMigrationAndCorruptDatabase(t *testing.T) {
 	}(); err != nil {
 		t.Fatal(err)
 	}
-	if version != 3 {
+	if version != currentSchemaVersion {
 		t.Fatalf("migration version %d", version)
 	}
-	bad := filepath.Join(t.TempDir(), "bad.db")
+	bad := filepath.Join(secureTestDir(t), "bad.db")
 	if err := os.WriteFile(bad, []byte("not sqlite"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -177,9 +179,196 @@ func TestMigrationAndCorruptDatabase(t *testing.T) {
 	}
 }
 
+func TestAuditRowsArePrunedDuringMigrationAndOnInsert(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(secureTestDir(t), "state.db")
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Model a v3 database whose audit table grew before the bound existed.
+	if _, err := store.DB.ExecContext(ctx, `DROP TRIGGER audit_prune_after_insert; DROP TABLE runtime_claim_publication; DELETE FROM integration_state WHERE name='runtime/claims'; DELETE FROM schema_migrations WHERE version>=4`); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	insertAuditRows := func(count int) {
+		t.Helper()
+		tx, beginErr := store.DB.BeginTx(ctx, nil)
+		if beginErr != nil {
+			t.Fatal(beginErr)
+		}
+		stmt, prepareErr := tx.PrepareContext(ctx, `INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)`)
+		if prepareErr != nil {
+			tx.Rollback()
+			t.Fatal(prepareErr)
+		}
+		defer stmt.Close()
+		for i := range count {
+			if _, execErr := stmt.ExecContext(ctx, time.Now().UTC().Format(time.RFC3339Nano), "test", "bounded", fmt.Sprintf("row=%d", i)); execErr != nil {
+				tx.Rollback()
+				t.Fatal(execErr)
+			}
+		}
+		if commitErr := tx.Commit(); commitErr != nil {
+			t.Fatal(commitErr)
+		}
+	}
+	insertAuditRows(MaxAuditRows + 7)
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+
+	store, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	assertAuditBound := func() {
+		t.Helper()
+		var count int
+		if queryErr := store.DB.QueryRowContext(ctx, `SELECT COUNT(*) FROM audit`).Scan(&count); queryErr != nil {
+			t.Fatal(queryErr)
+		}
+		if count != MaxAuditRows {
+			t.Fatalf("audit bound mismatch: got=%d want=%d", count, MaxAuditRows)
+		}
+	}
+	assertAuditBound()
+	insertAuditRows(25)
+	assertAuditBound()
+	var firstID, lastID int64
+	if err := store.DB.QueryRowContext(ctx, `SELECT MIN(id),MAX(id) FROM audit`).Scan(&firstID, &lastID); err != nil {
+		t.Fatal(err)
+	}
+	if lastID-firstID+1 != MaxAuditRows {
+		t.Fatalf("audit pruning retained the wrong ID window: first=%d last=%d", firstID, lastID)
+	}
+}
+
+func TestClaimPublicationRevisionTracksEveryDurableMutation(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(secureTestDir(t), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	publication, err := store.ClaimPublicationState(ctx)
+	if err != nil || publication.DesiredRevision != 1 || publication.AppliedRevision != 0 {
+		t.Fatalf("fresh migration was not conservatively dirty: %#v err=%v", publication, err)
+	}
+	if err := store.MarkClaimsPublished(ctx, publication.DesiredRevision, 0); err != nil {
+		t.Fatal(err)
+	}
+	id, err := store.AddClaim(ctx, Claim{Address: "203.0.113.8/32", Family: "ipv4", Source: "manual", Actor: "test"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	afterAdd, err := store.ClaimPublicationState(ctx)
+	if err != nil || afterAdd.DesiredRevision != 2 || afterAdd.AppliedRevision != 1 {
+		t.Fatalf("add did not dirty the next revision: %#v err=%v", afterAdd, err)
+	}
+	if err := store.MarkClaimsPublished(ctx, 1, 1); err == nil {
+		t.Fatal("stale publication revision was accepted")
+	}
+	if err := store.MarkClaimsPublished(ctx, afterAdd.DesiredRevision, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.RemoveClaim(ctx, id, "test"); err != nil {
+		t.Fatal(err)
+	}
+	afterRemove, err := store.ClaimPublicationState(ctx)
+	if err != nil || afterRemove.DesiredRevision != 3 || afterRemove.AppliedRevision != 2 {
+		t.Fatalf("remove did not dirty the next revision: %#v err=%v", afterRemove, err)
+	}
+	if _, err := store.ReplaceSourceClaims(ctx, "threatfeed/test", "feed", "test", []string{"8.8.8.8/32"}); err != nil {
+		t.Fatal(err)
+	}
+	afterReplace, err := store.ClaimPublicationState(ctx)
+	if err != nil || afterReplace.DesiredRevision != 4 || afterReplace.AppliedRevision != 2 {
+		t.Fatalf("source replacement did not dirty the next revision: %#v err=%v", afterReplace, err)
+	}
+	expires := time.Now().UTC().Add(-time.Minute)
+	if _, err := store.AddClaim(ctx, Claim{Address: "203.0.113.9/32", Family: "ipv4", Source: "manual", Actor: "test", ExpiresAt: &expires}); err != nil {
+		t.Fatal(err)
+	}
+	beforePurge, err := store.ClaimPublicationState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if count, err := store.PurgeExpiredClaims(ctx, time.Now().UTC()); err != nil || count != 1 {
+		t.Fatalf("expired claim purge failed: count=%d err=%v", count, err)
+	}
+	afterPurge, err := store.ClaimPublicationState(ctx)
+	if err != nil || afterPurge.DesiredRevision != beforePurge.DesiredRevision+1 {
+		t.Fatalf("purge did not dirty the next revision: before=%#v after=%#v err=%v", beforePurge, afterPurge, err)
+	}
+	state, err := store.IntegrationState(ctx, "runtime/claims")
+	if err != nil || state.Status != "degraded" {
+		t.Fatalf("dirty claim revision was not exposed as degraded: %#v err=%v", state, err)
+	}
+}
+
+func TestMigrationFiveInitializesExistingClaimsAsUnpublished(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(secureTestDir(t), "state.db")
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddClaim(ctx, Claim{Address: "203.0.113.10/32", Family: "ipv4", Source: "manual", Actor: "test"}); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if _, err := store.DB.ExecContext(ctx, `DROP TABLE runtime_claim_publication; DELETE FROM integration_state WHERE name='runtime/claims'; DELETE FROM schema_migrations WHERE version=5`); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	store, err = Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	publication, err := store.ClaimPublicationState(ctx)
+	if err != nil || publication.DesiredRevision != 1 || publication.AppliedRevision != 0 {
+		t.Fatalf("v4 migration trusted unknown live runtime state: %#v err=%v", publication, err)
+	}
+	integration, err := store.IntegrationState(ctx, "runtime/claims")
+	if err != nil || integration.Status != "degraded" || integration.EntryCount != 1 {
+		t.Fatalf("v4 migration did not expose existing claims as degraded: %#v err=%v", integration, err)
+	}
+}
+
+func TestRetireInactiveIntegrationsRemovesClaimsAndStaleHealthRows(t *testing.T) {
+	ctx := context.Background()
+	store, err := Open(ctx, filepath.Join(secureTestDir(t), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	if _, err := store.ReplaceSourceClaims(ctx, "threatfeed/old", "feed", "test", []string{"8.8.8.8/32"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetIntegrationState(ctx, "threatfeed/old", "degraded", 1, false); err != nil {
+		t.Fatal(err)
+	}
+	removed, err := store.RetireInactiveIntegrations(ctx, map[string]bool{"runtime/claims": true})
+	if err != nil || removed != 1 {
+		t.Fatalf("inactive source retirement failed: removed=%d err=%v", removed, err)
+	}
+	if count, err := store.SourceClaimCount(ctx, "threatfeed/old"); err != nil || count != 0 {
+		t.Fatalf("inactive integration claims remain: count=%d err=%v", count, err)
+	}
+	if _, err := store.IntegrationState(ctx, "threatfeed/old"); !errors.Is(err, sql.ErrNoRows) {
+		t.Fatalf("inactive degraded state remains: %v", err)
+	}
+}
+
 func TestPermanentAllowAndReservedIntegrationSourceFailClosed(t *testing.T) {
 	ctx := context.Background()
-	s, err := Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	s, err := Open(ctx, filepath.Join(secureTestDir(t), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +389,7 @@ func TestPermanentAllowAndReservedIntegrationSourceFailClosed(t *testing.T) {
 }
 
 func TestOpenRejectsNewerSchemaAndDSNFilename(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureTestDir(t)
 	if store, err := Open(context.Background(), filepath.Join(dir, "state.db?mode=memory")); err == nil {
 		store.Close()
 		t.Fatal("SQLite DSN characters in state filename accepted")
@@ -225,7 +414,7 @@ func TestOpenRejectsNewerSchemaAndDSNFilename(t *testing.T) {
 
 func TestNegativeGenerationReferenceFailsClosed(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "state.db")
+	path := filepath.Join(secureTestDir(t), "state.db")
 	s, err := Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)
@@ -260,7 +449,7 @@ func TestNegativeGenerationReferenceFailsClosed(t *testing.T) {
 
 func TestGenerationIntegrityAndSQLiteBackup(t *testing.T) {
 	ctx := context.Background()
-	dir := t.TempDir()
+	dir := secureTestDir(t)
 	path := filepath.Join(dir, "state.db")
 	s, err := Open(ctx, path)
 	if err != nil {
@@ -321,7 +510,7 @@ func TestGenerationIntegrityAndSQLiteBackup(t *testing.T) {
 }
 
 func TestOpenRejectsSymlinkedStatePaths(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureTestDir(t)
 	realDir := filepath.Join(dir, "real")
 	if err := os.Mkdir(realDir, 0o700); err != nil {
 		t.Fatal(err)
@@ -350,7 +539,7 @@ func TestOpenRejectsSymlinkedStatePaths(t *testing.T) {
 
 func TestConcurrentDatabaseOpenWaitsForWALLock(t *testing.T) {
 	ctx := context.Background()
-	path := filepath.Join(t.TempDir(), "state.db")
+	path := filepath.Join(secureTestDir(t), "state.db")
 	initial, err := Open(ctx, path)
 	if err != nil {
 		t.Fatal(err)

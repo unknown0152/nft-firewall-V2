@@ -112,9 +112,13 @@ root-equivalent and must not reach the dashboard.
 Decision: only the privileged daemon may run the Docker CLI, explicitly pinned
 to `unix:///var/run/docker.sock`, and only when Docker's own iptables,
 ip6tables, forwarding, masquerade, and userland proxy mutation are disabled.
+The packaged service hides the socket by default; enabling observation also
+requires an explicit administrator-installed systemd drop-in.
 
-Security implications: Docker observation remains privileged but separated
-from HTTP. The firewall core receives only validated network prefixes.
+Security implications: Docker observation remains privileged and
+root-equivalent when explicitly granted, but is separated from HTTP and
+cannot be enabled through TOML alone. The firewall core receives only
+validated network prefixes.
 
 ## Static web dashboard
 

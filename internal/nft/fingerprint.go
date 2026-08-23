@@ -13,7 +13,9 @@ import (
 func (b *Backend) Fingerprint(ctx context.Context) (string, error) {
 	hash := sha256.New()
 	for _, table := range b.Owned {
-		out, stderr, err := b.Runner.Run(ctx, "-j", "list", "table", table.Family, table.Name)
+		commandCtx, cancel := b.commandContext(ctx)
+		out, stderr, err := b.Runner.Run(commandCtx, "-j", "list", "table", table.Family, table.Name)
+		cancel()
 		if err != nil {
 			return "", fmt.Errorf("fingerprint %s/%s: %s: %w", table.Family, table.Name, stderr, err)
 		}

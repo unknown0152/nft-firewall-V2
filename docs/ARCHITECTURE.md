@@ -77,9 +77,12 @@ Pending metadata survives process death. A root-owned active snapshot and
 checksum allow `nftfw-early.service` to reconstruct committed enforcement
 before normal networking, even before SQLite opens.
 
-If the database is corrupt during an expired rollback, the independent path
-restores the committed snapshot. If persistent enforcement is marked but the
-snapshot is corrupt, a minimal default-deny owned policy is installed.
+If the database cannot be opened, the independent path cannot authenticate its
+deadline metadata and conservatively restores the committed snapshot
+immediately. A healthy database still requires an expired pending generation,
+so an unrelated configuration error cannot repeatedly clobber runtime sets. If
+persistent enforcement is marked but the snapshot is corrupt, a minimal
+default-deny owned policy is installed.
 
 ## WireGuard
 

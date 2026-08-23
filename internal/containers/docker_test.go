@@ -9,7 +9,7 @@ import (
 
 func writeDockerFixture(t *testing.T, name string) string {
 	t.Helper()
-	path := filepath.Join(t.TempDir(), "docker")
+	path := filepath.Join(secureTestDir(t), "docker")
 	script := `#!/bin/sh
 if [ "$1" != --host ] || [ "$2" != unix:///var/run/docker.sock ]; then
   exit 99
@@ -28,7 +28,7 @@ printf '%s\n' '[{"IPAM":{"Config":[{"Subnet":"172.19.0.0/16"},{"Subnet":"fd00:19
 }
 
 func TestObserverRequiresDockerFirewallOwnershipDisabled(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureTestDir(t)
 	path := filepath.Join(dir, "daemon.json")
 	safe := `{"iptables":false,"ip6tables":false,"ip-forward":false,"ip-masq":false,"userland-proxy":false}`
 	if err := os.WriteFile(path, []byte(safe), 0o600); err != nil {

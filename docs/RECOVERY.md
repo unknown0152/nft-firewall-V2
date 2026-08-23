@@ -5,8 +5,8 @@
 Pending safe applies are checked every five seconds by `nftfwd` and every 15
 seconds by `nftfw-rollback.timer`. The configured deadline is 30 through 600
 seconds. On expiry, the previous committed generation and its runtime sets are
-restored atomically. A first-generation rollback removes only V2-owned tables
-and clears boot enforcement.
+restored atomically. A confirmed applied first-generation rollback removes
+only V2-owned tables and clears boot enforcement.
 
 ```bash
 sudo nftfw status
@@ -17,6 +17,21 @@ sudo journalctl -u nftfw-rollback.service -u nftfwd
 
 Rollback is idempotent. Commit and rollback reject expired, tampered,
 historical, or inapplicable generation identifiers.
+
+### Ambiguous first apply
+
+If `nft --file` reports an error, the kernel transaction may still have
+completed before userspace observed a timeout, cancellation, or output-limit
+failure. With no earlier committed generation, product-named tables in that
+state are not enough to prove ownership. V2 therefore retains the pending
+record and refuses automatic deletion. The corrupt-database fallback also
+refuses to mutate product-named tables when no verified enforcement marker
+exists.
+
+Preserve the state database and journal, inspect the live rules from a trusted
+console, and establish ownership before any manual removal. Do not use `nft
+flush ruleset`. When no product-named table exists, the pending failure can be
+finalized without a kernel mutation.
 
 ## Daemon or CLI failure
 
@@ -33,9 +48,12 @@ sudo nftfw health
 ## Database failure
 
 Do not initialize a blank database over known enforcement state. The
-root-owned `enforcement-enabled` marker prevents that downgrade. During
-rollback, an unavailable/corrupt database causes the independent path to use
-the checksum-protected committed snapshot.
+root-owned `enforcement-enabled` marker prevents that downgrade. When SQLite
+cannot be opened, the independent path cannot safely trust its deadline state,
+so it immediately restores the checksum-protected committed snapshot. With a
+healthy database, configuration failure alone never authorizes a restore: an
+actually expired pending generation is still required. A missing marker never
+authorizes deletion of product-named tables.
 
 Verify and restore an operator backup offline:
 

@@ -11,7 +11,7 @@ import (
 )
 
 func TestActiveSnapshotLifecycle(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureTestDir(t)
 	store, err := Open(context.Background(), filepath.Join(dir, "state.db"))
 	if err != nil {
 		t.Fatal(err)
@@ -42,7 +42,7 @@ func TestActiveSnapshotLifecycle(t *testing.T) {
 }
 
 func TestActiveSnapshotFailsClosedOnDamage(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureTestDir(t)
 	if err := os.WriteFile(filepath.Join(dir, activeMarkerName), []byte("enabled\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -59,8 +59,8 @@ func TestActiveSnapshotFailsClosedOnDamage(t *testing.T) {
 }
 
 func TestActiveSnapshotRejectsSymlink(t *testing.T) {
-	dir := t.TempDir()
-	target := filepath.Join(t.TempDir(), "marker")
+	dir := secureTestDir(t)
+	target := filepath.Join(secureTestDir(t), "marker")
 	if err := os.WriteFile(target, []byte("enabled\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestActiveSnapshotRejectsSymlink(t *testing.T) {
 }
 
 func TestEnforcementMarkerPreventsEmptyDatabaseRecreation(t *testing.T) {
-	dir := t.TempDir()
+	dir := secureTestDir(t)
 	if err := os.WriteFile(filepath.Join(dir, activeMarkerName), []byte("enabled\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}

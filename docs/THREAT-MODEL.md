@@ -19,12 +19,12 @@ updates, and recovery that does not erase unrelated firewall state.
 | Malicious local user | Root peer credentials; protected config/state/runtime dirs; bounded schemas | A user granted root or Docker socket access is outside this boundary |
 | Compromised dashboard | Separate UID, status socket only, no capabilities, control or Docker socket | Status data is visible to the dashboard group by design |
 | Malformed config | Strict unknown-key rejection, limits, typed references, topology validation, `nft --check` | Semantically valid policy can still deny operator traffic; safe apply mitigates |
-| Malicious threat feed | HTTPS, public-only dial, no proxy env, redirect/time/byte/entry limits, strict CIDR, atomic source claims | HTTPS/DNS trust can still supply valid but unwanted public prefixes |
+| Malicious threat feed | HTTPS public-only dial; no proxy env; redirect/time/byte/entry limits; public `/24` and `/48` minimums; cross-feed aggregate caps; topology/WireGuard exclusions; persisted-state validation and rollback; established/trusted recovery paths precede feed blocks | HTTPS/DNS trust can still supply bounded valid but unwanted public prefixes |
 | DNS manipulation | Valid unicast results only, bounded history/age, endpoint-only bootstrap | A compromised resolver can redirect the VPN endpoint to another public host on the same port/mark path |
 | WireGuard endpoint change | Fixed-cadence resolution, atomic endpoint sets, narrow single-peer update | Authoritative TTL is unavailable; convergence can take up to refresh cadence |
 | Kernel/firewall drift | Canonical owned JSON fingerprint, 30-second repair, runtime set restore | A competing privileged manager can cause repeated churn or preempt via another base chain |
 | Operator mistake | Plan, doctor, candidate check, persistent deadline, independent timer, explicit commit | Hidden topology outside declared policy cannot be proven automatically |
-| Supply-chain compromise | Small direct dependency set, pinned sums, vulnerability/static scans, manifests, checksums | CI action tags and upstream Go/module/tool distribution remain trust roots |
+| Supply-chain compromise | Small direct dependency set, pinned sums, vulnerability/static scans, manifests, checksums, reproducible archives, unsigned in-toto provenance | CI action tags and upstream Go/module/tool distribution remain trust roots; release signing is operator-owned |
 | Symlink/permission attack | `lstat`, `O_NOFOLLOW`, parent ownership/mode checks, secure temp files | Root can deliberately replace protected files |
 | Command injection | No shell strings in Go; validated fixed argument arrays; Docker `--` separator | Shell acceptance scripts are privileged test tooling, not runtime input APIs |
 | API/socket abuse | Kernel peer credentials, separate sockets, mode checks, request limits, operation field allowlists | Root control clients can intentionally change policy |
@@ -32,7 +32,7 @@ updates, and recovery that does not erase unrelated firewall state.
 | Database corruption | Quick checks, transactional migration, online backup, committed snapshot fallback, emergency deny | Audit events written only to a destroyed DB require external journal/backup recovery |
 | IPv6 bypass | Explicit modes; early disabled hooks; dual-stack policy and leak tests | Third-party higher-priority rules remain an operator integration concern |
 | Conntrack bypass | No blanket output established accept; physical forward drop precedes state accept; active-flow tests | Kernel conntrack/nft implementation is trusted |
-| Docker privilege exposure | Socket only in root daemon; local host pinned; dashboard isolation; hardened daemon config | Docker daemon compromise is effectively host-root compromise |
+| Docker privilege exposure | Socket hidden by packaged unit unless an explicit drop-in grants it; local host pinned; dashboard isolation; hardened daemon config | An operator-enabled Docker socket remains effectively host-root trust |
 | Unsafe rollback | Generation checksums, eligibility checks, prior generation, independent fallback | Disabling both systemd and daemon rollback removes this protection |
 | Secret disclosure | Keys never stored in SQLite/audit/status; config mode checks; release secret scan | Operators can still expose secrets through external logging or shell history |
 | Web attacks | GET/HEAD only, no mutation, textContent rendering, same-origin assets, CSP, size/time limits | Binding beyond loopback exposes operational metadata without application authentication |

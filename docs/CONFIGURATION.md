@@ -25,7 +25,7 @@ ipv6_mode = "disabled"
 strict_vpn = true
 ```
 
-`strict_vpn` must be true in v2.0.0. Supported IPv6 modes are:
+`strict_vpn` must be true in V2. Supported IPv6 modes are:
 
 | Mode | Behavior |
 | --- | --- |
@@ -57,8 +57,11 @@ interfaces = []
 
 Zone networks cannot overlap, `/0` is forbidden, and every interface/zone
 reference must exist. A zone must contain at least one network or interface.
-Interface CIDRs describe observed topology; zone networks are policy
-selectors.
+An interface may belong to at most one zone across the interface's `zone`
+field and every zone's `interfaces` list. Repeating the same membership in
+both places is accepted and compiled once; assigning an interface (especially
+the uplink) to different zones is rejected. Interface CIDRs describe observed
+topology; zone networks are policy selectors.
 
 ## Services and policies
 
@@ -90,7 +93,11 @@ Direction follows endpoints:
 Public output and `to = "any"` forwarding are pinned to the configured VPN.
 An output policy may not name the physical uplink zone as a destination.
 Explicit denies are emitted before stateful accepts; the physical forward drop
-also precedes established/related acceptance.
+also precedes general established/related acceptance. Narrow physical-uplink
+reply rules, established input sessions, explicit temporary trusted-service
+leases, and WireGuard bootstrap run before untrusted dynamic feed blocks so a
+feed cannot terminate the recovery paths. Dynamic blocks still reject new,
+untrusted traffic and VPN destinations.
 
 ## NAT
 
@@ -177,8 +184,27 @@ notifications = false
 ```
 
 Docker integration reads the local Docker socket from the privileged daemon;
-socket access is effectively root-equivalent. The observer refuses operation
-unless `/etc/docker/daemon.json` is protected and explicitly contains:
+socket access is effectively root-equivalent. It is disabled by two separate
+gates: `docker_enabled` defaults to false, and the packaged systemd service
+hides the socket even if configuration is changed. After accepting this trust
+boundary, an operator must explicitly install the supplied drop-in:
+
+```bash
+sudo install -d -m 0755 /etc/systemd/system/nftfwd.service.d
+sudo install -m 0644 \
+  /usr/share/doc/nft-firewall-v2/examples/nftfwd-docker-access.conf.example \
+  /etc/systemd/system/nftfwd.service.d/docker-access.conf
+sudo systemctl daemon-reload
+sudo systemctl restart nftfwd.service
+```
+
+For a source installation, copy
+`packaging/systemd/nftfwd-docker-access.conf.example` instead of the
+`/usr/share/doc` path.
+
+Removing that drop-in and restarting `nftfwd` revokes socket access. The
+observer also refuses operation unless `/etc/docker/daemon.json` is protected
+and explicitly contains:
 
 ```json
 {
@@ -211,15 +237,25 @@ min_entries = 10
 refresh_seconds = 3600
 ```
 
-URLs must be credential-free HTTPS. The built-in client disables proxy
-environment use, rejects non-public targets, caps redirects at five, and has a
-15-second timeout. Responses are capped at 64 MiB by configuration, entries
-are strict IPs/CIDRs with `/0` rejected, and source replacement is atomic. Zero
-uses defaults of 10,000 entries, 8 MiB, one minimum entry, and one hour.
+URLs must use HTTPS and contain no userinfo (`user:password@`), query string,
+or fragment. The built-in client disables proxy environment use, rejects
+non-public targets, caps redirects at five, and has a 15-second timeout.
+Responses are capped at 64 MiB by configuration, entries are strict IPs/CIDRs,
+and only public global-unicast space is accepted. IPv4 entries must be `/24`
+or narrower and IPv6 entries `/48` or narrower. Across every active feed,
+unique coverage may not exceed a `/12`-equivalent for IPv4 or a
+`/36`-equivalent for IPv6 (4096 maximum-width entries per family). Feed
+prefixes may not overlap configured zone or interface networks, static
+WireGuard bootstrap addresses, or current resolved/cached WireGuard
+endpoints. Zero uses defaults of 10,000 entries, 8 MiB, one minimum entry, and
+one hour.
 
-On download, parse, threshold, or kernel-update failure, prior claims remain
-active and the integration becomes degraded. Manual and other integration
-claims are unaffected.
+These checks also run when persisted claims are planned or restored, so data
+created by an older release cannot bypass them. On download, parse, threshold,
+database, or kernel-update failure, prior source claims and prior live sets are
+restored and the integration becomes degraded. Manual and other integration
+claims are unaffected. HTTP failures are returned without the configured URL
+so request paths cannot leak into service logs.
 
 ## GeoIP
 

@@ -15,10 +15,10 @@ separately and declare its interface, endpoint, port, and fwmark in the policy.
 ## Release archive
 
 ```bash
-unzip nft-firewall-v2-2.0.0.zip
+unzip nft-firewall-v2-2.0.1.zip
 cd nft-firewall-v2
 sha256sum -c SHA256SUMS
-sudo apt install ./packages/nft-firewall-v2_2.0.0_$(dpkg --print-architecture).deb
+sudo apt install ./packages/nft-firewall-v2_2.0.1_$(dpkg --print-architecture).deb
 ```
 
 The final release archive provides Debian packages and architecture-specific
@@ -30,23 +30,30 @@ contains no generated `dist/`; build it first when using the source installer.
 On amd64:
 
 ```bash
-sudo apt install ./nft-firewall-v2_2.0.0_amd64.deb
+sudo apt install ./nft-firewall-v2_2.0.1_amd64.deb
 ```
 
 Use the arm64 package on arm64 systems. Package installation creates the
 service identities and directories, validates the configuration, and enables
-the services. It does not apply a new candidate policy. Before an upgrade, the
-package creates and verifies an online state database backup.
+the services. It does not create or apply a new candidate policy. If committed
+state already exists, restarting the daemon can reconcile that committed
+policy. Before an upgrade, the package creates and verifies an online state
+database backup.
 
 ## Source tree
 
 ```bash
-make release VERSION=2.0.0
+cd source # only when starting in the extracted release bundle
+GOTOOLCHAIN=go1.25.13 make release VERSION=2.0.1
 sudo ./scripts/install.sh
 ```
 
+In a Git checkout the repository root is already the source directory, so do
+not run the first `cd` command.
+
 The source installer verifies binary checksums, validates the candidate
-configuration, checks systemd units, preserves an existing configuration,
+configuration, checks systemd units against isolated staged executables before
+any host mutation, preserves an existing configuration,
 backs up existing SQLite state, installs binaries in `/usr/lib/nftfw`, and
 starts the daemon, timer, and dashboard. It makes no firewall change unless a
 previous committed generation already requires reconciliation.
@@ -76,7 +83,8 @@ been proven.
 | `/usr/lib/nftfw/` | Executables | root-owned, not writable by group/other |
 | `/etc/nftfw/nftfw.toml` | Desired policy | root-owned, `0640` or stricter |
 | `/var/lib/nftfw/state.db` | Operational state | root-only directory |
-| `/var/lib/nftfw/active.nft` | Committed boot snapshot | root-only directory |
+| `/var/lib/nftfw/active.snapshot.json` | Checksummed committed boot ruleset | root-only directory |
+| `/var/lib/nftfw/enforcement-enabled` | Marker requiring early restore or fail-closed recovery | root-only directory |
 | `/run/nftfw/control.sock` | Mutating API | root peer only |
 | `/run/nftfw/status.sock` | Read-only API | dashboard group readable |
 

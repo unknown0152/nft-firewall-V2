@@ -29,7 +29,10 @@ type Store struct {
 	mu   sync.Mutex
 }
 
-const currentSchemaVersion = 3
+const (
+	currentSchemaVersion = 5
+	MaxAuditRows         = 10000
+)
 
 var databaseNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 var claimSourcePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,63}(/[a-zA-Z0-9_.-]{1,64})?$`)
@@ -62,6 +65,11 @@ type IntegrationState struct {
 	EntryCount  int        `json:"entry_count"`
 	LastSuccess *time.Time `json:"last_success,omitempty"`
 	UpdatedAt   time.Time  `json:"updated_at"`
+}
+
+type ClaimPublication struct {
+	DesiredRevision uint64
+	AppliedRevision uint64
 }
 
 func Open(ctx context.Context, path string) (*Store, error) {
@@ -274,6 +282,38 @@ ALTER TABLE generations ADD COLUMN observed_hash TEXT NOT NULL DEFAULT '';
 INSERT INTO schema_migrations(version, applied_at) VALUES(3, datetime('now'));`)
 		if err != nil {
 			return fmt.Errorf("migration 3: %w", err)
+		}
+	}
+	if version < 4 {
+		migration := fmt.Sprintf(`
+DELETE FROM audit
+WHERE id < COALESCE((SELECT id FROM audit ORDER BY id DESC LIMIT 1 OFFSET %d), 0);
+CREATE TRIGGER audit_prune_after_insert
+AFTER INSERT ON audit
+BEGIN
+ DELETE FROM audit WHERE id <= NEW.id - %d;
+END;
+INSERT INTO schema_migrations(version, applied_at) VALUES(4, datetime('now'));`, MaxAuditRows-1, MaxAuditRows)
+		if _, err = tx.ExecContext(ctx, migration); err != nil {
+			return fmt.Errorf("migration 4: %w", err)
+		}
+	}
+	if version < 5 {
+		_, err = tx.ExecContext(ctx, `
+CREATE TABLE runtime_claim_publication (
+ singleton INTEGER PRIMARY KEY CHECK(singleton=1),
+ desired_revision INTEGER NOT NULL CHECK(desired_revision>=0),
+ applied_revision INTEGER NOT NULL CHECK(applied_revision>=0),
+ updated_at TEXT NOT NULL
+);
+INSERT INTO runtime_claim_publication(singleton,desired_revision,applied_revision,updated_at)
+VALUES(1,1,0,datetime('now'));
+INSERT INTO integration_state(name,status,entry_count,last_success,updated_at)
+VALUES('runtime/claims','degraded',(SELECT COUNT(*) FROM claims WHERE expires_at IS NULL OR expires_at>strftime('%Y-%m-%dT%H:%M:%fZ','now')),NULL,datetime('now'))
+ON CONFLICT(name) DO UPDATE SET status='degraded',entry_count=excluded.entry_count,updated_at=excluded.updated_at;
+INSERT INTO schema_migrations(version, applied_at) VALUES(5, datetime('now'));`)
+		if err != nil {
+			return fmt.Errorf("migration 5: %w", err)
 		}
 	}
 	if err := tx.Commit(); err != nil {
@@ -556,6 +596,9 @@ func (s *Store) AddClaimBounded(ctx context.Context, c Claim, max int) (int64, e
 	if _, err := tx.ExecContext(ctx, "INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)", now.Format(time.RFC3339Nano), c.Actor, "claim_added", fmt.Sprintf("id=%d address=%s source=%s", id, c.Address, c.Source)); err != nil {
 		return 0, err
 	}
+	if err := markClaimPublicationDirtyTx(ctx, tx, now); err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -566,7 +609,12 @@ func (s *Store) RemoveClaim(ctx context.Context, id int64, actor string) error {
 	if id <= 0 {
 		return errors.New("claim id must be positive")
 	}
-	res, err := s.DB.ExecContext(ctx, "DELETE FROM claims WHERE id=?", id)
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	res, err := tx.ExecContext(ctx, "DELETE FROM claims WHERE id=?", id)
 	if err != nil {
 		return err
 	}
@@ -574,7 +622,14 @@ func (s *Store) RemoveClaim(ctx context.Context, id int64, actor string) error {
 	if n == 0 {
 		return sql.ErrNoRows
 	}
-	return s.Audit(ctx, actor, "claim_removed", fmt.Sprintf("id=%d", id))
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, "INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)", now.Format(time.RFC3339Nano), actor, "claim_removed", fmt.Sprintf("id=%d", id)); err != nil {
+		return err
+	}
+	if err := markClaimPublicationDirtyTx(ctx, tx, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // RemoveOperatorClaim prevents the manual control API from deleting claims
@@ -599,7 +654,11 @@ func (s *Store) RemoveOperatorClaim(ctx context.Context, id int64, actor, kind s
 	if _, err := tx.ExecContext(ctx, "DELETE FROM claims WHERE id=?", id); err != nil {
 		return err
 	}
-	if _, err := tx.ExecContext(ctx, "INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)", time.Now().UTC().Format(time.RFC3339Nano), actor, "claim_removed", fmt.Sprintf("id=%d", id)); err != nil {
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, "INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)", now.Format(time.RFC3339Nano), actor, "claim_removed", fmt.Sprintf("id=%d", id)); err != nil {
+		return err
+	}
+	if err := markClaimPublicationDirtyTx(ctx, tx, now); err != nil {
 		return err
 	}
 	return tx.Commit()
@@ -676,6 +735,13 @@ func (s *Store) ReplaceSourceClaimsBounded(ctx context.Context, source, reason, 
 	if _, err := tx.ExecContext(ctx, "INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)", now, actor, "claim_source_replaced", fmt.Sprintf("source=%s entries=%d", source, len(canonical))); err != nil {
 		return 0, err
 	}
+	parsedNow, err := time.Parse(time.RFC3339Nano, now)
+	if err != nil {
+		return 0, err
+	}
+	if err := markClaimPublicationDirtyTx(ctx, tx, parsedNow); err != nil {
+		return 0, err
+	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
 	}
@@ -689,6 +755,161 @@ func (s *Store) Claims(ctx context.Context, now time.Time) ([]Claim, error) {
 	}
 	defer rows.Close()
 	return scanClaims(rows)
+}
+
+func (s *Store) ClaimsWithPublication(ctx context.Context, now time.Time) ([]Claim, ClaimPublication, error) {
+	tx, err := s.DB.BeginTx(ctx, &sql.TxOptions{ReadOnly: true})
+	if err != nil {
+		return nil, ClaimPublication{}, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT id,address,family,source,reason,actor,created_at,expires_at FROM claims WHERE expires_at IS NULL OR expires_at>? ORDER BY address,source,id`, now.UTC().Format(time.RFC3339Nano))
+	if err != nil {
+		return nil, ClaimPublication{}, err
+	}
+	claims, scanErr := scanClaims(rows)
+	closeErr := rows.Close()
+	if scanErr != nil {
+		return nil, ClaimPublication{}, scanErr
+	}
+	if closeErr != nil {
+		return nil, ClaimPublication{}, closeErr
+	}
+	var publication ClaimPublication
+	if err := tx.QueryRowContext(ctx, `SELECT desired_revision,applied_revision FROM runtime_claim_publication WHERE singleton=1`).Scan(&publication.DesiredRevision, &publication.AppliedRevision); err != nil {
+		return nil, ClaimPublication{}, err
+	}
+	if publication.AppliedRevision > publication.DesiredRevision {
+		return nil, ClaimPublication{}, errors.New("runtime claim publication revision is invalid")
+	}
+	if err := tx.Commit(); err != nil {
+		return nil, ClaimPublication{}, err
+	}
+	return claims, publication, nil
+}
+
+func (s *Store) ClaimPublicationState(ctx context.Context) (ClaimPublication, error) {
+	var publication ClaimPublication
+	err := s.DB.QueryRowContext(ctx, `SELECT desired_revision,applied_revision FROM runtime_claim_publication WHERE singleton=1`).Scan(&publication.DesiredRevision, &publication.AppliedRevision)
+	if err == nil && publication.AppliedRevision > publication.DesiredRevision {
+		err = errors.New("runtime claim publication revision is invalid")
+	}
+	return publication, err
+}
+
+func (s *Store) PrepareClaimPublication(ctx context.Context) (uint64, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	var publication ClaimPublication
+	if err := tx.QueryRowContext(ctx, `SELECT desired_revision,applied_revision FROM runtime_claim_publication WHERE singleton=1`).Scan(&publication.DesiredRevision, &publication.AppliedRevision); err != nil {
+		return 0, err
+	}
+	if publication.AppliedRevision > publication.DesiredRevision {
+		return 0, errors.New("runtime claim publication revision is invalid")
+	}
+	now := time.Now().UTC()
+	if publication.DesiredRevision == publication.AppliedRevision {
+		if err := markClaimPublicationDirtyTx(ctx, tx, now); err != nil {
+			return 0, err
+		}
+		publication.DesiredRevision++
+	} else if err := markRuntimeClaimsDegradedTx(ctx, tx, now); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return publication.DesiredRevision, nil
+}
+
+func (s *Store) MarkClaimsPublished(ctx context.Context, revision uint64, count int) error {
+	if count < 0 {
+		return errors.New("runtime claim count is invalid")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE runtime_claim_publication SET applied_revision=?,updated_at=? WHERE singleton=1 AND desired_revision=?`, revision, time.Now().UTC().Format(time.RFC3339Nano), revision)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return errors.New("runtime claims changed during publication")
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	if _, err := tx.ExecContext(ctx, `INSERT INTO integration_state(name,status,entry_count,last_success,updated_at) VALUES('runtime/claims','healthy',?,?,?)
+ON CONFLICT(name) DO UPDATE SET status='healthy',entry_count=excluded.entry_count,last_success=excluded.last_success,updated_at=excluded.updated_at`, count, now, now); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func markClaimPublicationDirtyTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	nowText := now.UTC().Format(time.RFC3339Nano)
+	result, err := tx.ExecContext(ctx, `UPDATE runtime_claim_publication SET desired_revision=desired_revision+1,updated_at=? WHERE singleton=1`, nowText)
+	if err != nil {
+		return err
+	}
+	updated, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if updated != 1 {
+		return errors.New("runtime claim publication state is missing")
+	}
+	return markRuntimeClaimsDegradedTx(ctx, tx, now)
+}
+
+func markRuntimeClaimsDegradedTx(ctx context.Context, tx *sql.Tx, now time.Time) error {
+	nowText := now.UTC().Format(time.RFC3339Nano)
+	var count int
+	if err := tx.QueryRowContext(ctx, `SELECT COUNT(*) FROM claims WHERE expires_at IS NULL OR expires_at>?`, nowText).Scan(&count); err != nil {
+		return err
+	}
+	_, err := tx.ExecContext(ctx, `INSERT INTO integration_state(name,status,entry_count,last_success,updated_at) VALUES('runtime/claims','degraded',?,NULL,?)
+ON CONFLICT(name) DO UPDATE SET status='degraded',entry_count=excluded.entry_count,updated_at=excluded.updated_at`, count, nowText)
+	return err
+}
+
+func (s *Store) RestoreClaim(ctx context.Context, claim Claim, actor string) error {
+	if claim.ID <= 0 || actor == "" {
+		return errors.New("restored claim id and actor are required")
+	}
+	if err := ValidateClaim(claim.Address, claim.Family); err != nil {
+		return err
+	}
+	if err := validateClaimMetadata(claim); err != nil {
+		return err
+	}
+	var expires any
+	if claim.ExpiresAt != nil {
+		expires = claim.ExpiresAt.UTC().Format(time.RFC3339Nano)
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO claims(id,address,family,source,reason,actor,created_at,expires_at) VALUES(?,?,?,?,?,?,?,?)`, claim.ID, claim.Address, claim.Family, claim.Source, claim.Reason, claim.Actor, claim.CreatedAt.UTC().Format(time.RFC3339Nano), expires); err != nil {
+		return err
+	}
+	now := time.Now().UTC()
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)`, now.Format(time.RFC3339Nano), actor, "claim_restored", fmt.Sprintf("id=%d", claim.ID)); err != nil {
+		return err
+	}
+	if err := markClaimPublicationDirtyTx(ctx, tx, now); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (s *Store) ClaimsPage(ctx context.Context, now time.Time, limit, offset int) ([]Claim, error) {
@@ -825,15 +1046,32 @@ func isAllowSource(source string) bool {
 }
 
 func (s *Store) PurgeExpiredClaims(ctx context.Context, now time.Time) (int64, error) {
-	result, err := s.DB.ExecContext(ctx, "DELETE FROM claims WHERE expires_at IS NOT NULL AND expires_at<=?", now.UTC().Format(time.RFC3339Nano))
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	now = now.UTC()
+	result, err := tx.ExecContext(ctx, "DELETE FROM claims WHERE expires_at IS NOT NULL AND expires_at<=?", now.Format(time.RFC3339Nano))
 	if err != nil {
 		return 0, err
 	}
 	count, err := result.RowsAffected()
-	if err == nil && count > 0 {
-		_ = s.Audit(ctx, "system", "expired_claims_purged", fmt.Sprintf("count=%d", count))
+	if err != nil {
+		return 0, err
 	}
-	return count, err
+	if count > 0 {
+		if _, err := tx.ExecContext(ctx, "INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)", now.Format(time.RFC3339Nano), "system", "expired_claims_purged", fmt.Sprintf("count=%d", count)); err != nil {
+			return 0, err
+		}
+		if err := markClaimPublicationDirtyTx(ctx, tx, now); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return count, nil
 }
 
 func (s *Store) Audit(ctx context.Context, actor, event, detail string) error {
@@ -911,6 +1149,91 @@ func (s *Store) IntegrationStates(ctx context.Context) ([]IntegrationState, erro
 		result = append(result, item)
 	}
 	return result, rows.Err()
+}
+
+func (s *Store) RetireInactiveIntegrations(ctx context.Context, active map[string]bool) (int64, error) {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	rows, err := tx.QueryContext(ctx, `SELECT DISTINCT source FROM claims WHERE source LIKE 'threatfeed/%' OR source LIKE 'geo/%' ORDER BY source`)
+	if err != nil {
+		return 0, err
+	}
+	var inactiveSources []string
+	for rows.Next() {
+		var source string
+		if err := rows.Scan(&source); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		if !active[source] {
+			inactiveSources = append(inactiveSources, source)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	var removedClaims int64
+	for _, source := range inactiveSources {
+		result, err := tx.ExecContext(ctx, `DELETE FROM claims WHERE source=?`, source)
+		if err != nil {
+			return 0, err
+		}
+		count, err := result.RowsAffected()
+		if err != nil {
+			return 0, err
+		}
+		removedClaims += count
+	}
+	rows, err = tx.QueryContext(ctx, `SELECT name FROM integration_state ORDER BY name`)
+	if err != nil {
+		return 0, err
+	}
+	var inactiveStates []string
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			rows.Close()
+			return 0, err
+		}
+		managed := name == "docker" || strings.HasPrefix(name, "wireguard/") || strings.HasPrefix(name, "threatfeed/") || strings.HasPrefix(name, "geo/")
+		if managed && !active[name] {
+			inactiveStates = append(inactiveStates, name)
+		}
+	}
+	if err := rows.Err(); err != nil {
+		rows.Close()
+		return 0, err
+	}
+	if err := rows.Close(); err != nil {
+		return 0, err
+	}
+	for _, name := range inactiveStates {
+		if _, err := tx.ExecContext(ctx, `DELETE FROM integration_state WHERE name=?`, name); err != nil {
+			return 0, err
+		}
+	}
+	now := time.Now().UTC()
+	if removedClaims > 0 {
+		if err := markClaimPublicationDirtyTx(ctx, tx, now); err != nil {
+			return 0, err
+		}
+	}
+	if len(inactiveSources) > 0 || len(inactiveStates) > 0 {
+		if _, err := tx.ExecContext(ctx, `INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)`, now.Format(time.RFC3339Nano), "system", "inactive_integrations_retired", fmt.Sprintf("claim_sources=%d states=%d claims=%d", len(inactiveSources), len(inactiveStates), removedClaims)); err != nil {
+			return 0, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
+		return 0, err
+	}
+	return removedClaims, nil
 }
 
 func (s *Store) IntegrationState(ctx context.Context, name string) (*IntegrationState, error) {

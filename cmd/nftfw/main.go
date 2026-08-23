@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"flag"
@@ -141,19 +142,19 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		return controlOrLocal(controlSock, configPath, api.Request{Op: "commit", Generation: id}, func(rt *app.Runtime) (any, error) { return nil, rt.Manager.Commit(context.Background(), id) })
+		return controlOrLocal(controlSock, configPath, api.Request{Op: "commit", Generation: id}, func(rt *app.Runtime) (any, error) { return nil, rt.Commit(context.Background(), id) })
 	case "rollback":
 		id, err := parseID(args, 1)
 		if err != nil {
 			return err
 		}
-		return controlOrLocal(controlSock, configPath, api.Request{Op: "rollback", Generation: id}, func(rt *app.Runtime) (any, error) { return nil, rt.Manager.Rollback(context.Background(), id) })
+		return controlOrLocal(controlSock, configPath, api.Request{Op: "rollback", Generation: id}, func(rt *app.Runtime) (any, error) { return nil, rt.Rollback(context.Background(), id) })
 	case "reconcile":
 		if len(args) != 1 {
 			return errors.New("usage: nftfw reconcile")
 		}
 		return controlOrLocal(controlSock, configPath, api.Request{Op: "reconcile"}, func(rt *app.Runtime) (any, error) {
-			return rt.Manager.Reconcile(context.Background(), true)
+			return rt.Reconcile(context.Background(), true)
 		})
 	case "status", "health":
 		if len(args) > 2 || (len(args) == 2 && args[1] != "--json") {
@@ -163,19 +164,28 @@ func run(args []string) error {
 		if err != nil {
 			return err
 		}
-		if has(args, "--json") {
-			return printJSONOr(resp.Data, true)
-		}
 		var snapshot health.Snapshot
 		encoded, marshalErr := json.Marshal(resp.Data)
 		if marshalErr != nil || json.Unmarshal(encoded, &snapshot) != nil {
 			return errors.New("status response could not be decoded")
 		}
-		fmt.Printf("Status: %s\nActive generation: %d\nKill switch: %s\nDrift: %t\nWireGuard healthy: %t\nBlocked addresses: %d\nDatabase: %s\n", snapshot.Status, snapshot.ActiveGeneration, snapshot.KillSwitch, snapshot.Drift, snapshot.WireGuard.Healthy, snapshot.BlockedAddresses, snapshot.Database)
+		if snapshot.Schema != health.StatusSchema {
+			return fmt.Errorf("unsupported status schema %q", snapshot.Schema)
+		}
+		if has(args, "--json") {
+			if err := printJSONOr(resp.Data, true); err != nil {
+				return err
+			}
+			if args[0] == "health" && !statusHealthy(snapshot) {
+				return errors.New("health check is degraded")
+			}
+			return nil
+		}
+		fmt.Printf("Status: %s\nActive: %t\nActive generation: %d\nPolicy match: %t\nKill switch: %s\nDrift: %t\nWireGuard healthy: %t\nBlocked addresses: %d\nDatabase: %s\n", snapshot.Status, snapshot.Active, snapshot.ActiveGeneration, snapshot.PolicyMatch, snapshot.KillSwitch, snapshot.Drift, snapshot.WireGuard.Healthy, snapshot.BlockedAddresses, snapshot.Database)
 		if snapshot.Reason != "" {
 			fmt.Printf("Reason: %s\n", snapshot.Reason)
 		}
-		if args[0] == "health" && snapshot.Status != "HEALTHY" {
+		if args[0] == "health" && !statusHealthy(snapshot) {
 			return errors.New("health check is degraded")
 		}
 		return nil
@@ -221,6 +231,26 @@ func run(args []string) error {
 		return fmt.Errorf("unknown command %q", args[0])
 	}
 }
+
+func statusHealthy(snapshot health.Snapshot) bool {
+	return snapshot.Schema == health.StatusSchema && snapshot.Status == "HEALTHY" &&
+		snapshot.Active && snapshot.PolicyMatch && snapshot.KillSwitchEnforced &&
+		validPolicyIdentity(snapshot.PolicyHash, snapshot.PolicyChecksum)
+}
+
+func validPolicyIdentity(policyHash, policyChecksum string) bool {
+	if policyHash == "" || policyChecksum == "" || policyHash != policyChecksum {
+		return false
+	}
+	identity := policyHash
+	if len(identity) != sha256HexLength || identity != strings.ToLower(identity) {
+		return false
+	}
+	_, err := hex.DecodeString(identity)
+	return err == nil
+}
+
+const sha256HexLength = 64
 
 func diffPolicies(current, proposed map[string]string) []string {
 	var changes []string

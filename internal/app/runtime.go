@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
@@ -29,13 +30,42 @@ import (
 )
 
 type Runtime struct {
-	Config           config.Config
-	Effective        policy.Effective
-	Store            *state.Store
-	Backend          *nft.Backend
-	Manager          *reconcile.Manager
-	EndpointResolver *wireguard.Resolver
-	WGController     *wireguard.Controller
+	Config              config.Config
+	Effective           policy.Effective
+	Store               *state.Store
+	Backend             *nft.Backend
+	Manager             *reconcile.Manager
+	EndpointResolver    *wireguard.Resolver
+	WGController        *wireguard.Controller
+	threatFeedFetcher   func(context.Context, threatintel.Feed) ([]string, error)
+	containerNetFetcher func(context.Context) ([]string, []string, error)
+	claimMu             sync.Mutex
+}
+
+type refreshedIntegration struct {
+	name   string
+	reason string
+	count  int
+	prior  []string
+}
+
+type integrationRefreshCandidate struct {
+	name           string
+	displayName    string
+	kind           string
+	reason         string
+	addresses      []string
+	protected      []string
+	refreshSeconds int
+	err            error
+}
+
+type claimPublicationLockContextKey struct{}
+
+const postMutationRecoveryTimeout = 20 * time.Second
+
+func postMutationRecoveryContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), postMutationRecoveryTimeout)
 }
 
 func Open(ctx context.Context, configPath string, runner nft.Runner) (*Runtime, error) {
@@ -66,6 +96,22 @@ func open(ctx context.Context, configPath string, runner nft.Runner, auditConfig
 		return nil, err
 	}
 	be := nft.New(runner)
+	knownGood, knownGoodErr := st.LastKnownGood(ctx)
+	pending, pendingErr := st.Pending(ctx)
+	if knownGoodErr != nil && !errors.Is(knownGoodErr, sql.ErrNoRows) {
+		_ = st.Close()
+		return nil, fmt.Errorf("inspect committed generation state: %w", knownGoodErr)
+	}
+	if pendingErr != nil && !errors.Is(pendingErr, sql.ErrNoRows) {
+		_ = st.Close()
+		return nil, fmt.Errorf("inspect pending generation state: %w", pendingErr)
+	}
+	if knownGood == nil && pending == nil {
+		if err := be.ProtectFirstUse(ctx); err != nil {
+			_ = st.Close()
+			return nil, fmt.Errorf("first-use ownership check: %w", err)
+		}
+	}
 	m := &reconcile.Manager{Backend: be, Store: st, SafeTTL: time.Duration(c.Runtime.SafeApplySeconds) * time.Second}
 	m.SafeGuard = recovery.SystemdGuard{StateDB: st.Path}.Verify
 	m.HealthCheck = func(checkCtx context.Context) error {
@@ -81,6 +127,23 @@ func open(ctx context.Context, configPath string, runner nft.Runner, auditConfig
 	resolver := &wireguard.Resolver{CachePath: filepath.Join(st.Dir, "wg-endpoints.json"), KeepRecent: c.WireGuard.KeepRecent, Max: 64, MaxStale: 24 * time.Hour}
 	controller := &wireguard.Controller{}
 	runtime := &Runtime{Config: c, Effective: e, Store: st, Backend: be, Manager: m, EndpointResolver: resolver, WGController: controller}
+	// OpenQuiet is the independent safe-apply timer path. It must be able to
+	// prove that no pending generation exists while an outer safe apply holds
+	// the claim lock during rollback-guard preflight, so it performs no startup
+	// retirement writes. The normal daemon open owns lifecycle retirement.
+	if auditConfiguration {
+		releaseClaims, err := runtime.acquireClaimPublicationLock(ctx)
+		if err != nil {
+			_ = st.Close()
+			return nil, fmt.Errorf("lock integration retirement: %w", err)
+		}
+		_, retirementErr := st.RetireInactiveIntegrations(ctx, runtime.activeIntegrationNames())
+		releaseClaims()
+		if retirementErr != nil {
+			_ = st.Close()
+			return nil, fmt.Errorf("retire inactive integrations: %w", retirementErr)
+		}
+	}
 	m.PostRestore = runtime.RestoreRuntimeState
 	if auditConfiguration {
 		_ = st.Audit(ctx, "system", "configuration_loaded", fmt.Sprintf("ipv6=%s zones=%d policies=%d", c.System.IPv6Mode, len(c.Zones), len(c.Policies)))
@@ -99,6 +162,15 @@ func (r *Runtime) SecurityEvent(ctx context.Context, event, detail string) {
 }
 
 func (r *Runtime) Artifact(ctx context.Context) (compiler.Artifact, error) {
+	release, err := r.acquireClaimPublicationLock(ctx)
+	if err != nil {
+		return compiler.Artifact{}, err
+	}
+	defer release()
+	return r.artifactLocked(ctx)
+}
+
+func (r *Runtime) artifactLocked(ctx context.Context) (compiler.Artifact, error) {
 	id, err := r.Store.NextGeneration(ctx)
 	if err != nil {
 		return compiler.Artifact{}, err
@@ -115,7 +187,8 @@ func (r *Runtime) Artifact(ctx context.Context) (compiler.Artifact, error) {
 	if err != nil {
 		return compiler.Artifact{}, err
 	}
-	claimSets, err := r.claimSets(claims, time.Now().UTC())
+	protected := append(append([]string(nil), v4...), v6...)
+	claimSets, err := r.claimSets(claims, time.Now().UTC(), protected)
 	if err != nil {
 		return compiler.Artifact{}, err
 	}
@@ -127,7 +200,14 @@ type runtimeClaimSets struct {
 	trustedV4, trustedV6 []nft.TimedElement
 }
 
-func (r *Runtime) claimSets(claims []state.Claim, now time.Time) (runtimeClaimSets, error) {
+func (r *Runtime) claimSets(claims []state.Claim, now time.Time, bootstrapProtected []string) (runtimeClaimSets, error) {
+	threatAddresses := threatFeedClaimAddresses(claims)
+	if len(threatAddresses) > 0 {
+		protected := append(r.configuredThreatFeedProtectedPrefixes(), bootstrapProtected...)
+		if err := threatintel.Validate(threatAddresses, unique(protected)); err != nil {
+			return runtimeClaimSets{}, fmt.Errorf("stored threat-feed claims failed safety validation: %w", err)
+		}
+	}
 	trustedV4, err := effectiveTrusted(claims, "ipv4", now)
 	if err != nil {
 		return runtimeClaimSets{}, err
@@ -152,6 +232,16 @@ func (r *Runtime) claimSets(claims []state.Claim, now time.Time) (runtimeClaimSe
 		}
 	}
 	return sets, nil
+}
+
+func threatFeedClaimAddresses(claims []state.Claim) []string {
+	var addresses []string
+	for _, claim := range claims {
+		if strings.HasPrefix(claim.Source, "threatfeed/") {
+			addresses = append(addresses, claim.Address)
+		}
+	}
+	return unique(addresses)
 }
 
 func effectiveTrusted(claims []state.Claim, family string, now time.Time) ([]nft.TimedElement, error) {
@@ -197,6 +287,9 @@ func (r *Runtime) bootstrapEndpoints(ctx context.Context) ([]string, []string, s
 	if len(hosts) == 0 {
 		return v4, v6, "", nil
 	}
+	if r.EndpointResolver == nil {
+		return nil, nil, "", errors.New("WireGuard endpoint resolver is unavailable")
+	}
 	var lastErr error
 	preferred := ""
 	for _, host := range hosts {
@@ -239,6 +332,9 @@ func unique(values []string) []string {
 	return out
 }
 func (r *Runtime) containerNets(ctx context.Context) (v4, v6 []string, err error) {
+	if r.containerNetFetcher != nil {
+		return r.containerNetFetcher(ctx)
+	}
 	var values []string
 	for _, in := range r.Config.Interfaces {
 		if in.Role == "container" {
@@ -285,7 +381,29 @@ func (r *Runtime) Status(ctx context.Context) (any, error) {
 		WGName:          r.Config.WireGuard.Interface,
 		WGHealthyWithin: time.Duration(r.Config.WireGuard.HandshakeSecond) * time.Second,
 		IPv6Mode:        r.Config.System.IPv6Mode, ZoneCount: len(r.Config.Zones), PolicyCount: len(r.Config.Policies),
+		ActiveIntegrations: r.activeIntegrationNames(),
 	}.Snapshot(ctx)
+}
+
+func (r *Runtime) activeIntegrationNames() map[string]bool {
+	names := map[string]bool{
+		"runtime/claims": true,
+		"wireguard/" + r.Config.WireGuard.Interface: true,
+	}
+	if r.Config.Integrations.DockerEnabled {
+		names["docker"] = true
+	}
+	if r.Config.Integrations.ThreatFeed {
+		for _, feed := range r.Config.ThreatFeeds {
+			names["threatfeed/"+feed.Name] = true
+		}
+	}
+	if r.Config.Integrations.GeoIP {
+		for _, geoSet := range r.Config.GeoSets {
+			names["geo/"+geoSet.Name] = true
+		}
+	}
+	return names
 }
 func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 	switch req.Op {
@@ -313,16 +431,28 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 		_ = r.Store.Audit(ctx, "uid:0", "firewall_plan_generated", fmt.Sprintf("generation=%d checksum=%s", a.Generation, a.Checksum))
 		return map[string]any{"generation": a.Generation, "checksum": a.Checksum, "script": a.Script}, nil
 	case "apply":
-		a, err := r.Artifact(ctx)
+		release, err := r.acquireClaimPublicationLock(ctx)
 		if err != nil {
 			return nil, err
 		}
-		result, err := r.Manager.Apply(ctx, a, req.Safe)
+		defer release()
+		a, err := r.artifactLocked(ctx)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := r.RefreshClaimSets(ctx); err != nil {
-			rollbackErr := r.Manager.Rollback(ctx, a.Generation)
+		if _, err := r.Store.PrepareClaimPublication(ctx); err != nil {
+			return nil, fmt.Errorf("mark runtime claims pending before policy apply: %w", err)
+		}
+		lockedCtx := context.WithValue(ctx, claimPublicationLockContextKey{}, true)
+		result, err := r.Manager.Apply(lockedCtx, a, req.Safe)
+		if err != nil {
+			return nil, err
+		}
+		recoveryCtx, cancel := postMutationRecoveryContext(ctx)
+		defer cancel()
+		recoveryLockedCtx := context.WithValue(recoveryCtx, claimPublicationLockContextKey{}, true)
+		if _, err := r.refreshClaimSetsLocked(recoveryCtx); err != nil {
+			rollbackErr := r.Manager.Rollback(recoveryLockedCtx, a.Generation)
 			if rollbackErr != nil {
 				return nil, fmt.Errorf("apply runtime lease reconciliation failed: %w; rollback also failed: %v", err, rollbackErr)
 			}
@@ -330,11 +460,11 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 		}
 		return result, nil
 	case "commit":
-		return nil, r.Manager.Commit(ctx, req.Generation)
+		return nil, r.Commit(ctx, req.Generation)
 	case "rollback":
-		return nil, r.Manager.Rollback(ctx, req.Generation)
+		return nil, r.Rollback(ctx, req.Generation)
 	case "reconcile":
-		return r.Manager.Reconcile(ctx, true)
+		return r.Reconcile(ctx, true)
 	case "wg-refresh":
 		refreshed, err := r.RefreshEndpoints(ctx)
 		return map[string]any{"refreshed": refreshed}, err
@@ -343,11 +473,14 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		id, err := blocks.Service{Store: r.Store, Max: r.Config.Runtime.MaxBlockClaims}.Add(ctx, req.Address, req.Source, req.Reason, "uid:0", expires)
-		if err == nil {
-			_, err = r.RefreshClaimSets(ctx)
+		release, err := r.acquireClaimPublicationLock(ctx)
+		if err != nil {
+			return nil, err
 		}
-		return map[string]any{"claim_id": id}, err
+		defer release()
+		return r.addClaimAndPublishLocked(ctx, "block", func() (int64, error) {
+			return (blocks.Service{Store: r.Store, Max: r.Config.Runtime.MaxBlockClaims}).Add(ctx, req.Address, req.Source, req.Reason, "uid:0", expires)
+		})
 	case "allow-add":
 		if len(r.Config.Runtime.TrustedServices) == 0 {
 			return nil, errors.New("temporary access is disabled because runtime.trusted_services is empty")
@@ -359,28 +492,131 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 		if err != nil {
 			return nil, err
 		}
-		id, err := blocks.Service{Store: r.Store, Max: r.Config.Runtime.MaxBlockClaims}.AddAllow(ctx, req.Address, req.Reason, "uid:0", expires)
-		if err == nil {
-			_, err = r.RefreshClaimSets(ctx)
+		release, err := r.acquireClaimPublicationLock(ctx)
+		if err != nil {
+			return nil, err
 		}
-		return map[string]any{"claim_id": id}, err
+		defer release()
+		return r.addClaimAndPublishLocked(ctx, "allow", func() (int64, error) {
+			return (blocks.Service{Store: r.Store, Max: r.Config.Runtime.MaxBlockClaims}).AddAllow(ctx, req.Address, req.Reason, "uid:0", expires)
+		})
 	case "block-remove":
-		service := blocks.Service{Store: r.Store}
-		if err := service.RemoveBlock(ctx, req.ClaimID, "uid:0"); err != nil {
+		release, err := r.acquireClaimPublicationLock(ctx)
+		if err != nil {
 			return nil, err
 		}
-		_, err := r.RefreshClaimSets(ctx)
-		return nil, err
+		defer release()
+		return nil, r.removeClaimAndPublishLocked(ctx, req.ClaimID, "block")
 	case "allow-remove":
-		service := blocks.Service{Store: r.Store}
-		if err := service.RemoveAllow(ctx, req.ClaimID, "uid:0"); err != nil {
+		release, err := r.acquireClaimPublicationLock(ctx)
+		if err != nil {
 			return nil, err
 		}
-		_, err := r.RefreshClaimSets(ctx)
-		return nil, err
+		defer release()
+		return nil, r.removeClaimAndPublishLocked(ctx, req.ClaimID, "allow")
 	default:
 		return nil, fmt.Errorf("unknown control operation %q", req.Op)
 	}
+}
+
+func (r *Runtime) addClaimAndPublishLocked(ctx context.Context, kind string, add func() (int64, error)) (any, error) {
+	id, err := add()
+	if err != nil {
+		return nil, err
+	}
+	if _, publishErr := r.refreshClaimSetsLocked(ctx); publishErr != nil {
+		recoveryCtx, cancel := postMutationRecoveryContext(ctx)
+		defer cancel()
+		service := blocks.Service{Store: r.Store}
+		var compensateErr error
+		if kind == "allow" {
+			compensateErr = service.RemoveAllow(recoveryCtx, id, "uid:0-compensation")
+		} else {
+			compensateErr = service.RemoveBlock(recoveryCtx, id, "uid:0-compensation")
+		}
+		if compensateErr != nil {
+			return nil, errors.Join(fmt.Errorf("claim %d publication failed and the durable add could not be reverted: %w", id, publishErr), compensateErr)
+		}
+		_, restoreErr := r.refreshClaimSetsLocked(recoveryCtx)
+		if restoreErr != nil {
+			return nil, errors.Join(fmt.Errorf("claim %d publication failed; durable add was reverted", id), publishErr, fmt.Errorf("restore prior runtime sets: %w", restoreErr))
+		}
+		return nil, fmt.Errorf("claim %d publication failed and was reverted: %w", id, publishErr)
+	}
+	return map[string]any{"claim_id": id}, nil
+}
+
+func (r *Runtime) acquireClaimPublicationLock(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("wait for claim publication lock: %w", err)
+	}
+	for !r.claimMu.TryLock() {
+		select {
+		case <-ctx.Done():
+			return nil, fmt.Errorf("wait for claim publication lock: %w", ctx.Err())
+		case <-time.After(10 * time.Millisecond):
+		}
+	}
+	if err := ctx.Err(); err != nil {
+		r.claimMu.Unlock()
+		return nil, fmt.Errorf("wait for claim publication lock: %w", err)
+	}
+	releaseProcess, err := state.AcquireClaimPublicationLock(ctx, r.Store.Dir)
+	if err != nil {
+		r.claimMu.Unlock()
+		return nil, err
+	}
+	return func() {
+		releaseProcess()
+		r.claimMu.Unlock()
+	}, nil
+}
+
+func (r *Runtime) removeClaimAndPublishLocked(ctx context.Context, id int64, kind string) error {
+	claim, err := r.operatorClaimLocked(ctx, id, kind)
+	if err != nil {
+		return err
+	}
+	service := blocks.Service{Store: r.Store}
+	if kind == "allow" {
+		err = service.RemoveAllow(ctx, id, "uid:0")
+	} else {
+		err = service.RemoveBlock(ctx, id, "uid:0")
+	}
+	if err != nil {
+		return err
+	}
+	if _, publishErr := r.refreshClaimSetsLocked(ctx); publishErr != nil {
+		recoveryCtx, cancel := postMutationRecoveryContext(ctx)
+		defer cancel()
+		if restoreErr := r.Store.RestoreClaim(recoveryCtx, claim, "uid:0-compensation"); restoreErr != nil {
+			return errors.Join(fmt.Errorf("claim %d removal publication failed and the durable claim could not be restored: %w", id, publishErr), restoreErr)
+		}
+		_, restoreErr := r.refreshClaimSetsLocked(recoveryCtx)
+		if restoreErr != nil {
+			return errors.Join(fmt.Errorf("claim %d removal publication failed; durable claim was restored", id), publishErr, fmt.Errorf("restore prior runtime sets: %w", restoreErr))
+		}
+		return fmt.Errorf("claim %d removal publication failed and was reverted: %w", id, publishErr)
+	}
+	return nil
+}
+
+func (r *Runtime) operatorClaimLocked(ctx context.Context, id int64, kind string) (state.Claim, error) {
+	claims, err := r.Store.Claims(ctx, time.Now().UTC())
+	if err != nil {
+		return state.Claim{}, err
+	}
+	for _, claim := range claims {
+		if claim.ID != id {
+			continue
+		}
+		isAllow := claim.Source == "allow" || strings.HasPrefix(claim.Source, "allow/")
+		if kind == "allow" && !isAllow || kind == "block" && claim.Source != "manual" {
+			return state.Claim{}, fmt.Errorf("claim %d cannot be removed as %s", id, kind)
+		}
+		return claim, nil
+	}
+	return state.Claim{}, sql.ErrNoRows
 }
 
 func claimExpiry(seconds int64) (*time.Time, error) {
@@ -395,7 +631,109 @@ func claimExpiry(seconds int64) (*time.Time, error) {
 }
 
 func (r *Runtime) RollbackExpired(ctx context.Context) (bool, error) {
-	return r.Manager.RollbackExpired(ctx)
+	// The systemd guard synchronously starts the timer service while the outer
+	// safe apply holds the claim lock. A no-pending (or unexpired) check must
+	// therefore complete without that lock; any actionable result is rechecked
+	// after acquisition below.
+	pending, err := r.Store.Pending(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if pending.RollbackDeadline == nil || time.Now().UTC().Before(*pending.RollbackDeadline) {
+		return false, nil
+	}
+	release, err := r.acquireClaimPublicationLock(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	pending, err = r.Store.Pending(ctx)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	if pending.RollbackDeadline == nil || time.Now().UTC().Before(*pending.RollbackDeadline) {
+		return false, nil
+	}
+	if _, err := r.Store.PrepareClaimPublication(ctx); err != nil {
+		return false, fmt.Errorf("mark runtime claims pending before expired rollback: %w", err)
+	}
+	lockedCtx := context.WithValue(ctx, claimPublicationLockContextKey{}, true)
+	rolledBack, rollbackErr := r.Manager.RollbackExpired(lockedCtx)
+	if rollbackErr != nil || !rolledBack {
+		return rolledBack, rollbackErr
+	}
+	recoveryCtx, cancel := postMutationRecoveryContext(ctx)
+	defer cancel()
+	_, refreshErr := r.refreshClaimSetsLocked(recoveryCtx)
+	return true, refreshErr
+}
+
+func (r *Runtime) Rollback(ctx context.Context, generation uint64) error {
+	release, err := r.acquireClaimPublicationLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if _, err := r.Store.PrepareClaimPublication(ctx); err != nil {
+		return fmt.Errorf("mark runtime claims pending before rollback: %w", err)
+	}
+	lockedCtx := context.WithValue(ctx, claimPublicationLockContextKey{}, true)
+	rollbackErr := r.Manager.Rollback(lockedCtx, generation)
+	if rollbackErr != nil {
+		return rollbackErr
+	}
+	recoveryCtx, cancel := postMutationRecoveryContext(ctx)
+	defer cancel()
+	_, refreshErr := r.refreshClaimSetsLocked(recoveryCtx)
+	return refreshErr
+}
+
+func (r *Runtime) Commit(ctx context.Context, generation uint64) error {
+	release, err := r.acquireClaimPublicationLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	if _, err := r.Store.PrepareClaimPublication(ctx); err != nil {
+		return fmt.Errorf("mark runtime claims pending before commit: %w", err)
+	}
+	lockedCtx := context.WithValue(ctx, claimPublicationLockContextKey{}, true)
+	if err := r.Manager.Commit(lockedCtx, generation); err != nil {
+		return err
+	}
+	recoveryCtx, cancel := postMutationRecoveryContext(ctx)
+	defer cancel()
+	_, err = r.refreshClaimSetsLocked(recoveryCtx)
+	return err
+}
+
+func (r *Runtime) Reconcile(ctx context.Context, repair bool) (reconcile.Drift, error) {
+	if !repair {
+		return r.Manager.Reconcile(ctx, false)
+	}
+	release, err := r.acquireClaimPublicationLock(ctx)
+	if err != nil {
+		return reconcile.Drift{}, err
+	}
+	defer release()
+	if _, err := r.Store.PrepareClaimPublication(ctx); err != nil {
+		return reconcile.Drift{}, fmt.Errorf("mark runtime claims pending before reconciliation: %w", err)
+	}
+	lockedCtx := context.WithValue(ctx, claimPublicationLockContextKey{}, true)
+	drift, reconcileErr := r.Manager.Reconcile(lockedCtx, true)
+	if reconcileErr != nil {
+		return drift, reconcileErr
+	}
+	recoveryCtx, cancel := postMutationRecoveryContext(ctx)
+	defer cancel()
+	_, refreshErr := r.refreshClaimSetsLocked(recoveryCtx)
+	return drift, refreshErr
 }
 
 func (r *Runtime) RefreshEndpoints(ctx context.Context) (bool, error) {
@@ -458,10 +796,37 @@ func (r *Runtime) RefreshWireGuardHealth(ctx context.Context) error {
 }
 
 func (r *Runtime) RefreshClaimSets(ctx context.Context) (bool, error) {
+	release, err := r.acquireClaimPublicationLock(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	return r.refreshClaimSetsLocked(ctx)
+}
+
+func (r *Runtime) refreshClaimSetsLocked(ctx context.Context) (bool, error) {
 	if _, err := r.Store.PurgeExpiredClaims(ctx, time.Now().UTC()); err != nil {
 		return false, err
 	}
-	claims, err := r.Store.Claims(ctx, time.Now().UTC())
+	revision, err := r.Store.PrepareClaimPublication(ctx)
+	if err != nil {
+		return false, fmt.Errorf("prepare runtime claim publication: %w", err)
+	}
+	claims, publication, err := r.Store.ClaimsWithPublication(ctx, time.Now().UTC())
+	if err != nil {
+		return false, err
+	}
+	if publication.DesiredRevision != revision {
+		return false, errors.New("runtime claims changed before publication")
+	}
+	var protected []string
+	if len(threatFeedClaimAddresses(claims)) > 0 {
+		protected, err = r.threatFeedProtectedPrefixes(ctx)
+		if err != nil {
+			return false, fmt.Errorf("resolve threat-feed protected prefixes: %w", err)
+		}
+	}
+	sets, err := r.claimSets(claims, time.Now().UTC(), protected)
 	if err != nil {
 		return false, err
 	}
@@ -472,12 +837,13 @@ func (r *Runtime) RefreshClaimSets(ctx context.Context) (bool, error) {
 	if !existing["inet/"+nft.FilterTable] {
 		return false, nil
 	}
-	sets, err := r.claimSets(claims, time.Now().UTC())
-	if err != nil {
-		return false, err
-	}
 	if err := r.Backend.ReplaceClaimSets(ctx, sets.blockedV4, sets.blockedV6, sets.trustedV4, sets.trustedV6); err != nil {
 		return false, err
+	}
+	stateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	if err := r.Store.MarkClaimsPublished(stateCtx, revision, len(claims)); err != nil {
+		return false, fmt.Errorf("record runtime claim publication: %w", err)
 	}
 	return true, nil
 }
@@ -485,33 +851,57 @@ func (r *Runtime) RefreshClaimSets(ctx context.Context) (bool, error) {
 func (r *Runtime) RefreshContainerSets(ctx context.Context) (bool, error) {
 	v4, v6, err := r.containerNets(ctx)
 	if err != nil {
-		if r.Config.Integrations.DockerEnabled {
-			_ = r.Store.SetIntegrationState(ctx, "docker", "degraded", 0, false)
-		}
-		return false, err
+		return r.failContainerRefresh(ctx, 0, err)
 	}
 	existing, err := r.Backend.ExistingOwned(ctx)
 	if err != nil {
-		return false, err
+		return r.failContainerRefresh(ctx, len(v4)+len(v6), err)
 	}
 	if !existing["inet/"+nft.FilterTable] || !existing["ip/"+nft.NATTable] {
 		return false, nil
 	}
 	if err := r.Backend.ReplaceContainerNetworks(ctx, v4, v6); err != nil {
-		return false, err
+		return r.failContainerRefresh(ctx, len(v4)+len(v6), err)
 	}
 	if r.Config.Integrations.DockerEnabled {
-		_ = r.Store.SetIntegrationState(ctx, "docker", "healthy", len(v4)+len(v6), true)
+		if err := r.setDockerIntegrationState(ctx, "healthy", len(v4)+len(v6), true); err != nil {
+			return false, fmt.Errorf("record Docker integration health: %w", err)
+		}
 	}
 	return true, nil
+}
+
+func (r *Runtime) failContainerRefresh(ctx context.Context, count int, cause error) (bool, error) {
+	if r.Config.Integrations.DockerEnabled {
+		if stateErr := r.setDockerIntegrationState(ctx, "degraded", count, false); stateErr != nil {
+			return false, errors.Join(cause, fmt.Errorf("record Docker integration degradation: %w", stateErr))
+		}
+	}
+	return false, cause
+}
+
+func (r *Runtime) setDockerIntegrationState(ctx context.Context, status string, count int, success bool) error {
+	return r.setIntegrationStateDurable(ctx, "docker", status, count, success)
+}
+
+func (r *Runtime) setIntegrationStateDurable(ctx context.Context, name, status string, count int, success bool) error {
+	stateCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Second)
+	defer cancel()
+	return r.Store.SetIntegrationState(stateCtx, name, status, count, success)
 }
 
 // RestoreRuntimeState repopulates every mutable set after a generation
 // restore. Callers install emergency deny if any component cannot be restored.
 func (r *Runtime) RestoreRuntimeState(ctx context.Context) error {
 	var failures []error
-	if _, err := r.RefreshClaimSets(ctx); err != nil {
-		failures = append(failures, fmt.Errorf("claims: %w", err))
+	var claimErr error
+	if locked, _ := ctx.Value(claimPublicationLockContextKey{}).(bool); locked {
+		_, claimErr = r.refreshClaimSetsLocked(ctx)
+	} else {
+		_, claimErr = r.RefreshClaimSets(ctx)
+	}
+	if claimErr != nil {
+		failures = append(failures, fmt.Errorf("claims: %w", claimErr))
 	}
 	if _, err := r.RefreshEndpoints(ctx); err != nil {
 		failures = append(failures, fmt.Errorf("WireGuard endpoints: %w", err))
@@ -523,92 +913,240 @@ func (r *Runtime) RestoreRuntimeState(ctx context.Context) error {
 }
 
 func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
+	candidates := r.prepareIntegrationRefreshes(ctx)
+	release, err := r.acquireClaimPublicationLock(ctx)
+	if err != nil {
+		return err
+	}
+	defer release()
+	return r.refreshIntegrationsLocked(ctx, candidates)
+}
+
+func (r *Runtime) prepareIntegrationRefreshes(ctx context.Context) []integrationRefreshCandidate {
+	var candidates []integrationRefreshCandidate
+	var protected []string
+	var protectedErr error
+	protectedLoaded := false
+	if r.Config.Integrations.ThreatFeed {
+		for _, feedConfig := range r.Config.ThreatFeeds {
+			name := "threatfeed/" + feedConfig.Name
+			if !r.integrationDue(ctx, name, feedConfig.RefreshSeconds) {
+				continue
+			}
+			candidate := integrationRefreshCandidate{
+				name: name, displayName: feedConfig.Name, kind: "threatfeed",
+				reason: "threat intelligence", refreshSeconds: feedConfig.RefreshSeconds,
+			}
+			max := feedConfig.MaxEntries
+			if max == 0 {
+				max = 10000
+			}
+			maxBytes := feedConfig.MaxBytes
+			if maxBytes == 0 {
+				maxBytes = 8 << 20
+			}
+			min := feedConfig.MinEntries
+			if min == 0 {
+				min = 1
+			}
+			if !protectedLoaded {
+				protected, protectedErr = r.threatFeedProtectedPrefixes(ctx)
+				protectedLoaded = true
+			}
+			candidate.protected = append([]string(nil), protected...)
+			if protectedErr != nil {
+				candidate.err = fmt.Errorf("resolve protected prefixes: %w", protectedErr)
+			} else {
+				feed := threatintel.Feed{URL: feedConfig.URL, MaxEntries: max, MaxBytes: maxBytes}
+				candidate.addresses, candidate.err = r.fetchThreatFeed(ctx, feed)
+				if candidate.err == nil && len(candidate.addresses) < min {
+					candidate.err = fmt.Errorf("entry sanity threshold not met: got %d, require %d", len(candidate.addresses), min)
+				}
+			}
+			candidates = append(candidates, candidate)
+		}
+	}
+	if r.Config.Integrations.GeoIP {
+		for _, geoConfig := range r.Config.GeoSets {
+			name := "geo/" + geoConfig.Name
+			if !r.integrationDue(ctx, name, geoConfig.RefreshSeconds) {
+				continue
+			}
+			candidate := integrationRefreshCandidate{
+				name: name, displayName: geoConfig.Name, kind: "geo",
+				reason: "GeoIP " + geoConfig.Country, refreshSeconds: geoConfig.RefreshSeconds,
+			}
+			max := geoConfig.MaxEntries
+			if max == 0 {
+				max = 100000
+			}
+			min := geoConfig.MinEntries
+			if min == 0 {
+				min = 1
+			}
+			candidate.addresses, candidate.err = geo.LoadCIDRs(geoConfig.CIDRFile, max)
+			if candidate.err == nil && len(candidate.addresses) < min {
+				candidate.err = fmt.Errorf("entry sanity threshold not met: got %d, require %d", len(candidate.addresses), min)
+			}
+			candidates = append(candidates, candidate)
+		}
+	}
+	return candidates
+}
+
+func (r *Runtime) refreshIntegrationsLocked(ctx context.Context, candidates []integrationRefreshCandidate) error {
 	var failures []error
-	type refreshedIntegration struct {
-		name  string
-		count int
-	}
 	var refreshed []refreshedIntegration
-	for _, feedConfig := range r.Config.ThreatFeeds {
-		name := "threatfeed/" + feedConfig.Name
-		if !r.integrationDue(ctx, name, feedConfig.RefreshSeconds) {
+	for _, candidate := range candidates {
+		if !r.integrationDue(ctx, candidate.name, candidate.refreshSeconds) {
 			continue
 		}
-		max := feedConfig.MaxEntries
-		if max == 0 {
-			max = 10000
+		candidateErr := candidate.err
+		if candidateErr == nil && candidate.kind == "threatfeed" {
+			candidateErr = r.validateThreatFeedReplacement(ctx, candidate.name, candidate.addresses, candidate.protected)
 		}
-		maxBytes := feedConfig.MaxBytes
-		if maxBytes == 0 {
-			maxBytes = 8 << 20
+		if candidateErr != nil {
+			oldCount, _ := r.Store.SourceClaimCount(ctx, candidate.name)
+			event := "geoip_refresh_failed"
+			if candidate.kind == "threatfeed" {
+				event = "threat_feed_failed"
+			}
+			_ = r.Store.Audit(ctx, "integration", event, fmt.Sprintf("name=%s", candidate.displayName))
+			failures = append(failures, fmt.Errorf("%s: %w", candidate.name, candidateErr))
+			if stateErr := r.setIntegrationStateDurable(ctx, candidate.name, "degraded", oldCount, false); stateErr != nil {
+				failures = append(failures, fmt.Errorf("%s: record degraded integration state: %w", candidate.name, stateErr))
+			}
+			continue
 		}
-		min := feedConfig.MinEntries
-		if min == 0 {
-			min = 1
-		}
-		addresses, err := (threatintel.Feed{URL: feedConfig.URL, MaxEntries: max, MaxBytes: maxBytes}).Fetch(ctx)
-		if err == nil && len(addresses) < min {
-			err = fmt.Errorf("entry sanity threshold not met: got %d, require %d", len(addresses), min)
-		}
+		prior, err := r.sourceClaimAddresses(ctx, candidate.name)
 		if err != nil {
-			oldCount, _ := r.Store.SourceClaimCount(ctx, name)
-			_ = r.Store.SetIntegrationState(ctx, name, "degraded", oldCount, false)
-			_ = r.Store.Audit(ctx, "integration", "threat_feed_failed", fmt.Sprintf("name=%s", feedConfig.Name))
-			failures = append(failures, fmt.Errorf("%s: %w", name, err))
+			oldCount, _ := r.Store.SourceClaimCount(ctx, candidate.name)
+			failures = append(failures, fmt.Errorf("%s: snapshot prior claims: %w", candidate.name, err))
+			if stateErr := r.setIntegrationStateDurable(ctx, candidate.name, "degraded", oldCount, false); stateErr != nil {
+				failures = append(failures, fmt.Errorf("%s: record degraded integration state: %w", candidate.name, stateErr))
+			}
 			continue
 		}
-		count, err := r.Store.ReplaceSourceClaimsBounded(ctx, name, "threat intelligence", "integration", addresses, r.Config.Runtime.MaxBlockClaims)
+		count, err := r.Store.ReplaceSourceClaimsBounded(ctx, candidate.name, candidate.reason, "integration", candidate.addresses, r.Config.Runtime.MaxBlockClaims)
 		if err != nil {
-			oldCount, _ := r.Store.SourceClaimCount(ctx, name)
-			_ = r.Store.SetIntegrationState(ctx, name, "degraded", oldCount, false)
-			failures = append(failures, fmt.Errorf("%s: %w", name, err))
+			oldCount, _ := r.Store.SourceClaimCount(ctx, candidate.name)
+			failures = append(failures, fmt.Errorf("%s: %w", candidate.name, err))
+			if stateErr := r.setIntegrationStateDurable(ctx, candidate.name, "degraded", oldCount, false); stateErr != nil {
+				failures = append(failures, fmt.Errorf("%s: record degraded integration state: %w", candidate.name, stateErr))
+			}
 			continue
 		}
-		refreshed = append(refreshed, refreshedIntegration{name: name, count: count})
-	}
-	for _, geoConfig := range r.Config.GeoSets {
-		name := "geo/" + geoConfig.Name
-		if !r.integrationDue(ctx, name, geoConfig.RefreshSeconds) {
-			continue
-		}
-		max := geoConfig.MaxEntries
-		if max == 0 {
-			max = 100000
-		}
-		min := geoConfig.MinEntries
-		if min == 0 {
-			min = 1
-		}
-		addresses, err := geo.LoadCIDRs(geoConfig.CIDRFile, max)
-		if err == nil && len(addresses) < min {
-			err = fmt.Errorf("entry sanity threshold not met: got %d, require %d", len(addresses), min)
-		}
-		if err != nil {
-			oldCount, _ := r.Store.SourceClaimCount(ctx, name)
-			_ = r.Store.SetIntegrationState(ctx, name, "degraded", oldCount, false)
-			_ = r.Store.Audit(ctx, "integration", "geoip_refresh_failed", fmt.Sprintf("name=%s", geoConfig.Name))
-			failures = append(failures, fmt.Errorf("%s: %w", name, err))
-			continue
-		}
-		count, err := r.Store.ReplaceSourceClaimsBounded(ctx, name, "GeoIP "+geoConfig.Country, "integration", addresses, r.Config.Runtime.MaxBlockClaims)
-		if err != nil {
-			oldCount, _ := r.Store.SourceClaimCount(ctx, name)
-			_ = r.Store.SetIntegrationState(ctx, name, "degraded", oldCount, false)
-			failures = append(failures, fmt.Errorf("%s: %w", name, err))
-			continue
-		}
-		refreshed = append(refreshed, refreshedIntegration{name: name, count: count})
+		refreshed = append(refreshed, refreshedIntegration{name: candidate.name, reason: candidate.reason, count: count, prior: prior})
 	}
 	if len(refreshed) > 0 {
-		if _, err := r.RefreshClaimSets(ctx); err != nil {
-			for _, integration := range refreshed {
-				_ = r.Store.SetIntegrationState(ctx, integration.name, "degraded", integration.count, false)
+		if _, err := r.refreshClaimSetsLocked(ctx); err != nil {
+			failures = append(failures, fmt.Errorf("publish refreshed integration claims: %w", err))
+			recoveryCtx, cancel := postMutationRecoveryContext(ctx)
+			defer cancel()
+			rollbackErr := r.restoreIntegrationClaims(recoveryCtx, refreshed)
+			if _, liveErr := r.refreshClaimSetsLocked(recoveryCtx); liveErr != nil {
+				rollbackErr = errors.Join(rollbackErr, fmt.Errorf("restore current durable claim sets: %w", liveErr))
 			}
-			failures = append(failures, err)
+			for _, integration := range refreshed {
+				count := len(integration.prior)
+				if rollbackErr != nil {
+					count, _ = r.Store.SourceClaimCount(recoveryCtx, integration.name)
+				}
+				if stateErr := r.setIntegrationStateDurable(recoveryCtx, integration.name, "degraded", count, false); stateErr != nil {
+					failures = append(failures, fmt.Errorf("%s: record degraded integration state: %w", integration.name, stateErr))
+				}
+			}
+			if rollbackErr != nil {
+				failures = append(failures, fmt.Errorf("roll back integration claims: %w", rollbackErr))
+			} else {
+				_ = r.Store.Audit(ctx, "integration", "integration_refresh_rolled_back", fmt.Sprintf("sources=%d", len(refreshed)))
+			}
 		} else {
 			for _, integration := range refreshed {
-				_ = r.Store.SetIntegrationState(ctx, integration.name, "healthy", integration.count, true)
+				if stateErr := r.setIntegrationStateDurable(ctx, integration.name, "healthy", integration.count, true); stateErr != nil {
+					failures = append(failures, fmt.Errorf("%s: record healthy integration state: %w", integration.name, stateErr))
+				}
 			}
+		}
+	}
+	return errors.Join(failures...)
+}
+
+func (r *Runtime) fetchThreatFeed(ctx context.Context, feed threatintel.Feed) ([]string, error) {
+	if r.threatFeedFetcher != nil {
+		return r.threatFeedFetcher(ctx, feed)
+	}
+	return feed.Fetch(ctx)
+}
+
+func (r *Runtime) configuredThreatFeedProtectedPrefixes() []string {
+	var protected []string
+	for _, zone := range r.Config.Zones {
+		protected = append(protected, zone.Networks...)
+	}
+	for _, configured := range r.Config.Interfaces {
+		protected = append(protected, configured.CIDRs...)
+	}
+	protected = append(protected, r.Config.WireGuard.BootstrapIPs...)
+	protected = append(protected, r.Config.WireGuard.BootstrapIPsV6...)
+	for _, raw := range append(append([]string(nil), r.Config.WireGuard.BootstrapHosts...), r.Config.WireGuard.EndpointHost) {
+		if address, err := netip.ParseAddr(raw); err == nil {
+			protected = append(protected, netip.PrefixFrom(address, address.BitLen()).String())
+		}
+	}
+	return unique(protected)
+}
+
+func (r *Runtime) threatFeedProtectedPrefixes(ctx context.Context) ([]string, error) {
+	protected := r.configuredThreatFeedProtectedPrefixes()
+	v4, v6, _, err := r.bootstrapEndpoints(ctx)
+	if err != nil {
+		return nil, err
+	}
+	protected = append(protected, v4...)
+	protected = append(protected, v6...)
+	return unique(protected), nil
+}
+
+func (r *Runtime) sourceClaimAddresses(ctx context.Context, source string) ([]string, error) {
+	claims, err := r.Store.Claims(ctx, time.Now().UTC())
+	if err != nil {
+		return nil, err
+	}
+	var addresses []string
+	for _, claim := range claims {
+		if claim.Source == source {
+			addresses = append(addresses, claim.Address)
+		}
+	}
+	return unique(addresses), nil
+}
+
+func (r *Runtime) validateThreatFeedReplacement(ctx context.Context, source string, candidate, protected []string) error {
+	claims, err := r.Store.Claims(ctx, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	combined := append([]string(nil), candidate...)
+	for _, claim := range claims {
+		if claim.Source != source && strings.HasPrefix(claim.Source, "threatfeed/") {
+			combined = append(combined, claim.Address)
+		}
+	}
+	return threatintel.Validate(unique(combined), protected)
+}
+
+func (r *Runtime) restoreIntegrationClaims(ctx context.Context, refreshed []refreshedIntegration) error {
+	// Shrinking sources first prevents a transient total above the configured
+	// claim limit while returning several integrations to their prior sizes.
+	ordered := append([]refreshedIntegration(nil), refreshed...)
+	sort.SliceStable(ordered, func(i, j int) bool {
+		return len(ordered[i].prior)-ordered[i].count < len(ordered[j].prior)-ordered[j].count
+	})
+	var failures []error
+	for _, integration := range ordered {
+		if _, err := r.Store.ReplaceSourceClaimsBounded(ctx, integration.name, integration.reason, "integration-rollback", integration.prior, r.Config.Runtime.MaxBlockClaims); err != nil {
+			failures = append(failures, fmt.Errorf("%s: %w", integration.name, err))
 		}
 	}
 	return errors.Join(failures...)

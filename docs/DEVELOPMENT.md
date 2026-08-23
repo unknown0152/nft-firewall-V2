@@ -24,7 +24,7 @@ make vet
 make static
 make vuln
 make security
-shellcheck scripts/*.sh tests/acceptance/*.sh tests/chaos/*.sh tests/namespaces/*.sh packaging/deb/*inst packaging/deb/prerm
+shellcheck scripts/*.sh tests/acceptance/*.sh tests/chaos/*.sh tests/namespaces/*.sh tests/packaging/*.sh packaging/deb/*inst packaging/deb/prerm
 ```
 
 The audited analyzer versions are staticcheck v0.7.0, govulncheck v1.7.0,
@@ -37,9 +37,10 @@ paths, and socket purpose are reviewed in `SECURITY_AUDIT.md`.
 
 ```bash
 make build
-make release VERSION=2.0.0 COMMIT=$(git rev-parse HEAD) \
+make release VERSION=2.0.1 COMMIT=$(git rev-parse HEAD) \
   BUILD_DATE=$(git show -s --format=%cI HEAD)
-make deb VERSION=2.0.0
+make deb VERSION=2.0.1
+./tests/packaging/systemd_preflight.sh amd64
 ```
 
 Release builds set `CGO_ENABLED=0`, `GOOS=linux`, use `-trimpath`, omit the Go
@@ -49,8 +50,23 @@ arm64 are produced. `SOURCE_DATE_EPOCH` is honored by final package tooling.
 Final packaging requires a clean tree and matching `v<version>` tag:
 
 ```bash
-./scripts/package-release.sh 2.0.0
+GOTOOLCHAIN=go1.25.13 ./scripts/package-release.sh 2.0.1
 ```
+
+The release script refuses any Go toolchain other than the pinned Go 1.25.13
+and records that toolchain in the manifest and unsigned in-toto provenance
+statement. SHA256 manifests provide integrity; release signing requires an
+operator-controlled signing identity and is intentionally not fabricated by
+the build.
+
+The script builds from an immutable export of the captured Git commit, verifies
+the complete artifact set in a temporary directory, and atomically publishes it
+as `../releases/nft-firewall-v2-<version>/`. It serializes release builds and
+refuses to replace an existing version directory.
+
+For a two-build reproducibility check, set `NFTFW_RELEASE_PARENT` to a different
+empty absolute directory for each invocation, then compare the two published
+version directories. The output-parent path is not embedded in the artifacts.
 
 `--allow-untagged` exists only to exercise packaging before release. It marks
 the embedded manifest `unreleased`.
@@ -76,6 +92,9 @@ command or state monoliths.
 `.github/workflows/ci.yml` runs formatting, module verification, tidy diff,
 unit/race/vet, staticcheck, govulncheck, gosec, ShellCheck, static cross-builds,
 Debian package inspection, and artifact upload.
+
+Third-party actions are pinned to full reviewed commit IDs. Self-hosted runners
+must be GitHub Actions Runner 2.327.1 or newer for the pinned setup-go runtime.
 
 The namespace suite needs a self-hosted Linux runner labeled
 `nftfw-privileged` and repository variable

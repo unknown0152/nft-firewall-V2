@@ -37,6 +37,17 @@ type Result struct {
 	Committed  bool
 }
 
+const mutationRecoveryTimeout = 20 * time.Second
+
+const (
+	runtimeRestoreAttemptTimeout = 12 * time.Second
+	emergencyDenyAttemptTimeout  = 8 * time.Second
+)
+
+func mutationRecoveryContext(ctx context.Context) (context.Context, context.CancelFunc) {
+	return context.WithTimeout(context.WithoutCancel(ctx), mutationRecoveryTimeout)
+}
+
 func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bool) (Result, error) {
 	if m == nil || m.Backend == nil || m.Store == nil {
 		return Result{}, errors.New("reconcile manager is not configured")
@@ -54,7 +65,7 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 			return Result{}, fmt.Errorf("safe apply refused: %w", err)
 		}
 	}
-	release, err := m.acquireProcessLock()
+	release, err := m.acquireProcessLock(ctx)
 	if err != nil {
 		return Result{}, err
 	}
@@ -73,6 +84,8 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 	var prevID *uint64
 	if previous != nil {
 		prevID = &previous.ID
+	} else if err := m.Backend.ProtectFirstUse(ctx); err != nil {
+		return Result{}, fmt.Errorf("first-use ownership check: %w", err)
 	}
 	var deadline *time.Time
 	if safe {
@@ -87,23 +100,38 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 		return Result{}, fmt.Errorf("persist pending generation: %w", err)
 	}
 	if err := m.Backend.Apply(ctx, artifact.Script); err != nil {
-		_ = m.Store.MarkRolledBack(ctx, artifact.Generation)
 		_ = m.Store.Audit(ctx, "system", "generation_apply_failed", fmt.Sprintf("generation=%d error=%v", artifact.Generation, err))
+		if nft.MutationAttempted(err) {
+			recoveryCtx, cancel := mutationRecoveryContext(ctx)
+			defer cancel()
+			cause := fmt.Errorf("apply candidate generation %d: %w", artifact.Generation, err)
+			if previous == nil {
+				return Result{}, m.recoverFirstApplyExecutionFailure(recoveryCtx, artifact.Generation, cause)
+			}
+			return Result{}, m.recoverPostApplyFailure(recoveryCtx, artifact.Generation, previous, cause)
+		}
+		if markErr := m.Store.MarkRolledBack(ctx, artifact.Generation); markErr != nil {
+			return Result{}, errors.Join(err, fmt.Errorf("record non-mutating apply rejection: %w", markErr))
+		}
 		return Result{}, err
 	}
 	if err := m.Store.MarkApplied(ctx, artifact.Generation); err != nil {
-		_ = m.restore(ctx, previous)
-		_ = m.Store.MarkRolledBack(ctx, artifact.Generation)
-		return Result{}, err
+		recoveryCtx, cancel := mutationRecoveryContext(ctx)
+		defer cancel()
+		cause := fmt.Errorf("mark generation applied: %w", err)
+		return Result{}, m.recoverPostApplyFailure(recoveryCtx, artifact.Generation, previous, cause)
 	}
 	if err := m.recordFingerprint(ctx, artifact.Generation); err != nil {
-		_ = m.restore(ctx, previous)
-		_ = m.Store.MarkRolledBack(ctx, artifact.Generation)
-		return Result{}, fmt.Errorf("record applied nftables fingerprint: %w", err)
+		recoveryCtx, cancel := mutationRecoveryContext(ctx)
+		defer cancel()
+		cause := fmt.Errorf("record applied nftables fingerprint: %w", err)
+		return Result{}, m.recoverPostApplyFailure(recoveryCtx, artifact.Generation, previous, cause)
 	}
 	if m.HealthCheck != nil {
 		if err := m.HealthCheck(ctx); err != nil {
-			rollbackErr := m.rollbackLocked(ctx, artifact.Generation)
+			recoveryCtx, cancel := mutationRecoveryContext(ctx)
+			defer cancel()
+			rollbackErr := m.rollbackLocked(recoveryCtx, artifact.Generation)
 			_ = m.Store.Audit(ctx, "system", "generation_health_failed", fmt.Sprintf("generation=%d", artifact.Generation))
 			if rollbackErr != nil {
 				return Result{}, fmt.Errorf("candidate health check failed: %w; rollback also failed: %v", err, rollbackErr)
@@ -119,6 +147,35 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 	}
 	_ = m.Store.Audit(ctx, "system", "generation_applied", fmt.Sprintf("generation=%d safe=%t", artifact.Generation, safe))
 	return result, nil
+}
+
+// recoverPostApplyFailure handles failures after the candidate reached the
+// kernel. A candidate remains pending/applied until restoration is confirmed;
+// that durable state lets startup reconciliation retry instead of forgetting a
+// possibly active candidate. Rollback errors are joined with the original
+// failure so neither side of the incident is hidden.
+func (m *Manager) recoverPostApplyFailure(ctx context.Context, id uint64, previous *state.Generation, cause error) error {
+	if restoreErr := m.restore(ctx, previous); restoreErr != nil {
+		return errors.Join(cause, fmt.Errorf("restore previous generation: %w", restoreErr))
+	}
+	if markErr := m.Store.MarkRolledBack(ctx, id); markErr != nil {
+		return errors.Join(cause, fmt.Errorf("record confirmed rollback: %w", markErr))
+	}
+	return cause
+}
+
+func (m *Manager) recoverFirstApplyExecutionFailure(ctx context.Context, id uint64, cause error) error {
+	existing, err := m.Backend.ExistingOwned(ctx)
+	if err != nil {
+		return errors.Join(cause, fmt.Errorf("inspect uncertain first apply: %w", err))
+	}
+	if len(existing) > 0 {
+		return errors.Join(cause, errors.New("first apply left unverified product-named nft tables; refusing automatic deletion"))
+	}
+	if err := m.Store.MarkRolledBack(ctx, id); err != nil {
+		return errors.Join(cause, fmt.Errorf("record confirmed empty first apply rollback: %w", err))
+	}
+	return cause
 }
 
 func (m *Manager) restore(ctx context.Context, previous *state.Generation) error {
@@ -142,9 +199,14 @@ func (m *Manager) restoreRuntimeOrDeny(ctx context.Context) error {
 	if m.PostRestore == nil {
 		return nil
 	}
-	if err := m.PostRestore(ctx); err != nil {
+	restoreCtx, restoreCancel := context.WithTimeout(ctx, runtimeRestoreAttemptTimeout)
+	err := m.PostRestore(restoreCtx)
+	restoreCancel()
+	if err != nil {
 		_ = m.Store.Audit(ctx, "system", "runtime_state_restore_failed", "emergency default-deny policy requested")
-		if denyErr := m.Backend.Apply(ctx, nft.EmergencyDenyScript); denyErr != nil {
+		denyCtx, denyCancel := context.WithTimeout(context.WithoutCancel(ctx), emergencyDenyAttemptTimeout)
+		defer denyCancel()
+		if denyErr := m.Backend.Apply(denyCtx, nft.EmergencyDenyScript); denyErr != nil {
 			return fmt.Errorf("restore runtime state: %w; emergency deny also failed: %v", err, denyErr)
 		}
 		return fmt.Errorf("restore runtime state: %w; emergency default-deny policy installed", err)
@@ -166,7 +228,7 @@ func (m *Manager) Commit(ctx context.Context, id uint64) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	release, err := m.acquireProcessLock()
+	release, err := m.acquireProcessLock(ctx)
 	if err != nil {
 		return err
 	}
@@ -186,14 +248,18 @@ func (m *Manager) Commit(ctx context.Context, id uint64) error {
 		now = m.Now
 	}
 	if pending.RollbackDeadline != nil && !now().UTC().Before(*pending.RollbackDeadline) {
-		if rollbackErr := m.rollbackLocked(ctx, id); rollbackErr != nil {
+		recoveryCtx, cancel := mutationRecoveryContext(ctx)
+		defer cancel()
+		if rollbackErr := m.rollbackLocked(recoveryCtx, id); rollbackErr != nil {
 			return fmt.Errorf("generation %d expired and rollback failed: %w", id, rollbackErr)
 		}
 		return fmt.Errorf("generation %d expired and was rolled back", id)
 	}
 	observedHash, err := m.Backend.Fingerprint(ctx)
 	if err != nil || pending.ObservedHash == "" || observedHash != pending.ObservedHash {
-		rollbackErr := m.rollbackLocked(ctx, id)
+		recoveryCtx, cancel := mutationRecoveryContext(ctx)
+		defer cancel()
+		rollbackErr := m.rollbackLocked(recoveryCtx, id)
 		if rollbackErr != nil {
 			return fmt.Errorf("generation %d integrity verification failed and rollback failed: %v", id, rollbackErr)
 		}
@@ -203,7 +269,7 @@ func (m *Manager) Commit(ctx context.Context, id uint64) error {
 }
 
 func (m *Manager) commitLocked(ctx context.Context, id uint64) error {
-	g, err := generationByID(m.Store, id)
+	g, err := generationByID(ctx, m.Store, id)
 	if err != nil {
 		return err
 	}
@@ -212,14 +278,18 @@ func (m *Manager) commitLocked(ctx context.Context, id uint64) error {
 		return fmt.Errorf("read committed generation: %w", err)
 	}
 	if err := m.Store.Commit(ctx, id); err != nil {
-		rollbackErr := m.rollbackLocked(ctx, id)
+		recoveryCtx, cancel := mutationRecoveryContext(ctx)
+		defer cancel()
+		rollbackErr := m.rollbackLocked(recoveryCtx, id)
 		if rollbackErr != nil {
 			return fmt.Errorf("commit generation: %w; rollback also failed: %v", err, rollbackErr)
 		}
 		return fmt.Errorf("commit generation: %w; generation was rolled back", err)
 	}
 	if err := m.Store.PublishActive(script, g.Checksum); err != nil {
-		rollbackErr := m.rollbackLocked(ctx, id)
+		recoveryCtx, cancel := mutationRecoveryContext(ctx)
+		defer cancel()
+		rollbackErr := m.rollbackLocked(recoveryCtx, id)
 		if rollbackErr != nil {
 			return fmt.Errorf("publish active boot snapshot: %w; rollback also failed: %v", err, rollbackErr)
 		}
@@ -234,7 +304,7 @@ func (m *Manager) Rollback(ctx context.Context, id uint64) error {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	release, err := m.acquireProcessLock()
+	release, err := m.acquireProcessLock(ctx)
 	if err != nil {
 		return err
 	}
@@ -243,7 +313,7 @@ func (m *Manager) Rollback(ctx context.Context, id uint64) error {
 }
 
 func (m *Manager) rollbackLocked(ctx context.Context, id uint64) error {
-	g, err := generationByID(m.Store, id)
+	g, err := generationByID(ctx, m.Store, id)
 	if err != nil {
 		return err
 	}
@@ -261,15 +331,25 @@ func (m *Manager) rollbackLocked(ctx context.Context, id uint64) error {
 	} else if g.Status != "pending" && g.Status != "applied" {
 		return fmt.Errorf("generation %d has unsupported rollback status %s", id, g.Status)
 	}
+	firstPendingWithoutEstablishedOwnership := g.PreviousID == nil && g.Status == "pending"
+	if firstPendingWithoutEstablishedOwnership {
+		existing, inspectErr := m.Backend.ExistingOwned(ctx)
+		if inspectErr != nil {
+			return fmt.Errorf("inspect ambiguous first-generation pending ownership: %w", inspectErr)
+		}
+		if len(existing) > 0 {
+			return errors.New("first-generation pending state has unverified product-named nft tables; refusing automatic deletion")
+		}
+	}
 	var previous *state.Generation
 	var previousScript string
-	if g.PreviousID == nil {
+	if g.PreviousID == nil && !firstPendingWithoutEstablishedOwnership {
 		fallbackChecksum := sha256.Sum256([]byte(nft.EmergencyDenyScript))
 		if err := m.Store.PublishActive(nft.EmergencyDenyScript, hex.EncodeToString(fallbackChecksum[:])); err != nil {
 			return fmt.Errorf("publish first-generation rollback fallback: %w", err)
 		}
-	} else {
-		previous, err = generationByID(m.Store, *g.PreviousID)
+	} else if g.PreviousID != nil {
+		previous, err = generationByID(ctx, m.Store, *g.PreviousID)
 		if err != nil {
 			return err
 		}
@@ -283,46 +363,62 @@ func (m *Manager) rollbackLocked(ctx context.Context, id uint64) error {
 			return fmt.Errorf("publish rollback boot snapshot: %w", err)
 		}
 	}
-	if previous == nil {
-		if err := m.Backend.DestroyOwned(ctx); err != nil {
-			m.restoreCommittedAfterFailedRollback(ctx, g)
-			return err
-		}
-	} else if err := m.Backend.Apply(ctx, previousScript); err != nil {
-		m.restoreCommittedAfterFailedRollback(ctx, g)
-		return err
-	}
 	if previous != nil {
-		if err := m.restoreRuntimeOrDeny(ctx); err != nil {
+		if err := m.Backend.Apply(ctx, previousScript); err != nil {
+			if recoveryErr := m.restoreCommittedAfterFailedRollback(ctx, g); recoveryErr != nil {
+				return errors.Join(err, fmt.Errorf("restore committed generation after failed rollback: %w", recoveryErr))
+			}
+			return err
+		}
+	} else if !firstPendingWithoutEstablishedOwnership {
+		if err := m.Backend.DestroyOwned(ctx); err != nil {
+			if recoveryErr := m.restoreCommittedAfterFailedRollback(ctx, g); recoveryErr != nil {
+				return errors.Join(err, fmt.Errorf("restore committed generation after failed rollback: %w", recoveryErr))
+			}
 			return err
 		}
 	}
-	if err := m.Store.MarkRolledBack(ctx, id); err != nil {
-		m.restoreCommittedAfterFailedRollback(ctx, g)
+	recoveryCtx, cancel := mutationRecoveryContext(ctx)
+	defer cancel()
+	if previous != nil {
+		if err := m.restoreRuntimeOrDeny(recoveryCtx); err != nil {
+			return err
+		}
+	}
+	if err := m.Store.MarkRolledBack(recoveryCtx, id); err != nil {
+		if recoveryErr := m.restoreCommittedAfterFailedRollback(recoveryCtx, g); recoveryErr != nil {
+			return errors.Join(err, fmt.Errorf("restore committed generation after rollback bookkeeping failure: %w", recoveryErr))
+		}
 		return err
 	}
 	if previous == nil {
-		// Clear only after the first generation is absent from the kernel and
-		// SQLite records the rollback. Until then, early boot restores the
-		// emergency default-deny snapshot published above.
+		// Clear only after SQLite records the rollback. Applied/committed first
+		// generations published emergency deny before kernel deletion; an
+		// unverified pending first generation never publishes or deletes tables.
 		if err := m.Store.ClearActive(); err != nil {
 			return fmt.Errorf("clear active boot snapshot: %w", err)
 		}
 	}
-	return m.Store.Audit(ctx, "system", "generation_rolled_back", fmt.Sprintf("generation=%d", id))
+	return m.Store.Audit(recoveryCtx, "system", "generation_rolled_back", fmt.Sprintf("generation=%d", id))
 }
 
-func (m *Manager) restoreCommittedAfterFailedRollback(ctx context.Context, g *state.Generation) {
+func (m *Manager) restoreCommittedAfterFailedRollback(ctx context.Context, g *state.Generation) error {
 	if g == nil || g.Status != "committed" {
-		return
+		return nil
 	}
+	recoveryCtx, cancel := mutationRecoveryContext(ctx)
+	defer cancel()
 	script, err := m.Store.ReadScript(g)
 	if err != nil {
-		return
+		return err
 	}
-	_ = m.Store.PublishActive(script, g.Checksum)
-	_ = m.Backend.Apply(ctx, script)
-	_ = m.restoreRuntimeOrDeny(ctx)
+	if err := m.Store.PublishActive(script, g.Checksum); err != nil {
+		return err
+	}
+	if err := m.Backend.Apply(recoveryCtx, script); err != nil {
+		return err
+	}
+	return m.restoreRuntimeOrDeny(recoveryCtx)
 }
 
 func (m *Manager) RollbackExpired(ctx context.Context) (bool, error) {
@@ -331,7 +427,7 @@ func (m *Manager) RollbackExpired(ctx context.Context) (bool, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	release, err := m.acquireProcessLock()
+	release, err := m.acquireProcessLock(ctx)
 	if err != nil {
 		return false, err
 	}
@@ -369,7 +465,7 @@ func (m *Manager) Reconcile(ctx context.Context, repair bool) (Drift, error) {
 	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	release, err := m.acquireProcessLock()
+	release, err := m.acquireProcessLock(ctx)
 	if err != nil {
 		return Drift{}, err
 	}
@@ -450,10 +546,12 @@ func (m *Manager) Reconcile(ctx context.Context, repair bool) (Drift, error) {
 		if err := m.Backend.Apply(ctx, script); err != nil {
 			return d, err
 		}
-		if err := m.recordFingerprint(ctx, g.ID); err != nil {
+		recoveryCtx, cancel := mutationRecoveryContext(ctx)
+		defer cancel()
+		if err := m.recordFingerprint(recoveryCtx, g.ID); err != nil {
 			return d, err
 		}
-		if err := m.restoreRuntimeOrDeny(ctx); err != nil {
+		if err := m.restoreRuntimeOrDeny(recoveryCtx); err != nil {
 			return d, err
 		}
 		d.Repaired = true
@@ -475,7 +573,10 @@ func (m *Manager) requireNoPending(ctx context.Context) error {
 	return nil
 }
 
-func (m *Manager) acquireProcessLock() (func(), error) {
+func (m *Manager) acquireProcessLock(ctx context.Context) (func(), error) {
+	if err := ctx.Err(); err != nil {
+		return nil, fmt.Errorf("wait for controller lock: %w", err)
+	}
 	path := filepath.Join(m.Store.Dir, ".controller.lock")
 	if info, err := os.Lstat(path); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular()) {
 		return nil, errors.New("controller lock path is not a regular file")
@@ -500,9 +601,28 @@ func (m *Manager) acquireProcessLock() (func(), error) {
 		file.Close()
 		return nil, err
 	}
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX); err != nil {
-		file.Close()
-		return nil, fmt.Errorf("lock controller state: %w", err)
+	retry := time.NewTicker(10 * time.Millisecond)
+	defer retry.Stop()
+	for {
+		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
+		if err == nil {
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
+				_ = file.Close()
+				return nil, fmt.Errorf("wait for controller lock: %w", ctxErr)
+			}
+			break
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			file.Close()
+			return nil, fmt.Errorf("lock controller state: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			file.Close()
+			return nil, fmt.Errorf("wait for controller lock: %w", ctx.Err())
+		case <-retry.C:
+		}
 	}
 	return func() {
 		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
@@ -514,8 +634,8 @@ func (m *Manager) expectedGeneration(ctx context.Context) (*state.Generation, er
 	return m.Store.ExpectedGeneration(ctx)
 }
 
-func generationByID(s *state.Store, id uint64) (*state.Generation, error) {
-	row := s.DB.QueryRow("SELECT id,checksum,observed_hash,script_path,status,created_at,rollback_deadline,previous_id FROM generations WHERE id=?", id)
+func generationByID(ctx context.Context, s *state.Store, id uint64) (*state.Generation, error) {
+	row := s.DB.QueryRowContext(ctx, "SELECT id,checksum,observed_hash,script_path,status,created_at,rollback_deadline,previous_id FROM generations WHERE id=?", id)
 	return scan(row)
 }
 func scan(row interface{ Scan(...any) error }) (*state.Generation, error) {

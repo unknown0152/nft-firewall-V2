@@ -7,7 +7,7 @@ operational state database in a report.
 ## Enforced guarantees
 
 - Input and forwarding are default deny. Strict VPN mode also makes output
-  default deny and is the only supported mode in v2.0.0.
+  default deny and is the only supported mode in V2.
 - Internet-bound host and container policy is pinned to the declared
   WireGuard interface.
 - Physical WireGuard bootstrap requires the declared uplink, validated
@@ -36,7 +36,10 @@ operational state database in a report.
 - Child processes receive validated argument arrays. Production Go code does
   not invoke a command through a shell string.
 - Threat-feed downloads require HTTPS, public destinations, bounded redirects,
-  time, bytes, and entries, plus atomic provenance updates.
+  time, bytes, entries, individual prefixes, and cross-feed aggregate
+  coverage. Public topology and resolved WireGuard endpoints are protected,
+  persisted feed claims are revalidated, and failed publication restores
+  prior claims and live sets.
 - The web process is read-only, local by default, emits restrictive headers,
   and has no control or Docker socket.
 

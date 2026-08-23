@@ -87,7 +87,8 @@ journalctl -u nftfw-early -u nftfwd -u nftfw-rollback.service -u nftfw-web
 Status includes active/pending generation, checksum, kill-switch state,
 WireGuard health, endpoint count, claim counts by provenance, drift, database
 health, integration state, and recent audit events. It contains no keys or
-peer identifiers.
+peer identifiers. The machine-readable contract and fail-closed consumer
+rules are defined in `STATUS-API.md`.
 
 The read-only dashboard is available locally at `http://127.0.0.1:8787/`.
 Use SSH port forwarding for remote viewing rather than changing its bind:

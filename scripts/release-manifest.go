@@ -45,6 +45,7 @@ type manifest struct {
 	GitTag          string           `json:"git_tag"`
 	BuildDate       string           `json:"build_date"`
 	SourceDateEpoch int64            `json:"source_date_epoch"`
+	GoVersion       string           `json:"go_version"`
 	Files           []fileRecord     `json:"files"`
 	Artifacts       []artifactRecord `json:"artifacts"`
 }
@@ -62,21 +63,25 @@ func main() {
 	tag := flag.String("tag", "", "Git tag or 'unreleased'")
 	buildDate := flag.String("build-date", "", "RFC3339 build date")
 	epochText := flag.String("source-date-epoch", "", "Unix source epoch")
+	goVersion := flag.String("go-version", "", "exact Go toolchain version")
 	output := flag.String("output", "", "manifest output path")
 	flag.Parse()
 
-	if err := run(*root, *version, *commit, *tag, *buildDate, *epochText, *output); err != nil {
+	if err := run(*root, *version, *commit, *tag, *buildDate, *epochText, *goVersion, *output); err != nil {
 		fmt.Fprintln(os.Stderr, "release manifest:", err)
 		os.Exit(1)
 	}
 }
 
-func run(root, version, commit, tag, buildDate, epochText, output string) error {
-	if root == "" || version == "" || tag == "" || buildDate == "" || epochText == "" || output == "" {
+func run(root, version, commit, tag, buildDate, epochText, goVersion, output string) error {
+	if root == "" || version == "" || tag == "" || buildDate == "" || epochText == "" || goVersion == "" || output == "" {
 		return errors.New("all flags are required")
 	}
 	if !commitPattern.MatchString(commit) {
 		return errors.New("commit must be a full lowercase SHA-1")
+	}
+	if goVersion != "go1.25.13" {
+		return fmt.Errorf("unsupported release toolchain %q", goVersion)
 	}
 	if _, err := time.Parse(time.RFC3339, buildDate); err != nil {
 		return fmt.Errorf("invalid build date: %w", err)
@@ -142,9 +147,9 @@ func run(root, version, commit, tag, buildDate, epochText, output string) error 
 	sort.Slice(artifacts, func(i, j int) bool { return artifacts[i].Path < artifacts[j].Path })
 
 	data := manifest{
-		SchemaVersion: 1, Product: "NFT Firewall V2", Version: version,
+		SchemaVersion: 2, Product: "NFT Firewall V2", Version: version,
 		GitCommit: commit, GitTag: tag, BuildDate: buildDate,
-		SourceDateEpoch: epoch, Files: files, Artifacts: artifacts,
+		SourceDateEpoch: epoch, GoVersion: goVersion, Files: files, Artifacts: artifacts,
 	}
 	parent := filepath.Dir(output)
 	tmp, err := os.CreateTemp(parent, ".release-manifest-*.json")

@@ -1,8 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
+umask 022
 
 root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
-version=${1:-2.0.0}
+version=${1:-2.0.1}
 arch=${2:-}
 if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+([~+][A-Za-z0-9.]+)?$ ]]; then
     echo "Usage: build-deb.sh <version> [amd64|arm64]" >&2
@@ -25,15 +26,16 @@ done
 
 stage=$(mktemp -d /tmp/nftfw-deb.XXXXXX)
 chmod 0755 "$stage"
-output_tmp=""
+output_stage=""
 cleanup() {
     rm -rf -- "$stage"
-    [[ -z "$output_tmp" ]] || rm -f -- "$output_tmp"
+    [[ -z "$output_stage" ]] || rm -rf -- "$output_stage"
 }
 trap cleanup EXIT
 install -d "$stage/DEBIAN" "$stage/usr/lib/nftfw" "$stage/usr/sbin" \
     "$stage/usr/lib/systemd/system" "$stage/usr/share/doc/nft-firewall-v2" "$stage/etc/nftfw"
 sed -e "s/@VERSION@/$version/g" -e "s/@ARCH@/$arch/g" "$root_dir/packaging/deb/control" > "$stage/DEBIAN/control"
+chmod 0644 "$stage/DEBIAN/control"
 install -m 0644 "$root_dir/packaging/deb/conffiles" "$stage/DEBIAN/conffiles"
 for script in preinst postinst prerm postrm; do
     install -m 0755 "$root_dir/packaging/deb/$script" "$stage/DEBIAN/$script"
@@ -43,20 +45,27 @@ for binary in nftfw nftfwd nftfw-web; do
 done
 ln -s ../lib/nftfw/nftfw "$stage/usr/sbin/nftfw"
 install -m 0644 "$root_dir"/packaging/systemd/*.{service,timer} "$stage/usr/lib/systemd/system/"
+install -d "$stage/usr/share/doc/nft-firewall-v2/examples"
+install -m 0644 "$root_dir/packaging/systemd/nftfwd-docker-access.conf.example" \
+    "$stage/usr/share/doc/nft-firewall-v2/examples/"
 install -m 0640 "$root_dir/configs/nftfw.example.toml" "$stage/etc/nftfw/nftfw.toml"
-for document in README.md START-HERE.md INSTALL.md SECURITY.md; do
+for document in README.md START-HERE.md INSTALL.md SECURITY.md CHANGELOG.md; do
     install -m 0644 "$root_dir/$document" "$stage/usr/share/doc/nft-firewall-v2/$document"
 done
-for document in ARCHITECTURE.md CONFIGURATION.md OPERATIONS.md RECOVERY.md THREAT-MODEL.md; do
+install -m 0644 "$root_dir/LICENSE" "$stage/usr/share/doc/nft-firewall-v2/LICENSE"
+install -m 0644 "$root_dir/packaging/deb/copyright" "$stage/usr/share/doc/nft-firewall-v2/copyright"
+for document in ARCHITECTURE.md CONFIGURATION.md OPERATIONS.md RECOVERY.md STATUS-API.md THREAT-MODEL.md UPGRADING.md UNINSTALL.md; do
     install -m 0644 "$root_dir/docs/$document" "$stage/usr/share/doc/nft-firewall-v2/$document"
 done
 
 output="$root_dir/dist/nft-firewall-v2_${version}_${arch}.deb"
-output_tmp="$output.tmp.$$"
+output_stage=$(mktemp -d "$root_dir/dist/.nftfw-deb-output.XXXXXX")
+output_tmp="$output_stage/package.deb"
 dpkg-deb --root-owner-group --build "$stage" "$output_tmp" >/dev/null
 dpkg-deb --info "$output_tmp" >/dev/null
 dpkg-deb --contents "$output_tmp" >/dev/null
+[[ $(dpkg-deb -f "$output_tmp" Package) == nft-firewall-v2 ]] || { echo "Package name verification failed" >&2; exit 1; }
+[[ $(dpkg-deb -f "$output_tmp" Version) == "$version" ]] || { echo "Package version verification failed" >&2; exit 1; }
 [[ $(dpkg-deb -f "$output_tmp" Architecture) == "$arch" ]] || { echo "Package architecture verification failed" >&2; exit 1; }
 mv -f -- "$output_tmp" "$output"
-output_tmp=""
 echo "$output"

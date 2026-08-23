@@ -112,8 +112,6 @@ func emitFilter(b *strings.Builder, in Input) {
 	line("        type filter hook input priority filter; policy drop;")
 	line("        iifname \"lo\" accept comment \"nftfw:loopback\"")
 	line("        ct state invalid drop comment \"nftfw:invalid\"")
-	line("        ip saddr @blocked_v4 drop comment \"nftfw:block-v4\"")
-	line("        ip6 saddr @blocked_v6 drop comment \"nftfw:block-v6\"")
 	if c.System.IPv6Mode != "disabled" {
 		line("        ip6 hoplimit 255 meta l4proto ipv6-icmp icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } accept comment \"nftfw:ipv6-neighbor-discovery\"")
 	}
@@ -125,6 +123,8 @@ func emitFilter(b *strings.Builder, in Input) {
 	}
 	emitPolicies(b, in.Policy, "input", "deny")
 	line("        ct state established,related accept comment \"nftfw:input-established\"")
+	line("        ip saddr @blocked_v4 drop comment \"nftfw:block-v4\"")
+	line("        ip6 saddr @blocked_v6 drop comment \"nftfw:block-v6\"")
 	emitPolicies(b, in.Policy, "input", "allow")
 	line("        counter drop comment \"nftfw:input-default-deny\"")
 	line("    }")
@@ -132,8 +132,6 @@ func emitFilter(b *strings.Builder, in Input) {
 	line("        type filter hook output priority filter; policy drop;")
 	line("        oifname \"lo\" accept comment \"nftfw:loopback\"")
 	line("        ct state invalid drop comment \"nftfw:invalid\"")
-	line("        ip daddr @blocked_v4 drop comment \"nftfw:block-v4\"")
-	line("        ip6 daddr @blocked_v6 drop comment \"nftfw:block-v6\"")
 	line("        ip daddr @docker_nets meta l4proto icmp icmp type { destination-unreachable, time-exceeded, parameter-problem } accept comment \"nftfw:container-path-errors-v4\"")
 	line("        ip6 daddr @docker_nets6 meta l4proto ipv6-icmp icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept comment \"nftfw:container-path-errors-v6\"")
 	if c.System.IPv6Mode != "disabled" {
@@ -146,6 +144,8 @@ func emitFilter(b *strings.Builder, in Input) {
 		line(fmt.Sprintf("        oifname %s meta mark %s ip daddr @wg_bootstrap_v4 udp dport %d accept comment \"nftfw:wg-bootstrap-v4\"", quote(c.Interfaces, "uplink"), c.WireGuard.Fwmark, c.WireGuard.EndpointPort))
 		line(fmt.Sprintf("        oifname %s meta mark %s ip6 daddr @wg_bootstrap_v6 udp dport %d accept comment \"nftfw:wg-bootstrap-v6\"", quote(c.Interfaces, "uplink"), c.WireGuard.Fwmark, c.WireGuard.EndpointPort))
 	}
+	line("        ip daddr @blocked_v4 drop comment \"nftfw:block-v4\"")
+	line("        ip6 daddr @blocked_v6 drop comment \"nftfw:block-v6\"")
 	line(fmt.Sprintf("        oifname %s counter comment \"nftfw:vpn-only-egress\"", strconv.Quote(c.WireGuard.Interface)))
 	emitPolicies(b, in.Policy, "output", "deny")
 	emitPolicies(b, in.Policy, "output", "allow")
@@ -154,6 +154,7 @@ func emitFilter(b *strings.Builder, in Input) {
 	line("    chain forward {")
 	line("        type filter hook forward priority filter; policy drop;")
 	line("        ct state invalid drop comment \"nftfw:invalid\"")
+	line(fmt.Sprintf("        oifname %s ct direction reply ct state established,related accept comment \"nftfw:forward-uplink-reply-only\"", quote(c.Interfaces, "uplink")))
 	line("        ip saddr @blocked_v4 drop comment \"nftfw:block-forward-source-v4\"")
 	line("        ip daddr @blocked_v4 drop comment \"nftfw:block-forward-destination-v4\"")
 	line("        ip6 saddr @blocked_v6 drop comment \"nftfw:block-forward-source-v6\"")
@@ -162,7 +163,6 @@ func emitFilter(b *strings.Builder, in Input) {
 	line(fmt.Sprintf("        ip6 saddr @docker_nets6 oifname %s tcp flags syn tcp option maxseg size set %d comment \"nftfw:container-vpn-mss-out-v6\"", strconv.Quote(c.WireGuard.Interface), c.WireGuard.TCPMSS))
 	line(fmt.Sprintf("        iifname %s ip daddr @docker_nets tcp flags syn tcp option maxseg size set %d comment \"nftfw:container-vpn-mss-in-v4\"", strconv.Quote(c.WireGuard.Interface), c.WireGuard.TCPMSS))
 	line(fmt.Sprintf("        iifname %s ip6 daddr @docker_nets6 tcp flags syn tcp option maxseg size set %d comment \"nftfw:container-vpn-mss-in-v6\"", strconv.Quote(c.WireGuard.Interface), c.WireGuard.TCPMSS))
-	line(fmt.Sprintf("        oifname %s ct direction reply ct state established,related accept comment \"nftfw:forward-uplink-reply-only\"", quote(c.Interfaces, "uplink")))
 	line(fmt.Sprintf("        ip saddr @docker_nets oifname %s drop comment \"nftfw:container-physical-deny\"", quote(c.Interfaces, "uplink")))
 	line(fmt.Sprintf("        ip6 saddr @docker_nets6 oifname %s drop comment \"nftfw:container-physical-deny-v6\"", quote(c.Interfaces, "uplink")))
 	line(fmt.Sprintf("        oifname %s drop comment \"nftfw:forward-physical-deny\"", quote(c.Interfaces, "uplink")))

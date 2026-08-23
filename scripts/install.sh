@@ -9,7 +9,7 @@ CONF_DIR=/etc/nftfw
 STATE_DIR=/var/lib/nftfw
 case "$(uname -m)" in x86_64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; esac
 
-for command_name in nft ip wg systemctl systemd-analyze sha256sum awk getent groupadd useradd install readlink mktemp; do
+for command_name in nft ip wg systemctl systemd-analyze sha256sum awk getent groupadd useradd install readlink mktemp sed grep find; do
     command -v "$command_name" >/dev/null || { echo "Missing prerequisite: $command_name" >&2; exit 1; }
 done
 for binary in nftfw nftfwd nftfw-web; do [[ -x "$ROOT_DIR/dist/$binary-linux-$ARCH" ]] || { echo "Missing dist/$binary-linux-$ARCH; run make release" >&2; exit 1; }; done
@@ -35,7 +35,7 @@ fi
     echo "Candidate configuration is invalid; installation made no changes." >&2
     exit 1
 }
-systemd-analyze verify "$ROOT_DIR"/packaging/systemd/*.service "$ROOT_DIR"/packaging/systemd/*.timer >/dev/null
+bash "$ROOT_DIR/scripts/verify-systemd-units.sh" "$ROOT_DIR" "$ARCH" >/dev/null
 if [[ -n "$validation_dir" ]]; then
     rm -rf -- "$validation_dir"
     validation_dir=""

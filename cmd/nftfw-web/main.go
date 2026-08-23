@@ -2,12 +2,14 @@ package main
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
@@ -77,7 +79,7 @@ const pageHTML = `<!doctype html>
 
 const appCSS = `:root{color-scheme:light;--ink:#17201d;--muted:#66716d;--line:#d8dfdc;--surface:#fff;--canvas:#f3f6f4;--green:#16754a;--red:#b42318;--amber:#9a6700;--focus:#1769aa}*{box-sizing:border-box}body{margin:0;background:var(--canvas);color:var(--ink);font:14px/1.45 system-ui,sans-serif;letter-spacing:0}.topbar{height:64px;padding:0 max(20px,calc((100% - 1180px)/2));display:flex;align-items:center;justify-content:space-between;background:#202a27;color:#fff;border-bottom:3px solid #43a66f}.brand,.toolbar,.section-heading{display:flex;align-items:center}.brand{gap:11px}.brand-mark{width:12px;height:20px;background:#43a66f;border-radius:2px}.brand h1{font-size:17px;margin:0;font-weight:650}.toolbar{gap:14px;color:#c9d2cf;font-size:12px}.toolbar button{border:1px solid #65716d;background:transparent;color:#fff;padding:7px 12px;border-radius:4px;cursor:pointer}.toolbar button:hover{background:#33403c}.toolbar button:focus-visible{outline:3px solid #79bde8;outline-offset:2px}main{max-width:1180px;margin:0 auto;padding:24px 20px 48px}.overview{display:grid;grid-template-columns:repeat(4,minmax(0,1fr));gap:12px}.metric{min-height:92px;background:var(--surface);border:1px solid var(--line);border-radius:6px;padding:15px 16px;display:flex;flex-direction:column;justify-content:space-between}.metric span{color:var(--muted);font-size:12px}.metric strong{font-size:20px;font-weight:650;overflow-wrap:anywhere}.status-dot{display:inline-block;width:9px;height:9px;border-radius:50%;background:var(--amber);margin-right:8px}.status-dot.ok{background:var(--green)}.status-dot.bad{background:var(--red)}.details{display:grid;grid-template-columns:1fr 1fr;gap:40px;margin-top:34px}.detail-group,.table-section{border-top:2px solid var(--ink);padding-top:12px}.section-heading{min-height:32px;justify-content:space-between;gap:16px}.section-heading h2{font-size:15px;margin:0;font-weight:700}.section-heading>span{color:var(--muted);font-size:12px}.tag{border:1px solid var(--line);border-radius:3px;padding:2px 7px;text-transform:uppercase;font-size:10px!important;font-weight:700}.tag.ok{color:var(--green);border-color:#95ceb1;background:#edf8f2}.tag.bad{color:var(--red);border-color:#e5a8a3;background:#fff3f2}dl{margin:8px 0 0}dl div{display:grid;grid-template-columns:minmax(130px,1fr) minmax(0,1.4fr);gap:16px;padding:9px 0;border-bottom:1px solid var(--line)}dt{color:var(--muted)}dd{margin:0;text-align:right;overflow-wrap:anywhere}.mono{font:12px ui-monospace,monospace}.table-section{margin-top:36px}.table-wrap{overflow-x:auto;margin-top:8px}table{width:100%;border-collapse:collapse;background:var(--surface)}th,td{text-align:left;padding:10px 12px;border-bottom:1px solid var(--line);vertical-align:top}th{color:var(--muted);font-size:11px;text-transform:uppercase;font-weight:650;background:#e9eeeb}td{font-size:13px;overflow-wrap:anywhere}.empty{color:var(--muted);font-style:italic}.status-text-ok{color:var(--green);font-weight:650}.status-text-bad{color:var(--red);font-weight:650}@media(max-width:760px){.topbar{height:auto;min-height:64px;padding:12px 16px;align-items:flex-start}.toolbar{flex-direction:column;align-items:flex-end;gap:6px}.overview{grid-template-columns:1fr 1fr}.details{grid-template-columns:1fr;gap:28px}.metric{min-height:84px}.metric strong{font-size:17px}main{padding:18px 14px 36px}}@media(max-width:430px){.overview{grid-template-columns:1fr}.toolbar span{display:none}dl div{grid-template-columns:1fr;gap:3px}dd{text-align:left}}`
 
-const appJS = `const el=id=>document.getElementById(id);const set=(id,value,fallback='-')=>{el(id).textContent=value===undefined||value===null||value===''?fallback:String(value)};const when=value=>{if(!value)return 'Never';const d=new Date(value);return Number.isNaN(d.valueOf())?'Unknown':d.toLocaleString()};function row(values,empty=false){const tr=document.createElement('tr');values.forEach(value=>{const td=document.createElement('td');td.textContent=String(value);if(empty)td.className='empty';tr.appendChild(td)});return tr}function fill(id,rows,columns,label){const body=el(id);body.replaceChildren();if(!rows.length){const tr=row([label],true);tr.firstChild.colSpan=columns;body.appendChild(tr);return}rows.forEach(values=>body.appendChild(row(values)))}function badge(id,ok,good,bad){const node=el(id);node.textContent=ok?good:bad;node.className='tag '+(ok?'ok':'bad')}function render(data){const healthy=data.status==='HEALTHY';const overall=el('overall');overall.lastChild.textContent=healthy?'Healthy':'Degraded';overall.querySelector('.status-dot').className='status-dot '+(healthy?'ok':'bad');set('generation',data.active_generation||'None');set('killswitch',data.kill_switch);set('blocked',data.blocked_addresses,0);set('ipv6',data.ipv6_mode);set('checksum',data.policy_checksum?data.policy_checksum.slice(0,16)+'...':'None');set('policy-count',String(data.zone_count||0)+' / '+String(data.policy_count||0));set('database',data.database);set('pending',data.pending_generation?String(data.pending_generation)+(data.pending_deadline?' until '+when(data.pending_deadline):''):'None');badge('drift',!data.drift,'In sync','Drift');const wg=data.wireguard||{};badge('wg-health',!!wg.healthy,'Healthy','Degraded');set('wg-interface',wg.interface);set('wg-peers',wg.peer_count,0);set('wg-endpoints',wg.endpoint_count,0);set('wg-handshake',wg.latest_handshake?when(wg.latest_handshake)+' ('+String(wg.age_seconds||0)+'s ago)':'Never');set('reason',data.reason||wg.reason||'None');const claims=Object.entries(data.claims_by_source||{}).sort((a,b)=>a[0].localeCompare(b[0])).map(item=>[item[0],item[1]]);set('claim-total',String(data.block_claims||0)+' active block claims');fill('claims',claims,2,'No active claims');const integrations=(data.integrations||[]).map(item=>[item.name,item.status,item.entry_count,when(item.last_success)]);fill('integrations',integrations,4,'No integrations enabled');const audit=(data.recent_audit||[]).map(item=>[when(item.created_at),item.event,item.actor,item.detail]);fill('audit',audit,4,'No audit events');set('updated','Updated '+new Date().toLocaleTimeString())}async function refresh(){const button=el('refresh');button.disabled=true;try{const response=await fetch('/api/status',{cache:'no-store',headers:{Accept:'application/json'}});if(!response.ok)throw new Error('status unavailable');render(await response.json())}catch(error){const overall=el('overall');overall.lastChild.textContent='Unavailable';overall.querySelector('.status-dot').className='status-dot bad';set('reason','Status service unavailable')}finally{button.disabled=false}}el('refresh').addEventListener('click',refresh);refresh();setInterval(refresh,5000);`
+const appJS = `const el=id=>document.getElementById(id);const set=(id,value,fallback='-')=>{el(id).textContent=value===undefined||value===null||value===''?fallback:String(value)};const when=value=>{if(!value)return 'Never';const d=new Date(value);return Number.isNaN(d.valueOf())?'Unknown':d.toLocaleString()};function row(values,empty=false){const tr=document.createElement('tr');values.forEach(value=>{const td=document.createElement('td');td.textContent=String(value);if(empty)td.className='empty';tr.appendChild(td)});return tr}function fill(id,rows,columns,label){const body=el(id);body.replaceChildren();if(!rows.length){const tr=row([label],true);tr.firstChild.colSpan=columns;body.appendChild(tr);return}rows.forEach(values=>body.appendChild(row(values)))}function badge(id,ok,good,bad){const node=el(id);node.textContent=ok?good:bad;node.className='tag '+(ok?'ok':'bad')}function render(data){const hasPrimary=Object.prototype.hasOwnProperty.call(data,'policy_hash');const hasChecksum=Object.prototype.hasOwnProperty.call(data,'policy_checksum');const primaryHash=data.policy_hash;const checksum=data.policy_checksum;const primaryValid=hasPrimary&&typeof primaryHash==='string'&&/^[0-9a-f]{64}$/.test(primaryHash);const checksumValid=hasChecksum&&typeof checksum==='string'&&/^[0-9a-f]{64}$/.test(checksum);const hashValid=primaryValid&&checksumValid&&primaryHash===checksum;const policyHash=primaryHash;const contract=data.schema==='nftfw.status.v1'&&data.active===true&&data.policy_match===true&&data.kill_switch_enforced===true&&hashValid&&data.protected===true;const healthy=data.status==='HEALTHY'&&contract;const overall=el('overall');overall.lastChild.textContent=healthy?'Healthy':'Degraded';overall.querySelector('.status-dot').className='status-dot '+(healthy?'ok':'bad');set('generation',data.active_generation||'None');set('killswitch',data.kill_switch_enforced===true?'Enforced':'Degraded');set('blocked',data.blocked_addresses,0);set('ipv6',data.ipv6_mode);set('checksum',hashValid?policyHash.slice(0,16)+'...':'Invalid');set('policy-count',String(data.zone_count||0)+' / '+String(data.policy_count||0));set('database',data.database);set('pending',data.pending_generation?String(data.pending_generation)+(data.pending_deadline?' until '+when(data.pending_deadline):''):'None');badge('drift',data.policy_match===true,'In sync','Drift');const wg=data.wireguard||{};badge('wg-health',wg.healthy===true,'Healthy','Degraded');set('wg-interface',wg.interface);set('wg-peers',wg.peer_count,0);set('wg-endpoints',wg.endpoint_count,0);set('wg-handshake',wg.latest_handshake?when(wg.latest_handshake)+' ('+String(wg.age_seconds||0)+'s ago)':'Never');set('reason',data.reason||wg.reason||'None');const claims=Object.entries(data.claims_by_source||{}).sort((a,b)=>a[0].localeCompare(b[0])).map(item=>[item[0],item[1]]);set('claim-total',String(data.block_claims||0)+' active block claims');fill('claims',claims,2,'No active claims');const integrations=(data.integrations||[]).map(item=>[item.name,item.status,item.entry_count,when(item.last_success)]);fill('integrations',integrations,4,'No integrations enabled');const audit=(data.recent_audit||[]).map(item=>[when(item.created_at),item.event,item.actor,item.detail]);fill('audit',audit,4,'No audit events');set('updated','Updated '+new Date().toLocaleTimeString())}async function refresh(){const button=el('refresh');button.disabled=true;try{const response=await fetch('/api/status',{cache:'no-store',headers:{Accept:'application/json'}});if(!response.ok)throw new Error('status unavailable');render(await response.json())}catch(error){const overall=el('overall');overall.lastChild.textContent='Unavailable';overall.querySelector('.status-dot').className='status-dot bad';set('reason','Status service unavailable')}finally{button.disabled=false}}el('refresh').addEventListener('click',refresh);refresh();setInterval(refresh,5000);`
 
 func main() {
 	bind := os.Getenv("NFTFW_WEB_BIND")
@@ -140,10 +142,49 @@ func newHandler(statusSocket string) http.Handler {
 			writeHTTPError(w, http.StatusServiceUnavailable, "status unavailable")
 			return
 		}
+		fields, ok := response.Data.(map[string]any)
+		if !ok {
+			writeHTTPError(w, http.StatusServiceUnavailable, "status unavailable")
+			return
+		}
+		payload := make(map[string]any, len(fields)+1)
+		for key, value := range fields {
+			payload[key] = value
+		}
+		payload["protected"] = dashboardProtected(fields)
 		secureHeaders(w, "application/json; charset=utf-8")
-		_ = json.NewEncoder(w).Encode(response.Data)
+		_ = json.NewEncoder(w).Encode(payload)
 	})
 	return mux
+}
+
+func dashboardProtected(data map[string]any) bool {
+	if data["schema"] != "nftfw.status.v1" || data["status"] != "HEALTHY" ||
+		data["active"] != true || data["policy_match"] != true || data["kill_switch_enforced"] != true {
+		return false
+	}
+	primary, hasPrimary := data["policy_hash"]
+	checksum, hasChecksum := data["policy_checksum"]
+	if !hasPrimary || !hasChecksum {
+		return false
+	}
+	primaryText, primaryOK := primary.(string)
+	checksumText, checksumOK := checksum.(string)
+	if hasPrimary && (!primaryOK || !validSHA256(primaryText)) {
+		return false
+	}
+	if hasChecksum && (!checksumOK || !validSHA256(checksumText)) {
+		return false
+	}
+	return primaryText == checksumText
+}
+
+func validSHA256(value string) bool {
+	if len(value) != 64 || value != strings.ToLower(value) {
+		return false
+	}
+	_, err := hex.DecodeString(value)
+	return err == nil
 }
 
 func staticAsset(contentType, body string) http.HandlerFunc {

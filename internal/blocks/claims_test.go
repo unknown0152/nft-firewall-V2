@@ -15,7 +15,7 @@ func TestBlockCannotClaimAllowProvenance(t *testing.T) {
 	if _, err := (Service{}).AddAllow(context.Background(), "203.0.113.9", "lease", "admin", nil); err == nil {
 		t.Fatal("nil allow store accepted")
 	}
-	store, err := state.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	store, err := state.Open(context.Background(), filepath.Join(secureTestDir(t), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +34,7 @@ func TestBlockCannotClaimAllowProvenance(t *testing.T) {
 }
 
 func TestConcurrentClaimLimitIsTransactional(t *testing.T) {
-	store, err := state.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	store, err := state.Open(context.Background(), filepath.Join(secureTestDir(t), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -61,7 +61,7 @@ func TestConcurrentClaimLimitIsTransactional(t *testing.T) {
 }
 
 func TestBlockCanonicalizesPrefix(t *testing.T) {
-	store, err := state.Open(context.Background(), filepath.Join(t.TempDir(), "state.db"))
+	store, err := state.Open(context.Background(), filepath.Join(secureTestDir(t), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -81,7 +81,7 @@ func TestBlockCanonicalizesPrefix(t *testing.T) {
 
 func TestOperatorCannotRemoveIntegrationClaim(t *testing.T) {
 	ctx := context.Background()
-	store, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	store, err := state.Open(ctx, filepath.Join(secureTestDir(t), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -109,7 +109,7 @@ func TestOperatorCannotRemoveIntegrationClaim(t *testing.T) {
 
 func TestTypedOperatorRemovalDoesNotCrossAllowAndBlockClaims(t *testing.T) {
 	ctx := context.Background()
-	store, err := state.Open(ctx, filepath.Join(t.TempDir(), "state.db"))
+	store, err := state.Open(ctx, filepath.Join(secureTestDir(t), "state.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1,161 +1,124 @@
 # NFT Firewall V2 Test Results
 
-Executed on 2026-08-16 and 2026-08-17 UTC. Sanitized raw evidence is retained outside Git at
-`/root/nft-firewall-work/test-results/`. Provider key material and private
-topology details are excluded.
+This file separates evidence collected for the current `2.0.1` source
+candidate from privileged acceptance that belongs to the tagged `2.0.0`
+baseline. Results are not carried forward across code changes unless the same
+gate was rerun against the current candidate.
 
-## Release gates
+## 2.0.1 candidate evidence
 
-| Gate | Status | Executed evidence |
+Unprivileged checks were run on 2026-08-23 with Go 1.25.13. They did not
+install services, load an nftables ruleset, alter networking, access Docker,
+start WireGuard, or exercise the current machine as a live firewall.
+
+| Gate | Current result | Evidence / scope |
 | --- | --- | --- |
-| amd64/arm64 static build | PASS | Six CGO-free binaries built; embedded metadata and SHA256 checked |
-| Unit tests | PASS | `go test ./...` across command and internal packages |
-| Race tests | PASS | `go test -race ./...` |
-| Vet | PASS | `go vet ./...` |
-| Formatting/module integrity | PASS | gofmt, `go mod verify`, and `go mod tidy -diff` |
-| Staticcheck | PASS | staticcheck v0.7.0, zero findings after fixes |
-| Vulnerability scan | PASS | govulncheck v1.7.0 with Go 1.25.13; no reachable vulnerabilities |
-| Go security scan | PASS | gosec v2.28.0 focused scan, zero untriaged findings |
-| Shell analysis | PASS | ShellCheck 0.10.0 over install/package/acceptance scripts |
-| Secret scan | PASS | Gitleaks over complete Git history, worktree, and extracted archive; independent filename scan |
-| Fuzz/property | PASS | Eight parser/policy/nft/state targets, five seconds each |
-| Namespace firewall | PASS | Actual nftables/WireGuard traffic suite |
-| Simulated VPN kill switch | PASS | Healthy and removed tunnel, host and container |
-| Active connection failure | PASS | TCP/UDP, IPv4/IPv6, host/container |
-| Provenance | PASS | Manual plus feed/GeoIP source union and typed removal |
-| Safe apply/rollback | PASS | Unit plus real host independent timer, crash and timeout |
-| Drift | PASS | Deleted/modified rule and deleted table repaired; unrelated table retained |
-| IPv6 | PASS | Native host capability, namespace disabled/VPN leak capture, real VPN IPv6 |
-| Docker | PASS | Lifecycle observation and actual Docker container through real VPN/loss/recovery |
-| Real WireGuard | PASS | Operator profile used in isolated real-provider acceptance |
-| Database | PASS | Create, migrations, constraints, concurrent WAL, backup/restore, corruption |
-| Service crash | PASS | SIGTERM, SIGKILL, repeated restart, sockets, malformed/oversized API |
-| systemd verify/hardening | PASS | Unit verification and exposure analysis |
-| Source installer | PASS | Verified checksums/config/units, online state backup, service restart, no policy apply |
-| Debian packages | PASS | amd64/arm64 control, contents, root mode, scripts, architecture, and atomic output inspected |
-| Release manifests | PASS | Full-tree JSON manifest, tracked-source manifest, and internal sums verified |
-| Archive integrity | PASS | `unzip -t`, `tar -tzf`, internal/source SHA256, extracted CLI execution |
-| Reproducibility | PASS | Two builds from the same commit produced byte-identical ZIP and tar.gz hashes |
-| Full VPS reboot | NOT EXECUTED | Preserved live SSH; real early-boot unit ordering/snapshot paths tested without reboot |
-| Optional live threat/GeoIP source | NOT APPLICABLE | Integrations disabled; parsers/refresh failure/atomic state tested locally |
+| Unit and package tests | PASS | `GOTOOLCHAIN=go1.25.13 go test -count=1 ./...` |
+| Targeted race tests | PASS | Compiler and application/runtime race tests covering the changed paths |
+| Full race suite | PASS | `GOTOOLCHAIN=go1.25.13 go test -race -count=1 ./...` |
+| Vet | PASS | `GOTOOLCHAIN=go1.25.13 go vet ./...` |
+| Formatting | PASS | All tracked Go files pass `gofmt` comparison |
+| Module integrity | PASS | `go mod verify` and `go mod tidy -diff` |
+| Shell syntax and analysis | PASS | `bash -n` and ShellCheck 0.10.0 over the production and packaging scripts |
+| systemd static verification | PASS | Units were verified against isolated staged executables; the fresh-host wrapper regression proved no final-path executable was required. No units were installed or started |
+| Staticcheck | PASS | staticcheck v0.7.0 with Go 1.25.13 |
+| Vulnerability scan | PASS | govulncheck v1.7.0 reported no vulnerabilities |
+| Go security scan | PASS | gosec v2.28.0 focused scan reported no findings |
+| Worktree and Git-history secret scan | PASS | Gitleaks 8.16.0 with redaction over the complete history and current worktree |
+| Final extracted-archive secret scan | PENDING | Requires final ZIP and tar.gz artifacts |
+| Fuzz/property suite | PASS | All eight documented targets ran independently for 10 seconds with one worker each |
+| amd64/arm64 release build | PENDING | Requires the clean committed/tagged release candidate |
+| Debian package inspection | PENDING | Requires final amd64 and arm64 packages |
+| Archive integrity and manifests | PENDING | Requires final ZIP and tar.gz artifacts |
+| Reproducibility | PENDING | Requires two builds from the same final commit and tag |
+| Signature | NOT PROVIDED | Checksums and generated provenance are unsigned; an external release identity must sign them if required |
 
-## Namespace result
+### Remediation regressions covered
 
-The isolated lab executed repeated atomic apply, early active snapshot restore,
-trust replay prevention, corrupt snapshot fail-closed, kernel lease expiry,
-three drift classes, unrelated-table survival, typed DNAT, healthy VPN traffic,
-tunnel removal, and active-flow traffic.
+The passing `2.0.1` unit/package suite covers the release-hardening changes,
+including:
 
-```text
-VPN HEALTHY HOST: PASS
-VPN HEALTHY CONTAINER: PASS
-VPN HEALTHY IPV6 HOST: PASS
-VPN HEALTHY IPV6 CONTAINER: PASS
-WIREGUARD REMOVED HOST: PASS
-WIREGUARD REMOVED CONTAINER: PASS
-ACTIVE TCP HOST/CONTAINER: PASS
-ACTIVE UDP HOST/CONTAINER: PASS
-ACTIVE IPV6 TCP/UDP HOST/CONTAINER: PASS
-LEAKED INTERNET PACKETS: 0
-LEAKED IPV6 INTERNET PACKETS: 0
-```
+- rejecting contradictory interface-to-zone declarations;
+- ordering established management replies, temporary recovery access, and
+  WireGuard bootstrap ahead of untrusted dynamic-feed drops;
+- constraining threat feeds to bounded public prefixes, enforcing aggregate
+  limits and protected-prefix exclusions, validating persisted claims, and
+  compensating database/live-set publication failures;
+- rejecting obfuscated global flushes and unsupported or foreign nftables
+  management commands;
+- refusing first-use collisions with pre-existing product-named tables;
+- preserving rollback errors and recoverable generation state;
+- serializing claim publication across processes, compensating every manual
+  claim mutation failure, and exposing durable desired/applied revisions;
+- bounding API, controller, and backend lock waits while retaining an
+  independent emergency-deny recovery context;
+- failing closed on `SO_PEERCRED` failures and separating control/status
+  connection quotas;
+- pruning the durable audit log to 10,000 rows through schema migration 4;
+- enforcing the typed `nftfw.status.v1` health contract in the CLI and bundled
+  web consumer; and
+- keeping Docker socket access disabled unless an administrator explicitly
+  installs the documented opt-in systemd drop-in; and
+- validating systemd units against staged executables before a source
+  installer makes any host change.
 
-## Real provider result
+## Privileged and live `2.0.1` gates
 
-The supplied root-owned mode `0600` profile was used without logging its
-private key. The provider tunnel ran inside an isolated namespace over the
-real host uplink. An actual Docker container joined the protected topology.
+The following gates have not been run for `2.0.1` and remain pending explicit
+approval because they require root privileges, network namespace or host
+firewall mutation, a real provider profile, Docker access, service
+installation, or disruption:
 
-```text
-REAL WIREGUARD HANDSHAKE: PASS
-REAL VPN PUBLIC IPV4 CHANGE: PASS
-REAL VPN DNS: PASS
-REAL VPN CONTAINER EGRESS: PASS
-REAL DOCKER CONTAINER VPN EGRESS: PASS
-REAL VPN IPV6 EGRESS: PASS
-REAL ENDPOINT SET REFRESH: PASS
-REAL DAEMON RESTART: PASS
-REAL VPN LOSS HOST: PASS
-REAL VPN LOSS CONTAINER: PASS
-REAL DOCKER CONTAINER VPN LOSS: PASS
-REAL LEAKED PHYSICAL PACKETS: 0
-REAL WIREGUARD RESTART/RECOVERY: PASS
-REAL DOCKER CONTAINER RECOVERY: PASS
-REAL WIREGUARD ACCEPTANCE: PASS
-```
+- namespace nftables/WireGuard IPv4 and IPv6 kill-switch acceptance;
+- active TCP/UDP host and container failure tests and packet capture;
+- guarded host safe-apply, commit, crash, timeout rollback, and drift repair;
+- real-provider WireGuard, DNS, endpoint refresh, loss, and recovery;
+- Docker lifecycle and container VPN isolation;
+- systemd installation, service crash/restart, early restore, and reboot;
+- source installer and Debian package installation/upgrade/removal; and
+- validation on the actual NUC/server topology.
 
-The packet capture excluded provider endpoint bootstrap traffic and looked for
-synthetic non-endpoint Internet traffic on the physical test link.
+No result in this document means that `2.0.1` is installed, enabled, or active
+on the current machine.
 
-## Host safe-apply result
+## Inherited `2.0.0` historical evidence
 
-Before touching host-owned test tables, the suite armed and proved a separate
-transient systemd emergency rollback. The candidate retained the observed SSH
-management connection and used an absent test VPN to prove physical denial.
+The `v2.0.0` release documentation records successful namespace, real
+WireGuard provider, Docker, guarded host rollback, database, service-chaos,
+package, archive, secret-scan, and reproducibility exercises. It also records
+that a full VPS reboot was not executed. That evidence is useful architectural
+history, but it is not a pass result for the changed `2.0.1` candidate.
 
-```text
-INDEPENDENT EMERGENCY ROLLBACK PROOF: PASS
-UNRELATED TABLE PRESERVATION PROOF: PASS
-HOST EMERGENCY ROLLBACK ARMED: PASS
-HOST CANDIDATE NFT CHECK: PASS
-DECLARED SSH MANAGEMENT PATH RETAINED: PASS
-HOST IPV4 LEAKED INTERNET PACKETS: 0
-HOST IPV6 LEAKED INTERNET PACKETS: 0
-HOST SAFE APPLY COMMIT: PASS
-HOST EXPLICIT ROLLBACK: PASS
-HOST DAEMON SIGKILL AFTER APPLY: PASS
-HOST TIMEOUT ROLLBACK AFTER DAEMON CRASH: PASS
-HOST SAFE-APPLY ACCEPTANCE: PASS
-```
+In particular, the following historical observations are not restated as
+current results:
 
-Cleanup left the host NFT Firewall ruleset empty and preserved SSH.
+- zero IPv4/IPv6 leak packet counts;
+- real-provider handshake and public-route changes;
+- Docker container loss/recovery;
+- host SSH-preserving safe apply and independent timeout rollback; and
+- byte-identical release archives.
 
-## Packaging and secret result
+Those claims apply only to the exact `v2.0.0` code and environment on which
+they were collected. Current source evidence must be completed and recorded
+above before `2.0.1` is called accepted.
 
-The source installer backed up existing SQLite state, installed the exact
-candidate metadata, restarted all three active services, retained the SSH
-session, and left zero owned tables because no candidate was applied. Both
-Debian packages contain the expected three binaries, five units, protected
-configuration, documentation, and upgrade/removal scripts. The package data
-root is mode `0755`; output is validated before atomic publication.
+## Fuzz targets required before release
 
-The installed example configuration passed strict schema validation. `doctor`
-then rejected its intentionally absent `/etc/wireguard/wg0.conf`, as expected
-before operator configuration; it made no firewall change.
+| Package | Target | Current result |
+| --- | --- | --- |
+| Config | `FuzzDecode` | PASS — 10 seconds |
+| API | `FuzzDecodeRequest` | PASS — 10 seconds |
+| Policy | `FuzzExplainAlwaysReturnsAVerdict` | PASS — 10 seconds |
+| Compiler | `FuzzCompileRuntimePrefix` | PASS — 10 seconds |
+| nft | `FuzzValidateScript` | PASS — 10 seconds |
+| nft | `FuzzCanonicalOwnedJSON` | PASS — 10 seconds |
+| State | `FuzzValidateClaim` | PASS — 10 seconds |
+| Threat feed | `FuzzParse` | PASS — 10 seconds |
 
-The release builder was run twice from the same clean commit and produced
-identical ZIP and tar.gz SHA256 values. The extracted ZIP's full-tree JSON
-manifest, tracked-source manifest, and internal checksums covered every
-applicable file. Every checksum passed.
+## Release evidence rules
 
-Gitleaks 8.16.0 scanned the complete V2 history with redaction enabled, then the
-working tree and extracted release independently. All reported no leaks. A
-separate sensitive-filename scan also found no key, credential, secret, or
-real WireGuard fixture file. The operator's profile remained outside Git and
-the archive as root:root mode `0600`.
-
-## Fuzz targets
-
-| Target | Status |
-| --- | --- |
-| Config `FuzzDecode` | PASS |
-| API `FuzzDecodeRequest` | PASS |
-| Policy `FuzzExplainAlwaysReturnsAVerdict` | PASS |
-| Compiler `FuzzCompileRuntimePrefix` | PASS |
-| nft `FuzzValidateScript` | PASS |
-| nft `FuzzCanonicalOwnedJSON` | PASS |
-| State `FuzzValidateClaim` | PASS |
-| Threat feed `FuzzParse` | PASS |
-
-## Scope notes
-
-Endpoint A-to-B rollover, bounded recent retention, DNS failure, stale cache,
-unusable answers, and single-peer endpoint update are deterministic injected
-tests. Live acceptance separately confirms real DNS, endpoint set refresh,
-handshake, restart, and recovery. The operator's provider DNS record was not
-modified.
-
-A full host reboot was deliberately not executed on the only SSH management
-host. Boot persistence is supported and was exercised through the real
-`nftfw-early.service`, systemd dependency verification, committed snapshot
-restore, missing/corrupt snapshot emergency deny, and pending restart paths.
+Final evidence must identify the exact commit and tag, retain sanitized logs
+outside the release archives, and avoid recording provider keys, credentials,
+public addresses, domains, usernames, device identifiers, or private topology.
+Any privileged validation report derived from a real host must be redacted
+before publication.

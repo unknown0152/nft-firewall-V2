@@ -20,5 +20,6 @@ if [ -d /run/systemd/system ]; then
     systemctl restart nftfwd.service nftfw-rollback.timer nftfw-web.service
 fi
 
-echo "NFT Firewall V2 installed but no firewall policy was applied."
+echo "NFT Firewall V2 installed; the package did not create or apply a new candidate policy."
+echo "If committed state already existed, the restarted daemon may have reconciled that committed policy."
 echo "Edit /etc/nftfw/nftfw.toml, then run: nftfw config validate && nftfw plan"

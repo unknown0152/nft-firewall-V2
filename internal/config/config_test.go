@@ -3,12 +3,17 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
 func writeConfig(t *testing.T, text string) string {
 	t.Helper()
-	p := filepath.Join(t.TempDir(), "nftfw.toml")
+	dir := t.TempDir()
+	if err := os.Chmod(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	p := filepath.Join(dir, "nftfw.toml")
 	if err := os.WriteFile(p, []byte(text), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -190,6 +195,58 @@ func TestValidateRejectsUnknownAndEmptyInterfaceZones(t *testing.T) {
 	c.Zones = append(c.Zones, Zone{Name: "empty"})
 	if err := Validate(c); err == nil {
 		t.Fatal("empty zone accepted")
+	}
+}
+
+func TestValidateRejectsInterfaceAssignedToMultipleZones(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Interfaces[0].Zone = "wan"
+	c.Zones = append(c.Zones, Zone{Name: "wan"})
+	c.Zones[0].Interfaces = []string{"eth0"}
+	if err := Validate(c); err == nil {
+		t.Fatal("uplink assigned to both wan and lan zones was accepted")
+	} else if !strings.Contains(err.Error(), `interface "eth0" is assigned to multiple zones`) {
+		t.Fatalf("unexpected cross-zone validation error: %v", err)
+	}
+}
+
+func TestValidateAcceptsDuplicateSameZoneInterfaceDeclaration(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Interfaces[0].Zone = "wan"
+	c.Zones = append(c.Zones, Zone{Name: "wan", Interfaces: []string{"eth0", "eth0"}})
+	if err := Validate(c); err != nil {
+		t.Fatalf("duplicate declarations of the same zone membership were rejected: %v", err)
+	}
+}
+
+func TestValidateThreatFeedURLExcludesCredentialsQueryAndFragment(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Integrations.ThreatFeed = true
+	c.ThreatFeeds = []ThreatFeedConfig{{Name: "example", URL: "https://feeds.example.invalid/addresses.txt"}}
+	if err := Validate(c); err != nil {
+		t.Fatalf("plain HTTPS threat feed URL was rejected: %v", err)
+	}
+
+	for _, rawURL := range []string{
+		"https://user:password@feeds.example.invalid/addresses.txt",
+		"https://feeds.example.invalid/addresses.txt?token=secret",
+		"https://feeds.example.invalid/addresses.txt?",
+		"https://feeds.example.invalid/addresses.txt#section",
+		"https://feeds.example.invalid/addresses.txt#",
+	} {
+		c.ThreatFeeds[0].URL = rawURL
+		if err := Validate(c); err == nil {
+			t.Errorf("unsafe threat feed URL %q was accepted", rawURL)
+		}
 	}
 }
 

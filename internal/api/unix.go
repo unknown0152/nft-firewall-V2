@@ -18,7 +18,20 @@ import (
 
 const MaxRequestBytes = 64 << 10
 const MaxResponseBytes = 4 << 20
-const MaxConcurrentConnections = 64
+const MaxConcurrentStatusConnections = 64
+const MaxConcurrentControlConnections = 16
+
+const (
+	statusHandlerTimeout  = 8 * time.Second
+	controlHandlerTimeout = 60 * time.Second
+	statusClientTimeout   = 12 * time.Second
+	controlClientTimeout  = 85 * time.Second
+)
+
+// MaxConcurrentConnections is retained as the public status-socket limit.
+// Privileged control has a separate quota and cannot be starved by status
+// clients.
+const MaxConcurrentConnections = MaxConcurrentStatusConnections
 
 type Request struct {
 	Op         string `json:"op"`
@@ -57,7 +70,8 @@ type Server struct {
 	Handler                 Handler
 	StatusPath, ControlPath string
 	listeners               []net.Listener
-	connections             chan struct{}
+	statusConnections       chan struct{}
+	controlConnections      chan struct{}
 }
 
 func (s *Server) Serve(ctx context.Context) error {
@@ -94,7 +108,8 @@ func (s *Server) Serve(ctx context.Context) error {
 	}
 	defer os.Remove(s.StatusPath)
 	defer os.Remove(s.ControlPath)
-	s.connections = make(chan struct{}, MaxConcurrentConnections)
+	s.statusConnections = make(chan struct{}, MaxConcurrentStatusConnections)
+	s.controlConnections = make(chan struct{}, MaxConcurrentControlConnections)
 	errCh := make(chan error, 2)
 	go s.acceptLoop(ctx, status, false, errCh)
 	go s.acceptLoop(ctx, control, true, errCh)
@@ -121,17 +136,39 @@ func (s *Server) acceptLoop(ctx context.Context, l net.Listener, control bool, e
 				return
 			}
 		}
-		select {
-		case s.connections <- struct{}{}:
+		quota, accepted := s.acquireConnection(control)
+		if accepted {
 			go func() {
-				defer func() { <-s.connections }()
+				defer func() { <-quota }()
 				s.handle(ctx, conn, control)
 			}()
-		default:
-			writeResponse(conn, Response{Error: "server connection limit reached"})
-			_ = conn.Close()
-			s.securityEvent(ctx, "privileged_request_rejected", "connection limit reached")
+		} else {
+			s.rejectConnectionLimit(ctx, conn, control)
 		}
+	}
+}
+
+func (s *Server) acquireConnection(control bool) (chan struct{}, bool) {
+	quota := s.statusConnections
+	if control {
+		quota = s.controlConnections
+	}
+	select {
+	case quota <- struct{}{}:
+		return quota, true
+	default:
+		return quota, false
+	}
+}
+
+func (s *Server) rejectConnectionLimit(ctx context.Context, conn net.Conn, control bool) {
+	writeResponse(conn, Response{Error: "server connection limit reached"})
+	_ = conn.Close()
+	// Status saturation is expected under load and is intentionally not
+	// written to the durable security audit. Privileged saturation remains
+	// evidence-worthy and is independently bounded by its own quota.
+	if control {
+		s.securityEvent(ctx, "privileged_request_rejected", "connection limit reached")
 	}
 }
 
@@ -182,16 +219,30 @@ func (s *Server) handle(ctx context.Context, conn net.Conn, control bool) {
 		writeResponse(conn, Response{Error: "invalid request: " + err.Error()})
 		return
 	}
+	handlerTimeout := statusHandlerTimeout
+	if control {
+		handlerTimeout = controlHandlerTimeout
+	}
+	requestCtx, cancel := context.WithTimeout(ctx, handlerTimeout)
+	defer cancel()
+	responseTimeout := handlerTimeout + 2*time.Second
+	if control {
+		// Claim compensation may use up to 20 seconds after ordinary handler
+		// cancellation. Keep the response channel open longer than that bounded
+		// recovery window, and keep the client deadline longer still.
+		responseTimeout = handlerTimeout + 22*time.Second
+	}
+	_ = conn.SetDeadline(time.Now().Add(responseTimeout))
 	var data any
 	var handlerErr error
 	if control {
-		data, handlerErr = s.Handler.Control(ctx, req)
+		data, handlerErr = s.Handler.Control(requestCtx, req)
 	} else {
 		if req.Op != "status" {
 			writeResponse(conn, Response{Error: "status socket is read-only"})
 			return
 		}
-		data, handlerErr = s.Handler.Status(ctx)
+		data, handlerErr = s.Handler.Status(requestCtx)
 	}
 	if handlerErr != nil {
 		if control {
@@ -277,14 +328,25 @@ func peerUcred(conn net.Conn) (uint32, bool) {
 	if err != nil {
 		return 0, false
 	}
-	var uid uint32
-	err = raw.Control(func(fd uintptr) {
-		cred, e := syscall.GetsockoptUcred(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
-		if e == nil {
-			uid = cred.Uid
-		}
+	return peerUcredFromRaw(raw, syscall.GetsockoptUcred)
+}
+
+type rawController interface {
+	Control(func(fd uintptr)) error
+}
+
+type peerCredGetter func(int, int, int) (*syscall.Ucred, error)
+
+func peerUcredFromRaw(raw rawController, get peerCredGetter) (uint32, bool) {
+	var cred *syscall.Ucred
+	var credentialErr error
+	controlErr := raw.Control(func(fd uintptr) {
+		cred, credentialErr = get(int(fd), syscall.SOL_SOCKET, syscall.SO_PEERCRED)
 	})
-	return uid, err == nil
+	if controlErr != nil || credentialErr != nil || cred == nil {
+		return 0, false
+	}
+	return cred.Uid, true
 }
 
 func prepareSocketPath(path string) error {
@@ -332,7 +394,11 @@ func Call(ctx context.Context, path string, req Request) (Response, error) {
 		return Response{}, err
 	}
 	defer conn.Close()
-	_ = conn.SetDeadline(time.Now().Add(10 * time.Second))
+	clientTimeout := statusClientTimeout
+	if req.Op != "status" {
+		clientTimeout = controlClientTimeout
+	}
+	_ = conn.SetDeadline(time.Now().Add(clientTimeout))
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return Response{}, err
 	}

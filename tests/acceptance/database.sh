@@ -59,8 +59,11 @@ INSERT INTO schema_migrations VALUES(1, datetime('now'));
 SQL
 chmod 0600 "$legacy"
 "$nftfw" state verify --database "$legacy" >/dev/null
-[[ $(sqlite3 "$legacy" 'SELECT MAX(version) FROM schema_migrations') == 3 ]] || { echo "FAIL: legacy migration did not reach v3"; exit 1; }
+[[ $(sqlite3 "$legacy" 'SELECT MAX(version) FROM schema_migrations') == 5 ]] || { echo "FAIL: legacy migration did not reach v5"; exit 1; }
 [[ $(sqlite3 "$legacy" "SELECT COUNT(*) FROM pragma_table_info('generations') WHERE name='observed_hash'") == 1 ]] || { echo "FAIL: v3 fingerprint column missing"; exit 1; }
+[[ $(sqlite3 "$legacy" "SELECT COUNT(*) FROM sqlite_master WHERE type='trigger' AND name='audit_prune_after_insert'") == 1 ]] || { echo "FAIL: v4 audit bound trigger missing"; exit 1; }
+[[ $(sqlite3 "$legacy" "SELECT COUNT(*) FROM runtime_claim_publication WHERE singleton=1 AND desired_revision=1 AND applied_revision=0") == 1 ]] || { echo "FAIL: v5 runtime claim publication seed is not fail-closed"; exit 1; }
+[[ $(sqlite3 "$legacy" "SELECT COUNT(*) FROM integration_state WHERE name='runtime/claims' AND status='degraded' AND entry_count=0 AND last_success IS NULL") == 1 ]] || { echo "FAIL: v5 runtime claim health seed is not degraded"; exit 1; }
 if sqlite3 "$legacy" "INSERT INTO claims(address,family,source,reason,actor,created_at) VALUES('bad','invalid','x','x','x','x')" >/dev/null 2>&1; then echo "FAIL: invalid claim family bypassed schema constraint"; exit 1; fi
-echo "DATABASE V1-TO-V3 MIGRATION/CONSTRAINTS: PASS"
+echo "DATABASE V1-TO-V5 MIGRATION/CONSTRAINTS: PASS"
 echo "DATABASE ACCEPTANCE: PASS"

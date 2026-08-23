@@ -2,10 +2,12 @@ package nft
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 type fakeRunner struct {
@@ -13,6 +15,25 @@ type fakeRunner struct {
 	tables  string
 	fail    bool
 	scripts []string
+}
+
+func TestMutationLockWaitHonorsContext(t *testing.T) {
+	runner := &fakeRunner{}
+	backend := New(runner)
+	release, err := backend.acquireMutationLock(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	defer cancel()
+	err = backend.ReplaceSets(ctx, map[string][]string{"blocked_v4": {"198.51.100.7/32"}})
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "wait for nft mutation lock") {
+		t.Fatalf("contended mutation ignored context deadline: %v", err)
+	}
+	if len(runner.calls) != 0 {
+		t.Fatalf("canceled mutation reached nft runner: %#v", runner.calls)
+	}
 }
 
 func (f *fakeRunner) Run(_ context.Context, args ...string) (string, string, error) {
@@ -31,16 +52,98 @@ func (f *fakeRunner) Run(_ context.Context, args ...string) (string, string, err
 	return "", "", nil
 }
 func TestValidateScriptRejectsGlobalFlush(t *testing.T) {
-	if err := validateScript("flush ruleset\n"); err == nil {
-		t.Fatal("global flush accepted")
+	for _, script := range []string{
+		"flush ruleset\n",
+		"  FlUsH\t\tRuLeSeT ;\n",
+		"FLUSH\nRULESET\n",
+	} {
+		if err := validateScript(script); err == nil {
+			t.Fatalf("global flush accepted: %q", script)
+		}
 	}
 	if err := validateScript("table inet other { }"); err == nil {
 		t.Fatal("unowned table accepted")
 	}
-	for _, script := range []string{"add chain inet other bad", "include \"/tmp/rules\"", "add element inet other blocked { 192.0.2.1 }"} {
+	for _, script := range []string{
+		"add chain inet other bad",
+		"CrEaTe set inet other bad { type ipv4_addr; }",
+		"rename chain inet other old new",
+		"add chain inet nftfw_filter okay;CrEaTe chain inet other bad",
+		"include \"/tmp/rules\"",
+		"add element inet other blocked { 192.0.2.1 }",
+		"rename table inet nftfw_filter escaped_name",
+		"reset rules inet other",
+		"RESET COUNTERS inet other",
+		"reset flowtables inet other",
+		"list table inet nftfw_filter",
+		"list ruleset",
+		"get element inet nftfw_filter blocked_v4 { 192.0.2.1 }",
+		"import ruleset",
+		"export ruleset",
+		"monitor ruleset",
+		"describe tcp flags",
+		`add rule inet nftfw_filter input counter comment "#"; destroy table inet foreign`,
+		`add rule inet nftfw_filter input counter comment "safe\\"; destroy table inet foreign; #"`,
+		`add rule inet nftfw_filter input counter comment "unterminated #`,
+		"flu\\\nsh ruleset",
+		"incl\\\nude \"/tmp/foreign.nft\"",
+		"add chain inet nftfw_filter okay; dest\\\nroy table inet foreign",
+		`table inet nftfw_filter { include "/tmp/foreign.nft" }`,
+	} {
 		if err := validateScript(script); err == nil {
 			t.Fatalf("unsafe script accepted: %s", script)
 		}
+	}
+	if err := validateScript(`add rule inet nftfw_filter input counter comment "# retained inside quoted text"`); err != nil {
+		t.Fatalf("quoted hash in an owned statement was parsed as a comment: %v", err)
+	}
+	if err := validateScript(`add rule inet nftfw_filter input counter comment "include table foreign; # is inert quoted text"`); err != nil {
+		t.Fatalf("quoted nft keywords were interpreted as commands: %v", err)
+	}
+}
+
+func TestFirstUseProtectionRefusesExistingAndRacedTableCollisions(t *testing.T) {
+	ctx := context.Background()
+	existing := `{"nftables":[{"table":{"family":"inet","name":"nftfw_filter"}}]}`
+	f := &fakeRunner{tables: existing}
+	b := New(f)
+	if err := b.ProtectFirstUse(ctx); err == nil || !strings.Contains(err.Error(), "collision") {
+		t.Fatalf("existing first-use collision accepted: %v", err)
+	}
+	if len(f.scripts) != 0 {
+		t.Fatalf("collision check mutated nftables: %#v", f.scripts)
+	}
+
+	f.tables = `{"nftables":[]}`
+	if err := b.ProtectFirstUse(ctx); err != nil {
+		t.Fatal(err)
+	}
+	// Recheck at candidate/apply time so a table appearing after the initial
+	// inspection cannot be destroyed as though the product owned it.
+	f.tables = existing
+	script := "table inet nftfw_filter { }\n"
+	if err := b.CheckCandidate(ctx, script); err == nil {
+		t.Fatal("raced collision passed candidate validation")
+	}
+	if err := b.Apply(ctx, script); err == nil {
+		t.Fatal("raced collision was destroyed by first apply")
+	}
+	if len(f.scripts) != 0 {
+		t.Fatalf("raced collision reached nft execution: %#v", f.scripts)
+	}
+
+	f.tables = `{"nftables":[]}`
+	if err := b.Apply(ctx, script); err != nil {
+		t.Fatal(err)
+	}
+	// The one-shot guard disarms only after success; later reconciliation may
+	// replace the now-established product table.
+	f.tables = existing
+	if err := b.Apply(ctx, script); err != nil {
+		t.Fatalf("successful first use did not disarm collision guard: %v", err)
+	}
+	if len(f.scripts) != 4 || !strings.HasPrefix(f.scripts[2], "destroy table inet nftfw_filter\n") {
+		t.Fatalf("unexpected guarded apply transactions: %#v", f.scripts)
 	}
 }
 

@@ -126,6 +126,32 @@ func TestTrustedSetIsSeparateFromBlockedSet(t *testing.T) {
 	if strings.Contains(a.Script, "8096") {
 		t.Fatal("temporary access opened a service absent from runtime.trusted_services")
 	}
+	trusted := strings.Index(a.Script, "nftfw:trusted-services-v4-tcp")
+	established := strings.Index(a.Script, "nftfw:input-established")
+	blocked := strings.Index(a.Script, "nftfw:block-v4")
+	if trusted < 0 || established < 0 || blocked < 0 || trusted > established || established > blocked {
+		t.Fatalf("trusted recovery and established management must precede dynamic feed blocks: trusted=%d established=%d blocked=%d", trusted, established, blocked)
+	}
+}
+
+func TestThreatBlocksCannotBreakWireGuardBootstrapOrEstablishedUplinkReplies(t *testing.T) {
+	a, err := Compile(Input{
+		Policy: testEffective(t), BlockedV4: []string{"8.8.8.0/24"},
+		BootstrapV4: []string{"8.8.8.8/32"},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	output := a.Script[strings.Index(a.Script, "chain output"):strings.Index(a.Script, "chain forward")]
+	for _, marker := range []string{"nftfw:uplink-reply-only", "nftfw:wg-bootstrap-v4"} {
+		if !strings.Contains(output, marker) || strings.Index(output, marker) > strings.Index(output, "nftfw:block-v4") {
+			t.Fatalf("%s must precede dynamic output blocks", marker)
+		}
+	}
+	forward := a.Script[strings.Index(a.Script, "chain forward"):]
+	if strings.Index(forward, "nftfw:forward-uplink-reply-only") > strings.Index(forward, "nftfw:block-forward-source-v4") {
+		t.Fatal("established published-service replies must precede dynamic forward blocks")
+	}
 }
 
 func TestAnyAndDenyPoliciesCompileToMatchingRules(t *testing.T) {
@@ -198,6 +224,9 @@ func TestInterfaceOnlyZoneCompilesToInterfaceSelectors(t *testing.T) {
 	}
 	if !strings.Contains(a.Script, `iifname "lan0" meta nfproto ipv4 tcp dport { 22 } accept`) || !strings.Contains(a.Script, `iifname "lan0" meta nfproto ipv6 tcp dport { 22 } accept`) {
 		t.Fatalf("interface-only zone was not compiled: %s", a.Script)
+	}
+	if strings.Count(a.Script, `iifname "lan0" meta nfproto ipv4 tcp dport { 22 } accept`) != 1 || strings.Count(a.Script, `iifname "lan0" meta nfproto ipv6 tcp dport { 22 } accept`) != 1 {
+		t.Fatalf("duplicate same-zone declarations emitted duplicate interface selectors: %s", a.Script)
 	}
 }
 

@@ -33,6 +33,7 @@ RestrictNamespaces=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
 ReadWritePaths=/var/lib/nftfw /run/nftfw
+InaccessiblePaths=-/run/docker.sock -/var/run/docker.sock
 CapabilityBoundingSet=CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_ADMIN
 
