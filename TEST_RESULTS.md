@@ -25,12 +25,12 @@ start WireGuard, or exercise the current machine as a live firewall.
 | Vulnerability scan | PASS | govulncheck v1.7.0 reported no vulnerabilities |
 | Go security scan | PASS | gosec v2.28.0 focused scan reported no findings |
 | Worktree and Git-history secret scan | PASS | Gitleaks 8.16.0 with redaction over the complete history and current worktree |
-| Final extracted-archive secret scan | PENDING | Requires final ZIP and tar.gz artifacts |
+| Final extracted-archive secret scan | PASS | Gitleaks 8.16.0 with redaction over the extracted final release; no leaks found |
 | Fuzz/property suite | PASS | All eight documented targets ran independently for 10 seconds with one worker each |
-| amd64/arm64 release build | PENDING | Requires the clean committed/tagged release candidate |
-| Debian package inspection | PENDING | Requires final amd64 and arm64 packages |
-| Archive integrity and manifests | PENDING | Requires final ZIP and tar.gz artifacts |
-| Reproducibility | PENDING | Requires two builds from the same final commit and tag |
+| amd64/arm64 release build | PASS | Six static stripped binaries from the immutable tagged Git export; explicit version/commit/date and no ambient VCS metadata |
+| Debian package inspection | PASS | amd64/arm64 identity, metadata, root modes, conffile, symlink, documentation, and maintainer scripts verified without installation |
+| Archive integrity and manifests | PASS | ZIP/tar path safety, extraction equality, internal checksums, source manifest, release manifest, and unsigned provenance verified |
+| Reproducibility | PASS | Complete output trees from two distinct parent contexts compare byte-for-byte; unrelated parent debris is excluded |
 | Signature | NOT PROVIDED | Checksums and generated provenance are unsigned; an external release identity must sign them if required |
 
 ### Remediation regressions covered
@@ -99,8 +99,8 @@ current results:
 - byte-identical release archives.
 
 Those claims apply only to the exact `v2.0.0` code and environment on which
-they were collected. Current source evidence must be completed and recorded
-above before `2.0.1` is called accepted.
+they were collected. The independent current evidence recorded above applies
+to the exact `v2.0.1` tag; it does not promote historical privileged results.
 
 ## Fuzz targets required before release
 

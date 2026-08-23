@@ -15,13 +15,12 @@ contain its own final hash.
 
 ## Acceptance status
 
-`2.0.1` is a security-hardening release candidate. Its complete unprivileged
-source gate passes: unit/package and full race tests, vet, formatting, module
-integrity, pinned analyzers, fuzzing, shell analysis, staged systemd-unit
-verification, and worktree/history secret scanning. Committed/tagged
-cross-architecture builds, package/archive inspection, extracted-archive
-secret scanning, and two-build reproducibility remain release gates until
-they are recorded against the exact final commit.
+`2.0.1` is a completed security-hardening software release. Its unprivileged
+source and artifact gates pass: unit/package and full race tests, vet,
+formatting, module integrity, pinned analyzers, fuzzing, shell analysis, staged
+systemd-unit verification, worktree/history/extracted-release secret scanning,
+tagged cross-architecture builds, package/archive inspection, and cross-parent
+two-build reproducibility.
 
 Privileged/live acceptance has not been executed for `2.0.1`. This report does
 not assert that the firewall is installed, enabled, or validated on the
@@ -70,11 +69,11 @@ findings, operating assumptions, and release delta.
 | Staticcheck, govulncheck, and gosec | PASS |
 | Fuzz/property suite | PASS; all eight targets, 10 seconds each |
 | Worktree and Git-history secret scans | PASS |
-| Final extracted-archive secret scan | PENDING FINAL BUILD |
-| amd64/arm64 static binaries | PENDING FINAL BUILD |
-| Debian amd64/arm64 packages | PENDING FINAL BUILD/INSPECTION |
-| Release manifests and provenance | PENDING FINAL BUILD/INSPECTION |
-| ZIP/tar integrity and reproducibility | PENDING TWO FINAL BUILDS |
+| Final extracted-archive secret scan | PASS |
+| amd64/arm64 static binaries | PASS |
+| Debian amd64/arm64 packages | PASS |
+| Release manifests and unsigned provenance | PASS |
+| ZIP/tar integrity and reproducibility | PASS; byte-identical across distinct build parents |
 | Namespace firewall/WireGuard | NOT EXECUTED FOR `2.0.1` |
 | Real provider and Docker lifecycle | NOT EXECUTED FOR `2.0.1` |
 | Guarded host safe apply/rollback | NOT EXECUTED FOR `2.0.1` |
@@ -118,9 +117,9 @@ socket access is effectively host-root trust.
 6. The loopback dashboard has no application login and must not be exposed
    publicly without a separately approved authentication/TLS layer.
 
-No pending gate should be represented as PASS. A final release handoff should
-update this report and `TEST_RESULTS.md` with only evidence collected against
-the exact tagged commit.
+All unprivileged software-release gates above were collected against the exact
+tagged source. The privileged/live items remain explicitly not executed and
+must not be inferred from the software-release result.
 
 ## Release artifacts
 

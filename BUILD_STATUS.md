@@ -19,13 +19,12 @@ pass for changed code.
 | P9 dynamic blocks | PASS | Current feed/provenance tests cover public-prefix bounds, global coverage caps, protected prefixes, restoration, and compensation |
 | P10 Docker/integrations | ACTIVE | Observer/feed unit paths pass; live Docker lifecycle is not executed and Docker socket access remains explicit opt-in |
 | P11 CLI/API/web | PASS | Current contract tests enforce `nftfw.status.v1`, typed protected-state fields, fail-closed peer credentials, and separate quotas |
-| P12 packaging | ACTIVE | Release/deb scripts and mutation-free staged systemd preflight pass; clean tagged cross-build, package inspection, archive validation, and reproducibility remain pending |
+| P12 packaging | PASS | Tagged amd64/arm64 cross-build, Debian inspection, staged systemd preflight, archive/manifests, atomic output, and cross-parent reproducibility pass |
 | P13 namespace acceptance | NOT STARTED | Not executed for `2.0.1`; `v2.0.0` results are historical only |
 | P14 host acceptance | NOT STARTED | No `2.0.1` host firewall mutation, service installation, reboot, or live NUC validation performed |
-| P15 security audit | ACTIVE | Source findings are repaired; tests, race, pinned analyzers, fuzzing, and history/worktree secret scans pass; final extracted-archive scan remains pending |
-| P16 release | ACTIVE | Commit, tag, final artifacts, checksums, provenance inspection, and two-build comparison remain pending |
+| P15 security audit | PASS | Source findings are repaired; tests, race, pinned analyzers, fuzzing, and history/worktree/extracted-release secret scans pass |
+| P16 release | PASS | Clean annotated tag, final artifacts, checksums, provenance inspection, and byte-identical cross-parent builds pass; signature remains explicitly external |
 
-The candidate must not be described as a completed production release until
-all required unprivileged release gates pass against the exact tagged commit.
-Privileged deployment and live-host gates additionally require explicit
-operator approval under the installation safety plan.
+The software release is complete. Privileged deployment and live-host gates
+remain separate and require explicit operator approval under the installation
+safety plan.

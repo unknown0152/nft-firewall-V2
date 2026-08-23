@@ -4,10 +4,10 @@ Audit date: 2026-08-16, 2026-08-17, and 2026-08-23 UTC. Scope: production Go, co
 nftables ownership, Unix APIs, persistence/rollback, systemd, integrations,
 web, installers, tests, dependencies, Git history, and release contents.
 
-Current source disposition: the `2.0.1` candidate passes its unprivileged
-source gates. Privileged/live acceptance and the final tagged build, archive
-scan, and reproducibility checks remain separately gated in `TEST_RESULTS.md`;
-this document must not be read as approval to install or mutate a live host.
+Current source disposition: the tagged `2.0.1` release passes its unprivileged
+source, artifact, archive-scan, and reproducibility gates. Privileged/live
+acceptance remains separately gated in `TEST_RESULTS.md`; this document must
+not be read as approval to install or mutate a live host.
 
 ## Findings repaired
 
@@ -40,9 +40,9 @@ this document must not be read as approval to install or mutate a live host.
 | NFV2-025 | Enabling Docker observation silently restored a root-equivalent socket into the daemon sandbox | MEDIUM | Daemon compromise could pivot through Docker despite capability bounding | Packaged unit hides the socket; access requires a separate explicit administrator drop-in | Unit verification, package inspection, and disabled-default documentation | CLOSED |
 | NFV2-026 | An `nft --file` error and an unmarked fallback were treated as if kernel mutation outcome/ownership were known | HIGH | A possibly active candidate could be forgotten, or an unrelated product-named table could be deleted | Type execution-attempt errors, require confirmed restoration, retain ambiguous pending state, and refuse no-marker fallback mutation | Prior-generation restore success/failure, first-generation ambiguous/empty, post-save collision, and corrupt/absent fallback regressions | CLOSED |
 | NFV2-027 | Durable claim mutations and runtime-set publication could diverge or interleave across processes | HIGH | Status could report healthy while a DB block/allow change was absent from the kernel, or a stale writer could overwrite newer sets | Atomic desired/applied publication revisions, cross-process serialization, fail-closed health, and add/remove compensation | Direct failure, same-count swap, interleaving, health, compensation, full race, and adversarial-review regressions | CLOSED |
-| NFV2-028 | Enclosing checksum generation included unrelated stale release-directory files | MEDIUM | `SHA256SUMS` could describe a mixed release set and make publication non-reproducible | Hash an explicit sorted artifact list for the requested version; normalize locale/timezone; isolate the captured commit; stage a complete versioned release before atomic publication | Shell analysis, stale-file regression, and two-build comparison remain to be completed on the final commit | IN VERIFICATION |
+| NFV2-028 | Enclosing checksum generation included unrelated stale release-directory files | MEDIUM | `SHA256SUMS` could describe a mixed release set and make publication non-reproducible | Hash an explicit sorted artifact list for the requested version; normalize locale/timezone; isolate the captured commit; stage a complete versioned release before atomic publication | Shell analysis, unrelated-parent sentinel regression, exact checksum scope, and cross-parent two-build comparison | CLOSED |
 | NFV2-029 | Fresh source installation verified units before final-path binaries existed | MEDIUM | Installation aborted on a clean host before making changes | Verify rewritten temporary unit copies against isolated staged executables before any host mutation | ShellCheck, direct clean-host reproduction, and wrapper-enforced staged-preflight regression | CLOSED |
-| NFV2-030 | Go auto-discovered an unrelated enclosing Git repository for an isolated source export | MEDIUM | Otherwise identical builds in a workspace and `/tmp` embedded different ambient VCS metadata and produced different binaries | Pass `-buildvcs=false`, reject any ambient VCS build setting in every release binary, and rely on the explicit signed-off commit fields and provenance | Enclosing-repository reproduction plus final cross-parent two-build comparison remain to be completed | IN VERIFICATION |
+| NFV2-030 | Go auto-discovered an unrelated enclosing Git repository for an isolated source export | MEDIUM | Otherwise identical builds in a workspace and `/tmp` embedded different ambient VCS metadata and produced different binaries | Pass `-buildvcs=false`, reject any ambient VCS build setting in every release binary, and rely on the explicit signed-off commit fields and provenance | Original cross-parent reproduction, metadata-absence assertions for all binaries, and corrected byte-identical cross-parent builds | CLOSED |
 
 Verification labels in this table describe regression coverage. Any
 namespace, real-provider, Docker, host, reboot, or other privileged evidence
@@ -93,8 +93,8 @@ unresolved high/critical implementation findings.
 
 ## Final scan evidence
 
-The `2.0.1` staticcheck, govulncheck, gosec, full race, ShellCheck, fuzz, and
-Gitleaks history/worktree gates pass. Extracted-release secret/content scans,
-final package/archive inspection, and two-build reproducibility remain pending
-the exact tagged commit. Historical `2.0.0` evidence is retained in the tagged
-`2.0.0` reports and is not promoted to this candidate.
+The `2.0.1` staticcheck, govulncheck, gosec, full race, ShellCheck, fuzz,
+Gitleaks history/worktree/extracted-release, package/archive inspection, and
+two-build reproducibility gates pass against the tagged release. Historical
+`2.0.0` privileged evidence is retained in that tag's reports and is not
+promoted to this release.
