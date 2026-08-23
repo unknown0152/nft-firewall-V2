@@ -34,7 +34,8 @@
 - Include complete upgrade/uninstall/status documentation in Debian packages,
   enforce Go 1.25.13 release builds, and emit deterministic manifests plus an
   unsigned in-toto/SLSA build-provenance statement. Scope enclosing checksums
-  to the exact release and normalize locale/timezone inputs.
+  to the exact release, normalize locale/timezone inputs, and disable ambient
+  VCS auto-discovery so an enclosing unrelated repository cannot alter output.
 - Verify source-install systemd units against isolated staged executables before
   making any host change.
 

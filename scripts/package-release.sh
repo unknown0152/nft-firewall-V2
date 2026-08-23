@@ -6,7 +6,7 @@ root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)
 export LC_ALL=C
 export TZ=UTC
 export GOENV=off
-export GOFLAGS=
+export GOFLAGS=-buildvcs=false
 export GOEXPERIMENT=
 export GOWORK=off
 export GOAMD64=v1
@@ -152,6 +152,10 @@ for arch in amd64 arm64; do
         grep -Fq $'\tbuild\t-trimpath=true' <<< "$binary_metadata"
         grep -Fq $'\tbuild\tGOOS=linux' <<< "$binary_metadata"
         grep -Fq $'\tbuild\tGOARCH='"$arch" <<< "$binary_metadata"
+        if grep -Fq $'\tbuild\tvcs=' <<< "$binary_metadata"; then
+            echo "Release binary unexpectedly contains ambient VCS metadata: $binary_path" >&2
+            exit 1
+        fi
         if [[ "$arch" == amd64 ]]; then
             grep -Fq $'\tbuild\tGOAMD64=v1' <<< "$binary_metadata"
         else

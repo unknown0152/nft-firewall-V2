@@ -43,9 +43,10 @@ make deb VERSION=2.0.1
 ./tests/packaging/systemd_preflight.sh amd64
 ```
 
-Release builds set `CGO_ENABLED=0`, `GOOS=linux`, use `-trimpath`, omit the Go
-build ID, and embed version, commit, and a controlled build date. amd64 and
-arm64 are produced. `SOURCE_DATE_EPOCH` is honored by final package tooling.
+Release builds set `CGO_ENABLED=0`, `GOOS=linux`, use `-trimpath`, disable
+ambient VCS auto-discovery, omit the Go build ID, and embed version, commit,
+and a controlled build date. amd64 and arm64 are produced.
+`SOURCE_DATE_EPOCH` is honored by final package tooling.
 
 Final packaging requires a clean tree and matching `v<version>` tag:
 

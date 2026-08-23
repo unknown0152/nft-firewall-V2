@@ -25,14 +25,14 @@ security:
 check: fmt-check test race vet
 build:
 	mkdir -p dist
-	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o dist/nftfw ./cmd/nftfw
-	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o dist/nftfwd ./cmd/nftfwd
-	CGO_ENABLED=0 go build -trimpath -ldflags '$(LDFLAGS)' -o dist/nftfw-web ./cmd/nftfw-web
+	CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags '$(LDFLAGS)' -o dist/nftfw ./cmd/nftfw
+	CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags '$(LDFLAGS)' -o dist/nftfwd ./cmd/nftfwd
+	CGO_ENABLED=0 go build -buildvcs=false -trimpath -ldflags '$(LDFLAGS)' -o dist/nftfw-web ./cmd/nftfw-web
 release:
 	mkdir -p dist
 	for arch in amd64 arm64; do \
 		for bin in nftfw nftfwd nftfw-web; do \
-			CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -trimpath -ldflags '$(LDFLAGS)' -o dist/$$bin-linux-$$arch ./cmd/$$bin; \
+			CGO_ENABLED=0 GOOS=linux GOARCH=$$arch go build -buildvcs=false -trimpath -ldflags '$(LDFLAGS)' -o dist/$$bin-linux-$$arch ./cmd/$$bin; \
 		done; \
 	done
 	cd dist && sha256sum nftfw*-linux-* > SHA256SUMS
