@@ -1,1 +1,13 @@
-ÎÈur‰¦jwg¢×èºw[jÇº
+#!/bin/sh
+set -eu
+
+if [ -d /run/systemd/system ]; then
+    case "${1:-}" in
+        upgrade)
+            systemctl stop nftfw-web.service nftfw-rollback.timer nftfwd.service >/dev/null 2>&1 || true
+            ;;
+        remove|deconfigure)
+            systemctl disable --now nftfw-web.service nftfw-rollback.timer nftfwd.service nftfw-early.service >/dev/null 2>&1 || true
+            ;;
+    esac
+fi

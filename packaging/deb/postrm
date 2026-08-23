@@ -1,1 +1,10 @@
-ÎÈur‰¦jwg¢×èºw[jÇº
+#!/bin/sh
+set -eu
+
+if command -v systemctl >/dev/null 2>&1; then
+    systemctl daemon-reload || true
+fi
+
+if [ "${1:-}" = purge ]; then
+    echo "NFT Firewall V2 state remains in /var/lib/nftfw; remove it only after an explicit backup and policy handoff."
+fi

@@ -1,1 +1,34 @@
-ÎÈur‰¦jwg¢×èºw[jÇº
+[Unit]
+Description=NFT Firewall V2 early boot enforcement restore
+Documentation=file:/usr/share/doc/nft-firewall-v2/RECOVERY.md
+After=local-fs.target
+Before=network-pre.target nftfwd.service
+ConditionPathExists=/var/lib/nftfw/enforcement-enabled
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/nftfw/nftfwd --restore-active --state-dir /var/lib/nftfw
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadOnlyPaths=/var/lib/nftfw
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=network-pre.target

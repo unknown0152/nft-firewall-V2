@@ -1,0 +1,28 @@
+[Unit]
+Description=NFT Firewall V2 expired safe-apply rollback
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/nftfw/nftfwd --rollback-expired --config /etc/nftfw/nftfw.toml --state-db /var/lib/nftfw/state.db
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
+ReadWritePaths=/var/lib/nftfw
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN

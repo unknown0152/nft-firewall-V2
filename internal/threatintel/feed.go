@@ -1,1 +1,176 @@
-ÎÈur‰¦jwg¢×èºw[jÇº
+package threatintel
+
+import (
+	"bufio"
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"net/http"
+	"net/netip"
+	"net/url"
+	"strings"
+	"time"
+)
+
+type Feed struct {
+	URL        string
+	MaxEntries int
+	MaxBytes   int64
+	Client     *http.Client
+}
+
+func (f Feed) Fetch(ctx context.Context) ([]string, error) {
+	u, err := url.Parse(f.URL)
+	if err != nil || u.Scheme != "https" || u.Host == "" || u.User != nil {
+		return nil, errors.New("threat feed must use HTTPS")
+	}
+	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
+	defer cancel()
+	max := f.MaxEntries
+	if max <= 0 {
+		max = 10000
+	}
+	bytes := f.MaxBytes
+	if bytes <= 0 {
+		bytes = 8 << 20
+	}
+	client := f.Client
+	if client == nil {
+		transport := http.DefaultTransport.(*http.Transport).Clone()
+		transport.Proxy = nil
+		transport.DialContext = publicDialContext
+		client = &http.Client{Timeout: 15 * time.Second, Transport: transport}
+	}
+	clientCopy := *client
+	previousRedirect := clientCopy.CheckRedirect
+	clientCopy.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		if len(via) >= 5 {
+			return errors.New("too many threat feed redirects")
+		}
+		if req.URL.Scheme != "https" {
+			return errors.New("threat feed redirect left HTTPS")
+		}
+		if previousRedirect != nil {
+			return previousRedirect(req, via)
+		}
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.URL, nil)
+	if err != nil {
+		return nil, err
+	}
+	resp, err := clientCopy.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return nil, fmt.Errorf("feed HTTP status %d", resp.StatusCode)
+	}
+	r := io.LimitReader(resp.Body, bytes+1)
+	body, err := io.ReadAll(r)
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(body)) > bytes {
+		return nil, errors.New("feed response exceeds byte limit")
+	}
+	return Parse(body, max)
+}
+
+var nonPublicFeedNetworks = func() []netip.Prefix {
+	raw := []string{
+		"0.0.0.0/8", "10.0.0.0/8", "100.64.0.0/10", "127.0.0.0/8",
+		"169.254.0.0/16", "172.16.0.0/12", "192.0.0.0/24", "192.0.2.0/24",
+		"192.88.99.0/24", "192.168.0.0/16", "198.18.0.0/15", "198.51.100.0/24",
+		"203.0.113.0/24", "224.0.0.0/4", "240.0.0.0/4",
+		"::/128", "::1/128", "100::/64", "2001:db8::/32", "fc00::/7", "fe80::/10", "ff00::/8",
+	}
+	result := make([]netip.Prefix, 0, len(raw))
+	for _, value := range raw {
+		result = append(result, netip.MustParsePrefix(value))
+	}
+	return result
+}()
+
+func publicDialContext(ctx context.Context, network, address string) (net.Conn, error) {
+	host, port, err := net.SplitHostPort(address)
+	if err != nil {
+		return nil, errors.New("invalid threat feed network address")
+	}
+	resolved, err := net.DefaultResolver.LookupNetIP(ctx, "ip", host)
+	if err != nil {
+		return nil, errors.New("threat feed DNS resolution failed")
+	}
+	dialer := net.Dialer{Timeout: 5 * time.Second, KeepAlive: 30 * time.Second}
+	var lastErr error
+	for _, candidate := range resolved {
+		candidate = candidate.Unmap()
+		if !isPublicFeedAddress(candidate) {
+			continue
+		}
+		conn, dialErr := dialer.DialContext(ctx, network, net.JoinHostPort(candidate.String(), port))
+		if dialErr == nil {
+			return conn, nil
+		}
+		lastErr = dialErr
+	}
+	if lastErr != nil {
+		return nil, errors.New("threat feed public endpoint connection failed")
+	}
+	return nil, errors.New("threat feed target resolved only to non-public addresses")
+}
+
+func isPublicFeedAddress(address netip.Addr) bool {
+	address = address.Unmap()
+	if !address.IsValid() || !address.IsGlobalUnicast() || address.IsPrivate() || address.IsLoopback() || address.IsLinkLocalUnicast() || address.IsMulticast() || address.IsUnspecified() {
+		return false
+	}
+	for _, prefix := range nonPublicFeedNetworks {
+		if prefix.Contains(address) {
+			return false
+		}
+	}
+	return true
+}
+
+func Parse(body []byte, max int) ([]string, error) {
+	if max <= 0 {
+		max = 10000
+	}
+	scanner := bufio.NewScanner(strings.NewReader(string(body)))
+	scanner.Buffer(make([]byte, 1024), 64<<10)
+	seen := map[string]bool{}
+	result := []string{}
+	for scanner.Scan() {
+		line := strings.TrimSpace(strings.SplitN(scanner.Text(), "#", 2)[0])
+		if line == "" {
+			continue
+		}
+		p, err := netip.ParsePrefix(line)
+		if err != nil {
+			if ip, ipErr := netip.ParseAddr(line); ipErr == nil {
+				p = netip.PrefixFrom(ip, ip.BitLen())
+			} else {
+				return nil, fmt.Errorf("invalid feed entry %q", line)
+			}
+		}
+		if p.Bits() == 0 {
+			return nil, fmt.Errorf("feed entry %q is /0", line)
+		}
+		canonical := p.Masked().String()
+		if !seen[canonical] {
+			seen[canonical] = true
+			result = append(result, canonical)
+			if len(result) > max {
+				return nil, errors.New("feed entry limit exceeded")
+			}
+		}
+	}
+	if err := scanner.Err(); err != nil {
+		return nil, err
+	}
+	return result, nil
+}

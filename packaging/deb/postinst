@@ -1,1 +1,24 @@
-ÎÈur‰¦jwg¢×èºw[jÇº
+#!/bin/sh
+set -eu
+
+getent group nftfw >/dev/null 2>&1 || addgroup --system nftfw
+getent group nftfw-web >/dev/null 2>&1 || addgroup --system nftfw-web
+id nftfw-web >/dev/null 2>&1 || adduser --system --ingroup nftfw-web --home /var/empty --no-create-home --disabled-login nftfw-web
+install -d -o root -g nftfw -m 0750 /etc/nftfw
+install -d -o root -g root -m 0700 /var/lib/nftfw /var/lib/nftfw/backups
+if [ -L /etc/nftfw/nftfw.toml ] || [ ! -f /etc/nftfw/nftfw.toml ]; then
+    echo "Configuration must be a regular, non-symlink file: /etc/nftfw/nftfw.toml" >&2
+    exit 1
+fi
+chown root:nftfw /etc/nftfw/nftfw.toml
+chmod 0640 /etc/nftfw/nftfw.toml
+/usr/lib/nftfw/nftfw config validate /etc/nftfw/nftfw.toml >/dev/null
+
+if [ -d /run/systemd/system ]; then
+    systemctl daemon-reload
+    systemctl enable nftfw-early.service nftfwd.service nftfw-rollback.timer nftfw-web.service >/dev/null
+    systemctl restart nftfwd.service nftfw-rollback.timer nftfw-web.service
+fi
+
+echo "NFT Firewall V2 installed but no firewall policy was applied."
+echo "Edit /etc/nftfw/nftfw.toml, then run: nftfw config validate && nftfw plan"
