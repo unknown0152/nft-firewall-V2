@@ -1,0 +1,22 @@
+{
+  "schema": "nftfw.post-tag-validation.v1",
+  "status": "POST_TAG_VALIDATION_PASS",
+  "target_version": "2.0.2",
+  "git_commit": "@EXACT_40_HEX_GIT_COMMIT@",
+  "git_tag": "v2.0.2",
+  "git_tag_object": "@EXACT_40_HEX_ANNOTATED_TAG_OBJECT@",
+  "tagged_build_evidence_sha256": "@EXACT_64_HEX_BUILD_EVIDENCE_SHA256@",
+  "external_sha256sums_sha256": "@EXACT_64_HEX_SHA256SUMS_SHA256@",
+  "gates": {
+    "package_lifecycle": "PASS",
+    "boot_and_recovery": "PASS",
+    "network_provenance_and_zero_leak": "PASS",
+    "docker_bridge_lifecycle": "PASS",
+    "real_ovpn": "PASS",
+    "two_build_reproducibility": "PASS",
+    "package_and_archive_inspection": "PASS",
+    "source_history_and_extracted_tree_secret_scan": "PASS"
+  },
+  "publication_authorized": false,
+  "deployment_authorized": false
+}

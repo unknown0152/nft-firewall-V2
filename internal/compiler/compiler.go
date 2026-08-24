@@ -5,6 +5,7 @@ package compiler
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"net/netip"
 	"sort"
@@ -13,6 +14,7 @@ import (
 
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
 	"github.com/unknown0152/nft-firewall-v2/internal/policy"
+	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 )
 
 const (
@@ -35,6 +37,7 @@ type Artifact struct {
 	Generation uint64
 	Script     string
 	Checksum   string
+	Provenance []provenance.Assignment
 }
 
 func Compile(in Input, generation uint64) (Artifact, error) {
@@ -69,6 +72,9 @@ func Compile(in Input, generation uint64) (Artifact, error) {
 	if err := validateNATTargets(in.Policy.Config.NAT, in.DockerNets); err != nil {
 		return Artifact{}, err
 	}
+	if err := validateContainerTopology(in.Policy.Config, in.DockerNets, in.DockerNets6); err != nil {
+		return Artifact{}, err
+	}
 	var b strings.Builder
 	line := func(s string) { b.WriteString(s); b.WriteByte('\n') }
 	line("#!/usr/sbin/nft -f")
@@ -83,7 +89,11 @@ func Compile(in Input, generation uint64) (Artifact, error) {
 	emitIPv6(&b, in)
 	script := b.String()
 	sum := sha256.Sum256([]byte(script))
-	return Artifact{Generation: generation, Script: script, Checksum: hex.EncodeToString(sum[:])}, nil
+	assignments := make([]provenance.Assignment, 0, len(in.Policy.Config.Interfaces))
+	for _, configured := range sortedInterfaces(in.Policy.Config.Interfaces) {
+		assignments = append(assignments, provenance.Assignment{Name: configured.Name, ID: configured.ProvenanceID})
+	}
+	return Artifact{Generation: generation, Script: script, Checksum: hex.EncodeToString(sum[:]), Provenance: assignments}, nil
 }
 
 func policyChecksum(e policy.Effective) string {
@@ -110,8 +120,9 @@ func emitFilter(b *strings.Builder, in Input) {
 	emitSet(b, "docker_nets6", "ipv6_addr", in.DockerNets6, false)
 	line("    chain input {")
 	line("        type filter hook input priority filter; policy drop;")
-	line("        iifname \"lo\" accept comment \"nftfw:loopback\"")
 	line("        ct state invalid drop comment \"nftfw:invalid\"")
+	line("        iifname \"lo\" accept comment \"nftfw:loopback\"")
+	emitProvenanceTags(b, c.Interfaces, "input")
 	if c.System.IPv6Mode != "disabled" {
 		line("        ip6 hoplimit 255 meta l4proto ipv6-icmp icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } accept comment \"nftfw:ipv6-neighbor-discovery\"")
 	}
@@ -122,7 +133,7 @@ func emitFilter(b *strings.Builder, in Input) {
 		}
 	}
 	emitPolicies(b, in.Policy, "input", "deny")
-	line("        ct state established,related accept comment \"nftfw:input-established\"")
+	emitInputReplies(b, c.Interfaces)
 	line("        ip saddr @blocked_v4 drop comment \"nftfw:block-v4\"")
 	line("        ip6 saddr @blocked_v6 drop comment \"nftfw:block-v6\"")
 	emitPolicies(b, in.Policy, "input", "allow")
@@ -130,15 +141,15 @@ func emitFilter(b *strings.Builder, in Input) {
 	line("    }")
 	line("    chain output {")
 	line("        type filter hook output priority filter; policy drop;")
-	line("        oifname \"lo\" accept comment \"nftfw:loopback\"")
 	line("        ct state invalid drop comment \"nftfw:invalid\"")
-	line("        ip daddr @docker_nets meta l4proto icmp icmp type { destination-unreachable, time-exceeded, parameter-problem } accept comment \"nftfw:container-path-errors-v4\"")
-	line("        ip6 daddr @docker_nets6 meta l4proto ipv6-icmp icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept comment \"nftfw:container-path-errors-v6\"")
+	emitOutputProvenanceTags(b, c.Interfaces)
+	line("        oifname \"lo\" accept comment \"nftfw:loopback\"")
+	emitProvenanceReplies(b, c.Interfaces, "output")
+	emitContainerPathErrors(b, c)
 	if c.System.IPv6Mode != "disabled" {
 		line("        ip6 hoplimit 255 meta l4proto ipv6-icmp icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit, nd-router-advert } accept comment \"nftfw:ipv6-neighbor-discovery\"")
 		line(fmt.Sprintf("        oifname %s udp sport 546 udp dport 547 accept comment \"nftfw:dhcpv6-bootstrap\"", quote(c.Interfaces, "uplink")))
 	}
-	line(fmt.Sprintf("        oifname %s ct direction reply ct state established,related accept comment \"nftfw:uplink-reply-only\"", quote(c.Interfaces, "uplink")))
 	line(fmt.Sprintf("        oifname %s udp sport 68 udp dport 67 accept comment \"nftfw:dhcp-bootstrap\"", quote(c.Interfaces, "uplink")))
 	if c.WireGuard.EndpointPort > 0 {
 		line(fmt.Sprintf("        oifname %s meta mark %s ip daddr @wg_bootstrap_v4 udp dport %d accept comment \"nftfw:wg-bootstrap-v4\"", quote(c.Interfaces, "uplink"), c.WireGuard.Fwmark, c.WireGuard.EndpointPort))
@@ -154,26 +165,149 @@ func emitFilter(b *strings.Builder, in Input) {
 	line("    chain forward {")
 	line("        type filter hook forward priority filter; policy drop;")
 	line("        ct state invalid drop comment \"nftfw:invalid\"")
-	line(fmt.Sprintf("        oifname %s ct direction reply ct state established,related accept comment \"nftfw:forward-uplink-reply-only\"", quote(c.Interfaces, "uplink")))
+	emitProvenanceTags(b, c.Interfaces, "forward")
+	emitProvenanceReplies(b, c.Interfaces, "forward")
 	line("        ip saddr @blocked_v4 drop comment \"nftfw:block-forward-source-v4\"")
 	line("        ip daddr @blocked_v4 drop comment \"nftfw:block-forward-destination-v4\"")
 	line("        ip6 saddr @blocked_v6 drop comment \"nftfw:block-forward-source-v6\"")
 	line("        ip6 daddr @blocked_v6 drop comment \"nftfw:block-forward-destination-v6\"")
-	line(fmt.Sprintf("        ip saddr @docker_nets oifname %s tcp flags syn tcp option maxseg size set %d comment \"nftfw:container-vpn-mss-out-v4\"", strconv.Quote(c.WireGuard.Interface), c.WireGuard.TCPMSS))
-	line(fmt.Sprintf("        ip6 saddr @docker_nets6 oifname %s tcp flags syn tcp option maxseg size set %d comment \"nftfw:container-vpn-mss-out-v6\"", strconv.Quote(c.WireGuard.Interface), c.WireGuard.TCPMSS))
-	line(fmt.Sprintf("        iifname %s ip daddr @docker_nets tcp flags syn tcp option maxseg size set %d comment \"nftfw:container-vpn-mss-in-v4\"", strconv.Quote(c.WireGuard.Interface), c.WireGuard.TCPMSS))
-	line(fmt.Sprintf("        iifname %s ip6 daddr @docker_nets6 tcp flags syn tcp option maxseg size set %d comment \"nftfw:container-vpn-mss-in-v6\"", strconv.Quote(c.WireGuard.Interface), c.WireGuard.TCPMSS))
-	line(fmt.Sprintf("        ip saddr @docker_nets oifname %s drop comment \"nftfw:container-physical-deny\"", quote(c.Interfaces, "uplink")))
-	line(fmt.Sprintf("        ip6 saddr @docker_nets6 oifname %s drop comment \"nftfw:container-physical-deny-v6\"", quote(c.Interfaces, "uplink")))
+	emitContainerForwardGuards(b, c)
 	line(fmt.Sprintf("        oifname %s drop comment \"nftfw:forward-physical-deny\"", quote(c.Interfaces, "uplink")))
 	emitPolicies(b, in.Policy, "forward", "deny")
-	line("        ct state established,related accept comment \"nftfw:forward-established\"")
-	line(fmt.Sprintf("        ip saddr @docker_nets oifname %s counter comment \"nftfw:container-vpn-egress\"", strconv.Quote(c.WireGuard.Interface)))
-	line(fmt.Sprintf("        ip6 saddr @docker_nets6 oifname %s counter comment \"nftfw:container-vpn-egress-v6\"", strconv.Quote(c.WireGuard.Interface)))
+	emitContainerVPNMarkers(b, c)
 	emitPolicies(b, in.Policy, "forward", "allow")
 	line("        counter drop comment \"nftfw:forward-default-deny\"")
 	line("    }")
 	line("}")
+}
+
+func emitProvenanceTags(b *strings.Builder, interfaces []config.Interface, chain string) {
+	line := func(s string) { b.WriteString(s); b.WriteByte('\n') }
+	for _, configured := range sortedInterfaces(interfaces) {
+		encoded := uint32(configured.ProvenanceID) << 24
+		line(fmt.Sprintf(
+			"        iifname %s ct direction original ct mark & 0x%08x == 0x00000000 ct mark set (ct mark & 0x%08x) | 0x%08x counter comment %s",
+			strconv.Quote(configured.Name), provenance.Mask, provenance.KeepMask, encoded,
+			quoteString("nftfw:provenance-tag-"+chain+":"+configured.Name),
+		))
+	}
+}
+
+func emitProvenanceReplies(b *strings.Builder, interfaces []config.Interface, chain string) {
+	line := func(s string) { b.WriteString(s); b.WriteByte('\n') }
+	for _, configured := range sortedInterfaces(interfaces) {
+		encoded := uint32(configured.ProvenanceID) << 24
+		line(fmt.Sprintf(
+			"        oifname %s ct mark & 0x%08x == 0x%08x ct direction reply ct state established,related accept comment %s",
+			strconv.Quote(configured.Name), provenance.Mask, encoded,
+			quoteString("nftfw:provenance-reply-"+chain+":"+configured.Name),
+		))
+	}
+}
+
+func emitOutputProvenanceTags(b *strings.Builder, interfaces []config.Interface) {
+	line := func(s string) { b.WriteString(s); b.WriteByte('\n') }
+	for _, configured := range sortedInterfaces(interfaces) {
+		encoded := uint32(configured.ProvenanceID) << 24
+		line(fmt.Sprintf(
+			"        oifname %s ct direction original ct mark & 0x%08x == 0x00000000 ct mark set (ct mark & 0x%08x) | 0x%08x counter comment %s",
+			strconv.Quote(configured.Name), provenance.Mask, provenance.KeepMask, encoded,
+			quoteString("nftfw:provenance-tag-output:"+configured.Name),
+		))
+	}
+}
+
+func emitInputReplies(b *strings.Builder, interfaces []config.Interface) {
+	line := func(s string) { b.WriteString(s); b.WriteByte('\n') }
+	for _, configured := range sortedInterfaces(interfaces) {
+		// Host-original flows are tagged by their selected output interface. A
+		// reply must return on that exact interface with the same connection mark.
+		encoded := uint32(configured.ProvenanceID) << 24
+		line(fmt.Sprintf(
+			"        iifname %s ct mark & 0x%08x == 0x%08x ct direction reply ct state established,related accept comment %s",
+			strconv.Quote(configured.Name), provenance.Mask, encoded, quoteString("nftfw:input-reply-only"),
+		))
+	}
+}
+
+type containerBinding struct {
+	Interface string
+	Prefix    string
+	Family    string
+}
+
+func containerBindings(c config.Config) []containerBinding {
+	var result []containerBinding
+	for _, configured := range c.Interfaces {
+		if configured.Role != "container" {
+			continue
+		}
+		for _, raw := range configured.CIDRs {
+			prefix, err := netip.ParsePrefix(raw)
+			if err != nil {
+				continue
+			}
+			family := "ip6"
+			if prefix.Addr().Is4() {
+				family = "ip"
+			}
+			result = append(result, containerBinding{Interface: configured.Name, Prefix: prefix.Masked().String(), Family: family})
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Interface != result[j].Interface {
+			return result[i].Interface < result[j].Interface
+		}
+		if result[i].Family != result[j].Family {
+			return result[i].Family < result[j].Family
+		}
+		return result[i].Prefix < result[j].Prefix
+	})
+	return result
+}
+
+func emitContainerPathErrors(b *strings.Builder, c config.Config) {
+	line := func(s string) { b.WriteString(s); b.WriteByte('\n') }
+	for _, binding := range containerBindings(c) {
+		if binding.Family == "ip" {
+			line(fmt.Sprintf("        oifname %s ip daddr %s meta l4proto icmp icmp type { destination-unreachable, time-exceeded, parameter-problem } accept comment %s", strconv.Quote(binding.Interface), binding.Prefix, quoteString("nftfw:container-path-errors-v4:"+binding.Interface)))
+		} else {
+			line(fmt.Sprintf("        oifname %s ip6 daddr %s meta l4proto ipv6-icmp icmpv6 type { destination-unreachable, packet-too-big, time-exceeded, parameter-problem } accept comment %s", strconv.Quote(binding.Interface), binding.Prefix, quoteString("nftfw:container-path-errors-v6:"+binding.Interface)))
+		}
+	}
+}
+
+func emitContainerForwardGuards(b *strings.Builder, c config.Config) {
+	line := func(s string) { b.WriteString(s); b.WriteByte('\n') }
+	vpn := strconv.Quote(c.WireGuard.Interface)
+	uplink := quote(c.Interfaces, "uplink")
+	for _, binding := range containerBindings(c) {
+		familySuffix := "v4"
+		if binding.Family == "ip6" {
+			familySuffix = "v6"
+		}
+		line(fmt.Sprintf("        iifname %s %s saddr %s oifname %s tcp flags syn tcp option maxseg size set %d comment %s", strconv.Quote(binding.Interface), binding.Family, binding.Prefix, vpn, c.WireGuard.TCPMSS, quoteString("nftfw:container-vpn-mss-out-"+familySuffix+":"+binding.Interface)))
+		line(fmt.Sprintf("        iifname %s oifname %s %s daddr %s tcp flags syn tcp option maxseg size set %d comment %s", vpn, strconv.Quote(binding.Interface), binding.Family, binding.Prefix, c.WireGuard.TCPMSS, quoteString("nftfw:container-vpn-mss-in-"+familySuffix+":"+binding.Interface)))
+		line(fmt.Sprintf("        iifname %s %s saddr %s oifname %s drop comment %s", strconv.Quote(binding.Interface), binding.Family, binding.Prefix, uplink, quoteString("nftfw:container-physical-deny-"+familySuffix+":"+binding.Interface)))
+	}
+}
+
+func emitContainerVPNMarkers(b *strings.Builder, c config.Config) {
+	line := func(s string) { b.WriteString(s); b.WriteByte('\n') }
+	vpn := strconv.Quote(c.WireGuard.Interface)
+	for _, binding := range containerBindings(c) {
+		familySuffix := "v4"
+		if binding.Family == "ip6" {
+			familySuffix = "v6"
+		}
+		line(fmt.Sprintf("        iifname %s %s saddr %s oifname %s counter comment %s", strconv.Quote(binding.Interface), binding.Family, binding.Prefix, vpn, quoteString("nftfw:container-vpn-egress-"+familySuffix+":"+binding.Interface)))
+	}
+}
+
+func sortedInterfaces(interfaces []config.Interface) []config.Interface {
+	result := append([]config.Interface(nil), interfaces...)
+	sort.Slice(result, func(i, j int) bool { return result[i].Name < result[j].Name })
+	return result
 }
 
 func emitSet(b *strings.Builder, name, typ string, elems []string, timeout bool) {
@@ -204,9 +338,16 @@ func emitNAT(b *strings.Builder, in Input) {
 	sort.Slice(rules, func(i, j int) bool { return rules[i].Name < rules[j].Name })
 	for _, rule := range rules {
 		for _, source := range natSources(rule.Source, in.Policy) {
-			prefix := "        iifname " + strconv.Quote(rule.ExternalInterface) + " "
+			external := "iifname " + strconv.Quote(rule.ExternalInterface)
+			prefix := "        " + external + " "
 			if source != "" {
-				prefix += source + " "
+				if strings.HasPrefix(source, external+" ") {
+					// Avoid duplicating the same interface predicate when the
+					// source zone explicitly names external_interface.
+					prefix = "        " + source + " "
+				} else {
+					prefix += source + " "
+				}
 			}
 			line(fmt.Sprintf("%s%s dport %d dnat to %s:%d comment %s", prefix, rule.Protocol, rule.ExternalPort, rule.Destination, rule.DestinationPort, quoteString("nftfw-nat:"+rule.Name)))
 		}
@@ -214,7 +355,12 @@ func emitNAT(b *strings.Builder, in Input) {
 	line("    }")
 	line("    chain postrouting {")
 	line("        type nat hook postrouting priority srcnat; policy accept;")
-	line(fmt.Sprintf("        ip saddr @docker_nets_nat oifname %s masquerade comment \"nftfw:vpn-only-nat\"", strconv.Quote(c.WireGuard.Interface)))
+	for _, binding := range containerBindings(c) {
+		if binding.Family != "ip" {
+			continue
+		}
+		line(fmt.Sprintf("        iifname %s ip saddr %s oifname %s masquerade comment %s", strconv.Quote(binding.Interface), binding.Prefix, strconv.Quote(c.WireGuard.Interface), quoteString("nftfw:vpn-only-nat:"+binding.Interface)))
+	}
 	line("    }")
 	line("}")
 }
@@ -246,15 +392,68 @@ func validateNATTargets(rules []config.NATRule, networks []string) error {
 	return nil
 }
 
+func validateContainerTopology(c config.Config, observedV4, observedV6 []string) error {
+	expectedV4 := map[string]bool{}
+	expectedV6 := map[string]bool{}
+	for _, binding := range containerBindings(c) {
+		if binding.Family == "ip" {
+			expectedV4[binding.Prefix] = true
+		} else {
+			expectedV6[binding.Prefix] = true
+		}
+	}
+	canonical := func(values []string, ipv4 bool) (map[string]bool, error) {
+		result := make(map[string]bool, len(values))
+		for _, raw := range values {
+			prefix, err := netip.ParsePrefix(raw)
+			if err != nil || prefix.Bits() == 0 || prefix.Addr().Is4() != ipv4 {
+				return nil, fmt.Errorf("invalid observed container network %q", raw)
+			}
+			value := prefix.Masked().String()
+			if result[value] {
+				return nil, fmt.Errorf("duplicate observed container network %q", value)
+			}
+			result[value] = true
+		}
+		return result, nil
+	}
+	actualV4, err := canonical(observedV4, true)
+	if err != nil {
+		return err
+	}
+	actualV6, err := canonical(observedV6, false)
+	if err != nil {
+		return err
+	}
+	if !samePrefixSet(expectedV4, actualV4) || !samePrefixSet(expectedV6, actualV6) {
+		return errors.New("observed container subnets do not exactly match declared stable container interfaces")
+	}
+	return nil
+}
+
+func samePrefixSet(left, right map[string]bool) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for value := range left {
+		if !right[value] {
+			return false
+		}
+	}
+	return true
+}
+
 func natSources(name string, effective policy.Effective) []string {
 	if name == "any" {
 		return []string{""}
 	}
-	zone := effective.Zones[name]
 	var sources []string
-	for _, network := range zone.Networks {
-		if prefix, err := netip.ParsePrefix(network); err == nil && prefix.Addr().Is4() {
-			sources = append(sources, "ip saddr "+prefix.String())
+	for _, selector := range zoneSelectors(name, "source", effective) {
+		if selector.Family == "ip" {
+			// NAT source zones obey the same interface-and-network conjunction
+			// as filter policy. The separate external_interface predicate stays
+			// authoritative and makes a mismatched zone/interface fail closed.
+			sources = append(sources, selector.Expression)
 		}
 	}
 	if len(sources) == 0 {
@@ -384,17 +583,9 @@ func zoneSelectors(name, direction string, e policy.Effective) []zoneSelector {
 	if !ok {
 		return nil
 	}
-	var result []zoneSelector
-	seen := map[string]bool{}
-	add := func(selector zoneSelector) {
-		key := selector.Family + "\x00" + selector.Expression
-		if !seen[key] {
-			seen[key] = true
-			result = append(result, selector)
-		}
-	}
+	var networkSelectors []zoneSelector
 	for _, network := range zone.Networks {
-		add(zoneSelector{Expression: addressMatch(network, addressDirection), Family: familyExpr(network), RequiresVPN: destinationRequiresVPN(network)})
+		networkSelectors = append(networkSelectors, zoneSelector{Expression: addressMatch(network, addressDirection), Family: familyExpr(network), RequiresVPN: destinationRequiresVPN(network)})
 	}
 	interfaces := append([]string(nil), zone.Interfaces...)
 	for _, configured := range e.Config.Interfaces {
@@ -402,11 +593,41 @@ func zoneSelectors(name, direction string, e policy.Effective) []zoneSelector {
 			interfaces = append(interfaces, configured.Name)
 		}
 	}
-	sort.Strings(interfaces)
-	for _, name := range interfaces {
-		quoted := strconv.Quote(name)
-		add(zoneSelector{Expression: interfaceDirection + " " + quoted + " meta nfproto ipv4", Family: "ip"})
-		add(zoneSelector{Expression: interfaceDirection + " " + quoted + " meta nfproto ipv6", Family: "ip6"})
+	interfaces = uniqueStrings(interfaces)
+	if len(networkSelectors) > 0 && len(interfaces) > 0 {
+		var result []zoneSelector
+		for _, selector := range networkSelectors {
+			for _, interfaceName := range interfaces {
+				result = append(result, zoneSelector{
+					Expression:  interfaceDirection + " " + strconv.Quote(interfaceName) + " " + selector.Expression,
+					Family:      selector.Family,
+					RequiresVPN: selector.RequiresVPN,
+				})
+			}
+		}
+		return result
+	}
+	if len(networkSelectors) > 0 {
+		return networkSelectors
+	}
+	var result []zoneSelector
+	for _, interfaceName := range interfaces {
+		quoted := strconv.Quote(interfaceName)
+		result = append(result,
+			zoneSelector{Expression: interfaceDirection + " " + quoted + " meta nfproto ipv4", Family: "ip"},
+			zoneSelector{Expression: interfaceDirection + " " + quoted + " meta nfproto ipv6", Family: "ip6"},
+		)
+	}
+	return result
+}
+
+func uniqueStrings(values []string) []string {
+	sort.Strings(values)
+	result := values[:0]
+	for _, value := range values {
+		if len(result) == 0 || result[len(result)-1] != value {
+			result = append(result, value)
+		}
 	}
 	return result
 }

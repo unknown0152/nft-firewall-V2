@@ -1,8 +1,10 @@
 package nft
 
 // EmergencyDenyScript is deliberately independent of configuration and
-// SQLite. Early boot installs it only when enforcement was previously enabled
-// but the committed snapshot cannot be verified.
+// SQLite. Recovery uses it only after an owned generation installation
+// succeeds but the separate mutable runtime-security-state restore fails.
+// Invalid or unavailable immutable snapshot evidence must fail before mutation
+// and does not select this fallback.
 const EmergencyDenyScript = `table inet nftfw_filter {
     chain input {
         type filter hook input priority filter; policy drop;

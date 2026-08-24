@@ -11,8 +11,33 @@ import (
 	"testing"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
+	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
 )
+
+func saveHealthGeneration(t *testing.T, store *state.Store, id uint64, checksum, script string) {
+	t.Helper()
+	ctx := context.Background()
+	assignments := []provenance.Assignment{{Name: "eth0", ID: 1}}
+	ledger, err := provenance.Open(ctx, filepath.Join(store.Dir, "provenance-ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Reserve(ctx, assignments); err != nil {
+		ledger.Close()
+		t.Fatal(err)
+	}
+	if err := ledger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	bootID, err := state.CurrentBootID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveGenerationWithMetadata(ctx, id, checksum, script, nil, nil, state.GenerationMetadata{BootID: bootID, Provenance: assignments}); err != nil {
+		t.Fatal(err)
+	}
+}
 
 type emptyRulesetRunner struct{}
 
@@ -61,6 +86,7 @@ func (healthyRulesetRunner) Run(_ context.Context, args ...string) (string, stri
 {"chain":{"family":"inet","table":"nftfw_filter","name":"output","type":"filter","hook":"output","policy":"drop"}},
 {"chain":{"family":"inet","table":"nftfw_filter","name":"forward","type":"filter","hook":"forward","policy":"drop"}},
 {"rule":{"family":"inet","table":"nftfw_filter","chain":"input","comment":"nftfw:input-default-deny"}},
+{"rule":{"family":"inet","table":"nftfw_filter","chain":"input","comment":"nftfw:input-reply-only"}},
 {"rule":{"family":"inet","table":"nftfw_filter","chain":"output","comment":"nftfw:output-default-deny"}},
 {"rule":{"family":"inet","table":"nftfw_filter","chain":"forward","comment":"nftfw:forward-default-deny"}},
 {"rule":{"family":"inet","table":"nftfw_filter","chain":"forward","comment":"nftfw:forward-physical-deny"}},
@@ -68,8 +94,17 @@ func (healthyRulesetRunner) Run(_ context.Context, args ...string) (string, stri
 {"rule":{"family":"inet","table":"nftfw_filter","chain":"forward","comment":"nftfw:container-vpn-mss-out-v6"}},
 {"rule":{"family":"inet","table":"nftfw_filter","chain":"forward","comment":"nftfw:container-vpn-mss-in-v4"}},
 {"rule":{"family":"inet","table":"nftfw_filter","chain":"forward","comment":"nftfw:container-vpn-mss-in-v6"}},
-{"rule":{"family":"inet","table":"nftfw_filter","chain":"forward","comment":"nftfw:forward-uplink-reply-only"}},
-{"rule":{"family":"inet","table":"nftfw_filter","chain":"forward","comment":"nftfw:vpn-only-egress"}}
+{"rule":{"family":"inet","table":"nftfw_filter","chain":"output","comment":"nftfw:vpn-only-egress"}},
+{"rule":{"family":"inet","table":"nftfw_filter","chain":"input","comment":"nftfw:provenance-tag-input:eth0"}},
+{"rule":{"family":"inet","table":"nftfw_filter","chain":"output","comment":"nftfw:provenance-tag-output:eth0"}},
+{"rule":{"family":"inet","table":"nftfw_filter","chain":"forward","comment":"nftfw:provenance-tag-forward:eth0"}},
+{"rule":{"family":"inet","table":"nftfw_filter","chain":"output","comment":"nftfw:provenance-reply-output:eth0"}},
+{"rule":{"family":"inet","table":"nftfw_filter","chain":"forward","comment":"nftfw:provenance-reply-forward:eth0"}},
+{"rule":{"family":"inet","table":"nftfw_filter","chain":"input","comment":"nftfw:provenance-tag-input:wg0"}},
+{"rule":{"family":"inet","table":"nftfw_filter","chain":"output","comment":"nftfw:provenance-tag-output:wg0"}},
+{"rule":{"family":"inet","table":"nftfw_filter","chain":"forward","comment":"nftfw:provenance-tag-forward:wg0"}},
+{"rule":{"family":"inet","table":"nftfw_filter","chain":"output","comment":"nftfw:provenance-reply-output:wg0"}},
+{"rule":{"family":"inet","table":"nftfw_filter","chain":"forward","comment":"nftfw:provenance-reply-forward:wg0"}}
 ]}`, "", nil
 		case "ip/nftfw_nat":
 			return `{"nftables":[
@@ -111,10 +146,11 @@ func TestSnapshotStatusContractDistinguishesPolicyFromOverallHealth(t *testing.T
 	script := "add table inet nftfw_filter\n"
 	sum := sha256.Sum256([]byte(script))
 	checksum := hex.EncodeToString(sum[:])
-	if err := store.SaveGeneration(ctx, 1, checksum, script, nil, nil); err != nil {
+	saveHealthGeneration(t, store, 1, checksum, script)
+	if err := store.SetObservedHash(ctx, 1, fingerprint); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetObservedHash(ctx, 1, fingerprint); err != nil {
+	if err := store.MarkApplied(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Commit(ctx, 1); err != nil {

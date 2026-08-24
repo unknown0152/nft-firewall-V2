@@ -2,8 +2,7 @@
 Description=NFT Firewall V2 privileged reconciler
 StartLimitIntervalSec=60s
 StartLimitBurst=20
-After=local-fs.target nftfw-early.service network-pre.target
-Requires=nftfw-early.service
+After=local-fs.target network-pre.target
 Wants=network-pre.target
 Before=network.target
 
@@ -16,6 +15,7 @@ User=root
 Group=nftfw-web
 RuntimeDirectory=nftfw
 RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict

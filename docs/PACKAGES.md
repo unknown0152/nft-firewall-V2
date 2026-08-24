@@ -6,11 +6,12 @@
 | `policy` | Pure effective model and shared explanation decisions |
 | `compiler` | Deterministic owned-table transaction generation and plan summaries |
 | `nft` | Sole nft command boundary, JSON inspection, fingerprints, atomic set updates |
-| `state` | SQLite migrations, generations, claims, audit, snapshots, backup |
+| `provenance` | Monotonic interface-ID ledger, retired tombstones, merge-only compatibility |
+| `state` | Generation SQLite migrations, claims, audit, prepared publication, snapshots, backup |
 | `reconcile` | Safe apply, commit, rollback, health verification, drift repair |
 | `wireguard` | Bounded endpoint resolution/cache and narrow peer endpoint control |
 | `blocks` | Typed, provenance-aware block and temporary-access operations |
-| `containers` | Optional read-only Docker CLI observation through a pinned local socket |
+| `containers` | Optional race-consistent Docker observation against exact stable bridge tuples |
 | `threatintel` | Bounded HTTPS retrieval and strict address-list parsing |
 | `geo` | Secure parsing of operator-supplied country CIDR exports |
 | `recovery` | Exact systemd rollback guard verification |

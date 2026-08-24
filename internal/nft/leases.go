@@ -18,6 +18,9 @@ type TimedElement struct {
 // nft transaction. Expiring access entries also expire in the kernel if the
 // daemon stops running.
 func (b *Backend) ReplaceClaimSets(ctx context.Context, blockedV4, blockedV6 []string, trustedV4, trustedV6 []TimedElement) error {
+	if err := requireGlobalMutationLock(ctx); err != nil {
+		return err
+	}
 	release, err := b.acquireMutationLock(ctx)
 	if err != nil {
 		return err

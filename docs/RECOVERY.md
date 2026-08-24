@@ -1,12 +1,21 @@
 # Recovery
 
+The current 2.0.2 source is a **RELEASE CANDIDATE - NOT DEPLOYABLE**. Recovery
+commands must not be exercised on the NUC until the disposable Stage R2 crash,
+boot, package, and rollback matrix has passed and the deployment plan is
+separately approved.
+
 ## Uncommitted apply
 
 Pending safe applies are checked every five seconds by `nftfwd` and every 15
 seconds by `nftfw-rollback.timer`. The configured deadline is 30 through 600
-seconds. On expiry, the previous committed generation and its runtime sets are
-restored atomically. A confirmed applied first-generation rollback removes
-only V2-owned tables and clears boot enforcement.
+seconds. On expiry, the previous committed generation is installed as one
+atomic nftables transaction. Mutable runtime sets are then reconstructed as a
+separate step while the same shared NFTFW mutation lock is held. If that
+runtime-state restoration fails, the recovery path installs the owned
+emergency-deny policy and reports an error. A confirmed safe-applied
+first-generation rollback removes only V2-owned tables and clears boot
+enforcement.
 
 ```bash
 sudo nftfw status
@@ -15,8 +24,11 @@ sudo systemctl start nftfw-rollback.service
 sudo journalctl -u nftfw-rollback.service -u nftfwd
 ```
 
-Rollback is idempotent. Commit and rollback reject expired, tampered,
-historical, or inapplicable generation identifiers.
+Rollback is idempotent. Commit rejects an expired safe-applied generation and
+initiates its rollback; the daemon and independent timer likewise roll it back
+at expiry. Rollback rejects tampered, historical, or otherwise inapplicable
+generation identifiers, but expiry itself is the reason an eligible rollback
+must remain permitted.
 
 ### Ambiguous first apply
 
@@ -25,11 +37,12 @@ completed before userspace observed a timeout, cancellation, or output-limit
 failure. With no earlier committed generation, product-named tables in that
 state are not enough to prove ownership. V2 therefore retains the pending
 record and refuses automatic deletion. The corrupt-database fallback also
-refuses to mutate product-named tables when no verified enforcement marker
+refuses to mutate product-named tables when no verified enforcement pointer
 exists.
 
-Preserve the state database and journal, inspect the live rules from a trusted
-console, and establish ownership before any manual removal. Do not use `nft
+Preserve the generation database and journal, immutable snapshots, enforcement
+pointer, and monotonic provenance ledger. Inspect live rules from a trusted
+console and establish ownership before any manual removal. Do not use `nft
 flush ruleset`. When no product-named table exists, the pending failure can be
 finalized without a kernel mutation.
 
@@ -48,45 +61,62 @@ sudo nftfw health
 ## Database failure
 
 Do not initialize a blank database over known enforcement state. The
-root-owned `enforcement-enabled` marker prevents that downgrade. When SQLite
-cannot be opened, the independent path cannot safely trust its deadline state,
-so it immediately restores the checksum-protected committed snapshot. With a
-healthy database, configuration failure alone never authorizes a restore: an
-actually expired pending generation is still required. A missing marker never
-authorizes deletion of product-named tables.
+root-owned generation/checksum `enforcement-enabled` pointer prevents that
+downgrade. When SQLite cannot be opened, the independent path cannot safely
+trust its deadline state. It attempts a restore only after the scoped foreign
+netfilter-rules audit succeeds and the pointer, immutable snapshot, policy
+checksum, and monotonic provenance assignments all verify. It repeats the
+foreign audit immediately before the atomic nftables apply and then requires
+owned-table integrity to pass. Even after a successful defensive restore, the
+command returns nonzero and readiness remains blocked because no database
+recovery transition was authorized. With a healthy database, configuration
+failure alone never authorizes a restore: an actually expired pending
+generation is still required. A missing pointer never authorizes deletion of
+product-named tables.
 
-Verify and restore an operator backup offline:
+Do not copy a backup over live state from this candidate's documentation. A
+final offline recovery procedure must first pass R2 and preserve, under unique
+names, at least:
 
-```bash
-sudo systemctl stop nftfwd nftfw-rollback.timer
-sudo nftfw state verify --database /var/lib/nftfw/backups/<backup>.db
-sudo install -d -o root -g root -m 0700 /var/lib/nftfw/recovery
-sudo mv /var/lib/nftfw/state.db /var/lib/nftfw/recovery/state.db.failed
-sudo test ! -e /var/lib/nftfw/state.db-wal || sudo mv /var/lib/nftfw/state.db-wal /var/lib/nftfw/recovery/state.db.failed-wal
-sudo test ! -e /var/lib/nftfw/state.db-shm || sudo mv /var/lib/nftfw/state.db-shm /var/lib/nftfw/recovery/state.db.failed-shm
-sudo install -o root -g root -m 0600 /var/lib/nftfw/backups/<backup>.db /var/lib/nftfw/state.db
-sudo systemctl start nftfw-rollback.timer nftfwd
-sudo nftfw health
+```text
+/var/lib/nftfw/generation-state/state.db{,-wal,-shm}
+/var/lib/nftfw/provenance-ledger.db
+/var/lib/nftfw/provenance-ledger.db-journal  # optional DELETE-mode rollback journal
+/var/lib/nftfw/generations/
+/var/lib/nftfw/active.snapshot.json  # legacy evidence only; never published by 2.0.2
+/var/lib/nftfw/enforcement-enabled
 ```
 
-Use a unique recovery directory if prior failed files already exist. Preserve
-the failed database and WAL/SHM files for diagnosis. Never use `nft flush
-ruleset`; it can remove unrelated protections.
+Generation backup restore must validate the generation/checksum pointer and
+must never overwrite or rewind the ledger. Ledger restoration is merge-only
+and rejects changed mappings, removed tombstones, ID reuse, or regression. Use
+a unique recovery directory if prior failed files already exist, and preserve
+failed generation-database WAL/SHM files and the ledger's optional DELETE-mode
+`-journal` for diagnosis. Ledger `-wal` or `-shm` files are not canonical 2.0.2
+state; if encountered, preserve them separately as unexpected forensic or
+defensive evidence rather than treating them as normal restore inputs. Never
+use `nft flush ruleset`; it can remove unrelated protections.
 
 ## Boot enforcement
 
-When a generation is committed, V2 writes an immutable checked snapshot and
-enforcement marker. `nftfw-early.service` runs before `network-pre.target` and
-restores it before `nftfwd`. Runtime trusted leases are excluded so expired
-access cannot replay.
+When a generation is committed, V2 writes an immutable checked snapshot and a
+generation/checksum enforcement pointer. At boot, `nftfw-early.service`
+resolves durable prepared/pending state, restores the uniquely selected
+snapshot before `network-pre.target`, and remains active. The nonmutating
+`nftfw-enforcement-ready.service` must verify that enforcement before audited
+network consumers start. Runtime trusted leases are excluded so expired access
+cannot replay.
 
-If a required snapshot is missing, corrupt, symlinked, oversized, or has an
-invalid checksum, the early process installs a minimal owned default-deny
-policy and exits with an error for systemd/journal visibility.
+If a required pointer or snapshot is missing, corrupt, symlinked, oversized,
+or has an invalid checksum, recovery fails before an nftables mutation and
+readiness remains blocked. It does not select the emergency-deny policy merely
+because immutable recovery evidence is unusable. Emergency deny is reserved
+for a failure to restore separate mutable runtime security state after a
+generation installation path has already run.
 
 ```bash
-sudo systemctl status nftfw-early
-sudo journalctl -b -u nftfw-early
+sudo systemctl status nftfw-early nftfw-enforcement-ready
+sudo journalctl -b -u nftfw-early -u nftfw-enforcement-ready
 sudo nftfw reconcile
 ```
 

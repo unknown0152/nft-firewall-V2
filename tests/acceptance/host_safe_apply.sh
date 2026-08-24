@@ -27,6 +27,8 @@ run_id="$(date -u +%Y%m%dT%H%M%SZ)-$$"
 lab_tmp=$(mktemp -d "/run/nftfw-host-acceptance.${run_id}.XXXXXX")
 result_dir="$work_root/test-results/host-safe-apply/$run_id"
 state_dir="/var/lib/nftfw/host-acceptance-$run_id"
+state_db="$state_dir/generation-state/state.db"
+provenance_ledger="$state_dir/provenance-ledger.db"
 config_path="/etc/nftfw/host-acceptance-$run_id.toml"
 dropin_dir=/run/systemd/system/nftfw-rollback.service.d
 dropin="$dropin_dir/90-host-acceptance.conf"
@@ -139,10 +141,12 @@ strict_vpn = true
 [[interfaces]]
 name = "$uplink"
 role = "uplink"
+provenance_id = 1
 
 [[interfaces]]
 name = "wg-host-test"
 role = "vpn"
+provenance_id = 2
 
 [[zones]]
 name = "administration"
@@ -200,7 +204,8 @@ safe_apply_timeout_seconds = 30
 
 [state]
 directory = "$state_dir"
-database = "$state_dir/state.db"
+database = "$state_db"
+provenance_ledger = "$provenance_ledger"
 
 [integrations]
 docker_enabled = false
@@ -216,7 +221,7 @@ mkdir -p "$dropin_dir"
 cat >"$dropin" <<EOF_DROPIN
 [Service]
 ExecStart=
-ExecStart=/usr/lib/nftfw/nftfwd --rollback-expired --state-db $state_dir/state.db
+ExecStart=/usr/lib/nftfw/nftfwd --rollback-expired --state-dir $state_dir
 EOF_DROPIN
 chmod 0600 "$dropin"
 systemctl daemon-reload
@@ -234,7 +239,7 @@ local_cli=(env NFTFW_CONFIG="$config_path" NFTFW_CONTROL_SOCKET="$lab_tmp/missin
 "${local_cli[@]}" plan >/dev/null
 echo "HOST CANDIDATE NFT CHECK: PASS"
 "${local_cli[@]}" apply --safe >/dev/null
-first_generation=$(sqlite3 "$state_dir/state.db" "SELECT id FROM generations WHERE status='applied' ORDER BY id DESC LIMIT 1")
+first_generation=$(sqlite3 "$state_db" "SELECT id FROM generations WHERE status='applied' ORDER BY id DESC LIMIT 1")
 [[ "$first_generation" =~ ^[0-9]+$ ]] || { echo "FAIL: safe generation was not persisted as applied"; exit 1; }
 nft list chain inet nftfw_filter input | grep -F 'nftfw-policy:declared-ssh-management' >/dev/null
 (( $(ss -Htn4 state established '( sport = :22 )' | wc -l) > 0 )) || { echo "FAIL: SSH management connection disappeared"; exit 1; }
@@ -267,7 +272,7 @@ echo "HOST SAFE APPLY COMMIT: PASS"
 echo "HOST EXPLICIT ROLLBACK: PASS"
 
 "${local_cli[@]}" apply --safe >/dev/null
-second_generation=$(sqlite3 "$state_dir/state.db" "SELECT id FROM generations WHERE status='applied' ORDER BY id DESC LIMIT 1")
+second_generation=$(sqlite3 "$state_db" "SELECT id FROM generations WHERE status='applied' ORDER BY id DESC LIMIT 1")
 [[ "$second_generation" =~ ^[0-9]+$ ]] || { echo "FAIL: timeout candidate was not persisted"; exit 1; }
 systemd-run --quiet --unit="$crash_unit" --property=Type=simple /usr/lib/nftfw/nftfwd \
     --config "$config_path" --status-socket "$lab_tmp/crash-status.sock" --control-socket "$lab_tmp/crash-control.sock"
@@ -277,13 +282,13 @@ systemctl kill --kill-who=all --signal=SIGKILL "$crash_unit.service"
 echo "HOST DAEMON SIGKILL AFTER APPLY: PASS"
 
 for _ in $(seq 1 80); do
-    if ! owned_present && [[ $(sqlite3 "$state_dir/state.db" "SELECT status FROM generations WHERE id=$second_generation") == rolled_back ]]; then
+    if ! owned_present && [[ $(sqlite3 "$state_db" "SELECT status FROM generations WHERE id=$second_generation") == rolled_back ]]; then
         break
     fi
     sleep 1
 done
 ! owned_present || { echo "FAIL: independent timeout rollback left owned host tables"; exit 1; }
-[[ $(sqlite3 "$state_dir/state.db" "SELECT status FROM generations WHERE id=$second_generation") == rolled_back ]] || { echo "FAIL: timeout generation was not marked rolled_back"; exit 1; }
+[[ $(sqlite3 "$state_db" "SELECT status FROM generations WHERE id=$second_generation") == rolled_back ]] || { echo "FAIL: timeout generation was not marked rolled_back"; exit 1; }
 nft list table inet "$third_party" >/dev/null 2>&1 || { echo "FAIL: timeout rollback removed unrelated table"; exit 1; }
 (( $(ss -Htn4 state established '( sport = :22 )' | wc -l) > 0 )) || { echo "FAIL: SSH management connection disappeared after rollback"; exit 1; }
 echo "HOST TIMEOUT ROLLBACK AFTER DAEMON CRASH: PASS"

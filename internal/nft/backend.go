@@ -14,6 +14,8 @@ import (
 	"strings"
 	"sync"
 	"time"
+
+	"github.com/unknown0152/nft-firewall-v2/internal/state"
 )
 
 type Runner interface {
@@ -131,6 +133,13 @@ func (b *Backend) acquireMutationLock(ctx context.Context) (func(), error) {
 	return b.mu.Unlock, nil
 }
 
+func requireGlobalMutationLock(ctx context.Context) error {
+	if !state.MutationLockHeld(ctx) {
+		return errors.New("nft mutation requires the held global mutation lock")
+	}
+	return nil
+}
+
 // ProtectFirstUse arms a one-shot collision guard for a fresh installation.
 // It refuses to adopt or remove any pre-existing table with a product-owned
 // name, both now and when the first Apply is executed. The guard remains armed
@@ -171,6 +180,9 @@ func (b *Backend) Check(ctx context.Context, script string) error {
 }
 
 func (b *Backend) Apply(ctx context.Context, script string) error {
+	if err := requireGlobalMutationLock(ctx); err != nil {
+		return err
+	}
 	release, err := b.acquireMutationLock(ctx)
 	if err != nil {
 		return err
@@ -240,6 +252,9 @@ func (b *Backend) CheckCandidate(ctx context.Context, script string) error {
 // DestroyOwned removes only tables belonging to this product. It is used when
 // rolling back the first generation or uninstalling with explicit intent.
 func (b *Backend) DestroyOwned(ctx context.Context) error {
+	if err := requireGlobalMutationLock(ctx); err != nil {
+		return err
+	}
 	release, err := b.acquireMutationLock(ctx)
 	if err != nil {
 		return err
@@ -273,6 +288,9 @@ func (b *Backend) DestroyOwned(ctx context.Context) error {
 }
 
 func (b *Backend) UpdateSet(ctx context.Context, name string, add bool, elements []string) error {
+	if err := requireGlobalMutationLock(ctx); err != nil {
+		return err
+	}
 	release, err := b.acquireMutationLock(ctx)
 	if err != nil {
 		return err
@@ -328,6 +346,9 @@ func (b *Backend) UpdateSet(ctx context.Context, name string, add bool, elements
 // ReplaceSets atomically replaces bounded runtime-set contents without
 // recompiling chains. Only compiler-owned inet sets are accepted.
 func (b *Backend) ReplaceSets(ctx context.Context, sets map[string][]string) error {
+	if err := requireGlobalMutationLock(ctx); err != nil {
+		return err
+	}
 	release, err := b.acquireMutationLock(ctx)
 	if err != nil {
 		return err
@@ -389,6 +410,9 @@ func (b *Backend) ReplaceSets(ctx context.Context, sets map[string][]string) err
 // ReplaceContainerNetworks updates filter and NAT membership in one atomic
 // transaction so a recreated bridge never has split enforcement state.
 func (b *Backend) ReplaceContainerNetworks(ctx context.Context, v4, v6 []string) error {
+	if err := requireGlobalMutationLock(ctx); err != nil {
+		return err
+	}
 	release, err := b.acquireMutationLock(ctx)
 	if err != nil {
 		return err
@@ -571,6 +595,15 @@ func validateOwnedTableJSON(data []byte, table Table) (bool, string, error) {
 		}
 		return false, fmt.Sprintf("marker %q missing from %s/%s", comment, table.Family, table.Name)
 	}
+	commentSuffixes := func(prefix string) map[string]bool {
+		result := map[string]bool{}
+		for comment := range comments {
+			if strings.HasPrefix(comment, prefix) {
+				result[strings.TrimPrefix(comment, prefix)] = true
+			}
+		}
+		return result
+	}
 	requireBaseChain := func(name, typ, hook, policy string) (bool, string) {
 		chain, ok := chains[name]
 		if !ok {
@@ -594,15 +627,37 @@ func validateOwnedTableJSON(data []byte, table Table) (bool, string, error) {
 			"nftfw:output-default-deny",
 			"nftfw:forward-default-deny",
 			"nftfw:forward-physical-deny",
-			"nftfw:container-vpn-mss-out-v4",
-			"nftfw:container-vpn-mss-out-v6",
-			"nftfw:container-vpn-mss-in-v4",
-			"nftfw:container-vpn-mss-in-v6",
-			"nftfw:forward-uplink-reply-only",
+			"nftfw:input-reply-only",
 			"nftfw:vpn-only-egress",
 		} {
 			if ok, detail := requireComment(comment); !ok {
 				return false, detail, nil
+			}
+		}
+		provenanceMarkers := []string{
+			"nftfw:provenance-tag-input:",
+			"nftfw:provenance-tag-output:",
+			"nftfw:provenance-tag-forward:",
+			"nftfw:provenance-reply-output:",
+			"nftfw:provenance-reply-forward:",
+		}
+		var expected map[string]bool
+		for _, prefix := range provenanceMarkers {
+			observed := commentSuffixes(prefix)
+			if len(observed) == 0 || len(observed) > 64 {
+				return false, fmt.Sprintf("provenance marker class %q is absent or unbounded in %s/%s", prefix, table.Family, table.Name), nil
+			}
+			if expected == nil {
+				expected = observed
+				continue
+			}
+			if len(expected) != len(observed) {
+				return false, fmt.Sprintf("provenance marker interface sets differ in %s/%s", table.Family, table.Name), nil
+			}
+			for name := range expected {
+				if name == "" || !observed[name] {
+					return false, fmt.Sprintf("provenance marker for interface %q is incomplete in %s/%s", name, table.Family, table.Name), nil
+				}
 			}
 		}
 	case (Table{"ip", NATTable}):
@@ -613,9 +668,6 @@ func validateOwnedTableJSON(data []byte, table Table) (bool, string, error) {
 			return false, detail, nil
 		}
 		if ok, detail := requireBaseChain("postrouting", "nat", "postrouting", "accept"); !ok {
-			return false, detail, nil
-		}
-		if ok, detail := requireComment("nftfw:vpn-only-nat"); !ok {
 			return false, detail, nil
 		}
 	case (Table{"ip6", Filter6}):

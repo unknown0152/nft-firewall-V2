@@ -40,7 +40,11 @@ disable the release's strict public egress requirement.
 
 Exactly one `uplink` and at least one `vpn` interface matching the WireGuard
 section are required. Other roles are `lan` and `container`. Linux interface
-names are limited to 15 safe characters.
+names are limited to 15 safe characters. Every interface requires a unique
+`provenance_id` from 1 to 254, with at most 64 active interfaces. An ID is a
+permanent interface-name assignment: retired IDs are tombstoned in the
+separate monotonic provenance ledger and must never be reused for another
+name.
 
 ```toml
 [[interfaces]]
@@ -48,6 +52,7 @@ name = "eth0"
 role = "uplink"
 zone = "wan"
 cidrs = ["192.0.2.10/32"]
+provenance_id = 1
 
 [[zones]]
 name = "lan"
@@ -92,12 +97,13 @@ Direction follows endpoints:
 
 Public output and `to = "any"` forwarding are pinned to the configured VPN.
 An output policy may not name the physical uplink zone as a destination.
-Explicit denies are emitted before stateful accepts; the physical forward drop
-also precedes general established/related acceptance. Narrow physical-uplink
-reply rules, established input sessions, explicit temporary trusted-service
-leases, and WireGuard bootstrap run before untrusted dynamic feed blocks so a
-feed cannot terminate the recovery paths. Dynamic blocks still reject new,
-untrusted traffic and VPN destinations.
+Original-direction input/forward flows are tagged only when the reserved high
+conntrack-mark byte is empty; the lower 24 bits are preserved. Reply accepts
+require reply direction, established or related state, the matching egress
+interface, and that interface's exact ingress provenance. There is no broad
+forward-established or unproven physical reply exception. Temporary
+trusted-service leases and WireGuard bootstrap run before untrusted dynamic
+feed blocks so a feed cannot terminate those recovery paths.
 
 ## NAT
 
@@ -115,9 +121,10 @@ destination_port = 8443
 ```
 
 `source` is `any` or an IPv4 zone. The incoming interface must have role
-`uplink` or `lan`. At compilation, the destination must be inside a currently
-observed container network. DNAT does not imply permission: a separate forward
-policy must allow the translated flow. IPv6 NAT is not implemented.
+`uplink`, `lan`, or `vpn`. At compilation, the destination must be inside an
+exactly authorized and currently observed container network. DNAT does not
+imply permission: a separate forward policy must allow the translated flow.
+IPv6 NAT is not implemented.
 
 ## WireGuard
 
@@ -162,7 +169,8 @@ trusted_services = ["ssh"]
 
 [state]
 directory = "/var/lib/nftfw"
-database = "/var/lib/nftfw/state.db"
+database = "/var/lib/nftfw/generation-state/state.db"
+provenance_ledger = "/var/lib/nftfw/provenance-ledger.db"
 ```
 
 Claim/set limits are 1 through 1,000,000. Safe apply timeout is 30 through 600
@@ -170,8 +178,11 @@ seconds. At most 32 trusted services may be listed, and each must be an
 existing TCP/UDP service. Temporary `allow` claims can open only those exact
 ports. A permanent allow claim is invalid.
 
-The database must be a direct child of an absolute non-root state directory.
-Production units allow writes only under `/var/lib/nftfw` and `/run/nftfw`.
+The generation database must be directly inside the state directory's
+`generation-state/` subtree. The ledger path must be the separate
+`provenance-ledger.db` at the state root. Generation rollback never rewinds the
+ledger. Early restore may write only generation state while configuration,
+ledger, immutable snapshots, and the enforcement pointer remain read-only.
 
 ## Docker
 
@@ -181,6 +192,13 @@ docker_enabled = true
 threat_feed = false
 geoip = false
 notifications = false
+
+[[docker_networks]]
+name = "media"
+driver = "bridge"
+bridge_interface = "br-media"
+subnets = ["172.19.0.0/16"]
+gateways = ["172.19.0.1"]
 ```
 
 Docker integration reads the local Docker socket from the privileged daemon;
@@ -216,9 +234,19 @@ and explicitly contains:
 }
 ```
 
-Restart Docker after changing those settings. V2 then observes validated
-bridge prefixes and owns forwarding/NAT. The dashboard never receives Docker
-socket access.
+Each Docker entry is an immutable authorization tuple: configured network
+name, `bridge` driver, explicit `com.docker.network.bridge.name`, and parallel
+canonical subnet/gateway arrays. The bridge must also be a declared
+`container` interface whose CIDRs exactly match the configured subnets. Names,
+bridge interfaces, subnets, and gateways cannot collide. A Docker-generated
+network ID is used only to keep one inspection race-consistent; it may change
+after an approved recreation when the complete stable tuple is unchanged.
+Missing options, generated bridge names, extra routed bridges, or observed
+tuple drift are rejected.
+
+Restart Docker after changing its settings only under the approved deployment
+procedure. V2 then observes the exact authorized bridge tuple and owns its
+forwarding/NAT. The dashboard never receives Docker socket access.
 
 ## Threat feeds
 

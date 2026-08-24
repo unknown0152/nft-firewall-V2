@@ -16,20 +16,28 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/unknown0152/nft-firewall-v2/internal/config"
 )
 
 type Network struct {
-	Name string `json:"name"`
-	CIDR string `json:"cidr"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	Driver          string `json:"driver"`
+	BridgeInterface string `json:"bridge_interface"`
+	CIDR            string `json:"cidr"`
+	Gateway         string `json:"gateway"`
 }
 type Observer struct {
 	DockerBinary string
 	DaemonConfig string
+	Expected     []config.DockerNetwork
 }
 
 const localDockerHost = "unix:///var/run/docker.sock"
 
 var dockerName = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+var dockerID = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 func (o Observer) FirewallPolicy() (bool, string, error) {
 	path := o.DaemonConfig
@@ -77,23 +85,36 @@ func (o Observer) FirewallPolicy() (bool, string, error) {
 	}
 	var d map[string]any
 	if err := json.Unmarshal(b, &d); err != nil {
-		return false, "Docker daemon config is malformed", err
+		return false, "docker daemon config is malformed", err
 	}
 	for _, option := range []string{"iptables", "ip6tables", "ip-forward", "ip-masq", "userland-proxy"} {
 		if d[option] != false {
-			return false, fmt.Sprintf("Docker option %s must be explicitly false", option), nil
+			return false, fmt.Sprintf("docker option %s must be explicitly false", option), nil
 		}
 	}
-	return true, "Docker firewall, forwarding, masquerade, and userland proxy ownership disabled", nil
+	return true, "docker firewall, forwarding, masquerade, and userland proxy ownership disabled", nil
 }
 func (o Observer) Networks(ctx context.Context) ([]Network, error) {
+	if len(o.Expected) == 0 {
+		return nil, errors.New("docker observation requires an explicit stable network authorization")
+	}
+	expected := make(map[string]config.DockerNetwork, len(o.Expected))
+	for _, network := range o.Expected {
+		if !dockerName.MatchString(network.Name) || network.Driver != "bridge" || !dockerName.MatchString(network.BridgeInterface) || len(network.BridgeInterface) > 15 || len(network.Subnets) == 0 || len(network.Subnets) != len(network.Gateways) {
+			return nil, fmt.Errorf("invalid expected Docker network tuple %q", network.Name)
+		}
+		if _, duplicate := expected[network.Name]; duplicate {
+			return nil, fmt.Errorf("duplicate expected Docker network %q", network.Name)
+		}
+		expected[network.Name] = network
+	}
 	bin := o.DockerBinary
 	if bin == "" {
 		bin = "docker"
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	out, err := boundedOutput(ctx, 128<<10, bin, "--host", localDockerHost, "network", "ls", "--format", "{{.Name}}")
+	out, err := boundedOutput(ctx, 128<<10, bin, "--host", localDockerHost, "network", "ls", "--no-trunc", "--format", "{{.ID}}\t{{.Name}}\t{{.Driver}}")
 	if err != nil {
 		return nil, err
 	}
@@ -102,39 +123,130 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 	if len(names) > 1024 {
 		return nil, errors.New("docker network count exceeds 1024")
 	}
-	for _, name := range names {
+	seenNames := map[string]bool{}
+	seenIDs := map[string]bool{}
+	for _, summary := range names {
+		fields := strings.Split(summary, "\t")
+		if len(fields) != 3 {
+			return nil, errors.New("docker returned a malformed network summary")
+		}
+		id, name, driver := fields[0], fields[1], fields[2]
+		if !dockerID.MatchString(id) || seenIDs[id] {
+			return nil, errors.New("docker returned an invalid or duplicate full network ID")
+		}
+		seenIDs[id] = true
 		if !dockerName.MatchString(name) {
 			return nil, fmt.Errorf("docker returned unsafe network name %q", name)
 		}
-		raw, err := boundedOutput(ctx, 1<<20, bin, "--host", localDockerHost, "network", "inspect", "--", name)
+		if seenNames[name] {
+			return nil, fmt.Errorf("docker returned duplicate network name %q", name)
+		}
+		seenNames[name] = true
+		wanted, authorized := expected[name]
+		if driver != "bridge" {
+			if authorized {
+				return nil, fmt.Errorf("docker network %s driver drifted from bridge to %s", name, driver)
+			}
+			continue
+		}
+		if !authorized {
+			return nil, fmt.Errorf("undeclared routed Docker bridge %q", name)
+		}
+		raw, err := boundedOutput(ctx, 1<<20, bin, "--host", localDockerHost, "network", "inspect", "--", id)
 		if err != nil {
-			return nil, fmt.Errorf("inspect Docker network %s: %w", name, err)
+			return nil, fmt.Errorf("inspect docker network %s by immutable observation ID: %w", name, err)
 		}
 		var items []struct {
-			IPAM struct {
+			ID      string            `json:"Id"`
+			Name    string            `json:"Name"`
+			Driver  string            `json:"Driver"`
+			Options map[string]string `json:"Options"`
+			IPAM    struct {
 				Config []struct {
-					Subnet string `json:"Subnet"`
+					Subnet  string `json:"Subnet"`
+					Gateway string `json:"Gateway"`
 				} `json:"Config"`
 			} `json:"IPAM"`
 		}
 		if err := json.Unmarshal(raw, &items); err != nil {
-			return nil, fmt.Errorf("decode Docker network %s: %w", name, err)
+			return nil, fmt.Errorf("decode docker network %s: %w", name, err)
 		}
 		if len(items) != 1 {
-			return nil, fmt.Errorf("decode Docker network %s: expected one object, got %d", name, len(items))
+			return nil, fmt.Errorf("decode docker network %s: expected one object, got %d", name, len(items))
 		}
-		for _, item := range items {
-			for _, c := range item.IPAM.Config {
-				p, err := netip.ParsePrefix(c.Subnet)
-				if err != nil || p.Bits() == 0 {
-					return nil, fmt.Errorf("docker network %s returned invalid subnet", name)
-				}
-				result = append(result, Network{Name: name, CIDR: p.Masked().String()})
+		item := items[0]
+		bridgeName := item.Options["com.docker.network.bridge.name"]
+		if item.ID != id || item.Name != name || item.Driver != driver || item.Driver != wanted.Driver || bridgeName != wanted.BridgeInterface {
+			return nil, fmt.Errorf("docker network %s changed during inspection or its stable identity drifted", name)
+		}
+		expectedIPAM, err := canonicalIPAM(wanted.Subnets, wanted.Gateways)
+		if err != nil {
+			return nil, fmt.Errorf("expected docker network %s: %w", name, err)
+		}
+		observedIPAM := make(map[string]string, len(item.IPAM.Config))
+		for _, ipam := range item.IPAM.Config {
+			prefix, parseErr := netip.ParsePrefix(ipam.Subnet)
+			gateway, gatewayErr := netip.ParseAddr(ipam.Gateway)
+			if parseErr != nil || gatewayErr != nil || prefix.Bits() == 0 || !prefix.Contains(gateway) || gateway.Is4() != prefix.Addr().Is4() {
+				return nil, fmt.Errorf("docker network %s returned invalid subnet/gateway", name)
 			}
+			canonicalPrefix := prefix.Masked().String()
+			if _, duplicate := observedIPAM[canonicalPrefix]; duplicate {
+				return nil, fmt.Errorf("docker network %s returned duplicate subnet %s", name, canonicalPrefix)
+			}
+			observedIPAM[canonicalPrefix] = gateway.String()
+		}
+		if !sameIPAM(expectedIPAM, observedIPAM) {
+			return nil, fmt.Errorf("docker network %s subnet/gateway tuple drifted", name)
+		}
+		for cidr, gateway := range observedIPAM {
+			result = append(result, Network{ID: id, Name: name, Driver: driver, BridgeInterface: bridgeName, CIDR: cidr, Gateway: gateway})
 		}
 	}
-	sort.Slice(result, func(i, j int) bool { return result[i].CIDR < result[j].CIDR })
+	for name := range expected {
+		if !seenNames[name] {
+			return nil, fmt.Errorf("configured Docker network %q is absent", name)
+		}
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Name != result[j].Name {
+			return result[i].Name < result[j].Name
+		}
+		return result[i].CIDR < result[j].CIDR
+	})
 	return result, nil
+}
+
+func canonicalIPAM(subnets, gateways []string) (map[string]string, error) {
+	if len(subnets) == 0 || len(subnets) != len(gateways) {
+		return nil, errors.New("one explicit gateway is required for every subnet")
+	}
+	result := make(map[string]string, len(subnets))
+	for index, rawSubnet := range subnets {
+		prefix, err := netip.ParsePrefix(rawSubnet)
+		gateway, gatewayErr := netip.ParseAddr(gateways[index])
+		if err != nil || gatewayErr != nil || prefix.Bits() == 0 || !prefix.Contains(gateway) || gateway.Is4() != prefix.Addr().Is4() {
+			return nil, errors.New("invalid subnet/gateway pair")
+		}
+		canonical := prefix.Masked().String()
+		if _, duplicate := result[canonical]; duplicate {
+			return nil, errors.New("duplicate subnet")
+		}
+		result[canonical] = gateway.String()
+	}
+	return result, nil
+}
+
+func sameIPAM(expected, observed map[string]string) bool {
+	if len(expected) != len(observed) {
+		return false
+	}
+	for subnet, gateway := range expected {
+		if observed[subnet] != gateway {
+			return false
+		}
+	}
+	return true
 }
 
 func boundedOutput(ctx context.Context, limit int64, bin string, args ...string) ([]byte, error) {

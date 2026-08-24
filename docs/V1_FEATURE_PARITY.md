@@ -1,5 +1,10 @@
 # V1 Feature Parity and V2 Decisions
 
+> **2.0.2 remains a RELEASE CANDIDATE - NOT DEPLOYABLE.** This comparison is
+> design documentation, not Stage R2 evidence or permission to install, apply,
+> or deploy. Deployment additionally requires separate approval of the
+> completed server plan.
+
 The reference checkout is
 `unknown0152/nft-firewall-public@b607738bf917fd5a198be5a24ae92c8ba523a076`
 on branch `main`. It was frozen read-only with a source list and SHA256
@@ -28,9 +33,9 @@ Disposition means:
 | WireGuard bootstrap allow | REDESIGN | Uplink + fwmark + endpoint set + UDP port; no broad temporary uplink allow |
 | Endpoint hostname refresh | KEEP | Validated fixed-cadence resolver, bounded cache/history, atomic v4/v6 sets |
 | WireGuard watchdog/recovery levels | REDESIGN | Health/reconcile loop and narrow single-peer endpoint repair; interface manager remains external |
-| Firewall backup/restore | REDESIGN | Immutable checksummed generations, active boot snapshot, database backup |
-| Interactive safe apply | REPLACE | Persistent pending generation, deadline, commit, daemon plus systemd rollback |
-| Boot firewall persistence | REDESIGN | Early pre-network committed snapshot restore; corrupt state triggers emergency deny |
+| Firewall backup/restore | REDESIGN | Immutable checksummed generations, authoritative generation/checksum pointer, database backup |
+| Interactive safe apply | REPLACE | Durable pending-before-mutation state, uncommitted safe-applied generation, deadline, explicit commit, daemon plus systemd rollback |
+| Boot firewall persistence | REDESIGN | Early pre-network committed-generation restore; unusable immutable evidence fails before nft mutation and blocks readiness |
 | Whole-ruleset flush | DROP | Backend rejects `flush ruleset`; only three fixed V2 tables are addressed |
 | Text/regex nft inspection | REPLACE | Bounded `nft -j` JSON inspection and canonical owned fingerprints |
 | Marker comments | KEEP | Deterministic ownership/rule comments, backed by structural JSON fingerprint |

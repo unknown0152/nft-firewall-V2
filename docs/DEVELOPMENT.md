@@ -37,9 +37,9 @@ paths, and socket purpose are reviewed in `SECURITY_AUDIT.md`.
 
 ```bash
 make build
-make release VERSION=2.0.1 COMMIT=$(git rev-parse HEAD) \
-  BUILD_DATE=$(git show -s --format=%cI HEAD)
-make deb VERSION=2.0.1
+make release VERSION=2.0.2+ci COMMIT=$(git rev-parse HEAD) \
+  BUILD_DATE=$(git show -s --format=%cI HEAD) DISPOSITION=ci
+make deb VERSION=2.0.2+ci COMMIT=$(git rev-parse HEAD) DISPOSITION=ci
 ./tests/packaging/systemd_preflight.sh amd64
 ```
 
@@ -48,11 +48,28 @@ ambient VCS auto-discovery, omit the Go build ID, and embed version, commit,
 and a controlled build date. amd64 and arm64 are produced.
 `SOURCE_DATE_EPOCH` is honored by final package tooling.
 
-Final packaging requires a clean tree and matching `v<version>` tag:
+Source-only Stage R may exercise candidate packaging only from a clean tree:
 
 ```bash
-GOTOOLCHAIN=go1.25.13 ./scripts/package-release.sh 2.0.1
+GOTOOLCHAIN=go1.25.13 ./scripts/package-release.sh 2.0.2 --allow-untagged
 ```
+
+That mode derives the quarantine label
+`2.0.2-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>`. The output directory,
+both archive filenames, and both standalone package filenames contain that
+full label. Every standalone binary filename contains
+`RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>`. The external directory also
+contains the standalone `RELEASE-CANDIDATE-NOT-DEPLOYABLE.txt` warning, and
+the copied report metadata and console output repeat the disposition. Candidate
+binaries and the packages enclosed by the archives use the non-final artifact
+version `2.0.2~stage.r.<commit12>`. Quarantine is enforced at runtime too:
+candidate `nftfw` permits only `version`, candidate `nftfwd` and `nftfw-web`
+refuse startup, and candidate Debian `preinst` refuses installation. These are
+test inputs, not installable or publishable release artifacts. Tagged final
+validation packaging requires an annotated tag and an external, protected R2
+attestation bound to the exact version and commit. The frozen tracked report
+remains `STAGE_R_CANDIDATE_ONLY`; later evidence must not rewrite the commit it
+attests to.
 
 The release script refuses any Go toolchain other than the pinned Go 1.25.13
 and records that toolchain in the manifest and unsigned in-toto provenance
@@ -61,16 +78,72 @@ operator-controlled signing identity and is intentionally not fabricated by
 the build.
 
 The script builds from an immutable export of the captured Git commit, verifies
-the complete artifact set in a temporary directory, and atomically publishes it
-as `../releases/nft-firewall-v2-<version>/`. It serializes release builds and
-refuses to replace an existing version directory.
+the complete artifact set in a temporary directory, and atomically publishes
+with no-replace semantics into the pre-created protected default parent as
+`../releases/nft-firewall-v2-2.0.2-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>/`.
+That directory contains two quarantined archives, six visibly quarantined
+standalone binaries, two visibly quarantined standalone Debian packages,
+`FINAL_ACCEPTANCE_REPORT.md`, `SOURCE_SECURITY_AUDIT.md`,
+`SOURCE_TEST_RESULTS.md`, `SOURCE_HISTORY_SECRET_SCAN.json`,
+`EXTRACTED_TREE_SECRET_SCAN.json`,
+`CANDIDATE_BUILD_EVIDENCE-NOT-DEPLOYABLE.json`, the standalone warning, and
+the enclosing `SHA256SUMS`. The extracted-tree record is emitted only after
+both ZIP and tar extractions pass and their deterministic scan evidence is
+byte-identical. The archives contain their
+own warning and integrity inventory; any generic internal binary/package names
+remain enclosed `2.0.2~stage.r.<commit12>` test inputs and must not be extracted
+for installation during Stage R. The script serializes release builds and
+refuses to replace an existing artifact-label directory.
 
-For a two-build reproducibility check, set `NFTFW_RELEASE_PARENT` to a different
-empty absolute directory for each invocation, then compare the two published
-version directories. The output-parent path is not embedded in the artifacts.
+For the required two-build reproducibility check, pre-create a different empty
+directory for each invocation and a separate evidence directory. Each must be
+owned by the invoking user, must not be writable by group/other, and must have
+no unsafe or symlinked ancestor (a root-owned sticky `/tmp` ancestor is
+allowed). The builder never creates or relaxes these trust roots.
 
-`--allow-untagged` exists only to exercise packaging before release. It marks
-the embedded manifest `unreleased`.
+```bash
+install -d -m 0700 /absolute/parent-a /absolute/parent-b /absolute/evidence
+NFTFW_RELEASE_PARENT=/absolute/parent-a GOTOOLCHAIN=go1.25.13 \
+  ./scripts/package-release.sh 2.0.2 --allow-untagged
+NFTFW_RELEASE_PARENT=/absolute/parent-b GOTOOLCHAIN=go1.25.13 \
+  ./scripts/package-release.sh 2.0.2 --allow-untagged
+```
+
+Then generate the external comparison record:
+
+```bash
+python3 ./scripts/compare-candidate-builds.py \
+  --left /absolute/parent-a/nft-firewall-v2-2.0.2-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12> \
+  --right /absolute/parent-b/nft-firewall-v2-2.0.2-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12> \
+  --output /absolute/evidence/STAGE_R_CANDIDATE_COMPARISON.json
+```
+
+The comparison verifies the complete enclosing checksum sets and byte-for-byte
+tree equality. Its external JSON is the temporally correct evidence for a
+comparison that cannot be claimed inside either earlier build.
+
+`--allow-untagged` exists only to exercise packaging before release. It always
+sets the embedded manifest tag to `unreleased` and refuses to run on a commit
+already carrying the matching release tag. Omitting it requires a matching
+annotated `v<version>` tag plus `NFTFW_R2_ATTESTATION=/absolute/protected.json`.
+That attestation must use schema `nftfw.r2-attestation.v1`, status
+`R2_PASSED_TAG_BUILD_AUTHORIZED`, identify the exact target version/commit and
+Stage R comparison digest, record the complete privileged R2 family as
+`PASS`, bind the sanitized privileged-evidence manifest SHA-256, and keep both
+`publication_authorized` and `deployment_authorized` false. The resulting tagged bytes and
+their generated evidence remain publication/deployment pending. Only a later
+external `FINAL_RELEASE_APPROVED` record referencing their exact hashes may
+authorize publication. That approval must also bind the exact annotated tag
+object and the SHA-256 of a `nftfw.post-tag-validation.v1` manifest containing
+the named package, boot, network/leak, Docker, OVPN, reproducibility,
+inspection, and secret-scan results. A tag is never moved and the frozen source
+is never amended merely to insert later results.
+
+The post-R2 tagged build uses the canonical `2.0.2` archive, binary, and
+package filenames inside a protected non-public parent. Its notice and build
+evidence state that external final approval is still required. Approval may
+therefore authorize the already checksummed canonical path set without
+renaming files or changing bytes.
 
 ## Code boundaries
 
@@ -91,14 +164,17 @@ command or state monoliths.
 ## CI
 
 `.github/workflows/ci.yml` runs formatting, module verification, tidy diff,
-unit/race/vet, staticcheck, govulncheck, gosec, ShellCheck, static cross-builds,
-Debian package inspection, and artifact upload.
+unit/race/vet, staticcheck, govulncheck, gosec, ShellCheck, unprivileged Stage R
+source contracts, static cross-builds, Debian package inspection, and artifact
+upload. It does not describe the hosted source-contract job as R2 evidence.
 
 Third-party actions are pinned to full reviewed commit IDs. Self-hosted runners
 must be GitHub Actions Runner 2.327.1 or newer for the pinned setup-go runtime.
 
 The namespace suite needs a self-hosted Linux runner labeled
 `nftfw-privileged` and repository variable
-`NFTFW_PRIVILEGED_RUNNER=enabled`. Hosted GitHub runners do not provide the
-required durable `CAP_NET_ADMIN` lab environment, so absence of this opt-in is
-not represented as a pass.
+`NFTFW_PRIVILEGED_RUNNER=enabled`. It is additionally gated by
+`NFTFW_STAGE_R2_APPROVED=enabled`; Stage R approval alone must not satisfy that
+condition. Hosted GitHub runners do not provide the required durable
+`CAP_NET_ADMIN` lab environment, so absence of either opt-in is not represented
+as a pass.

@@ -384,16 +384,19 @@ func TestOpenQuietDoesNotWriteConfigurationAudit(t *testing.T) {
 	ctx := context.Background()
 	dir := secureRuntimeTestDir(t)
 	configPath := filepath.Join(dir, "nftfw.toml")
-	databasePath := filepath.Join(dir, "state.db")
+	databasePath := filepath.Join(dir, "generation-state", "state.db")
+	ledgerPath := filepath.Join(dir, "provenance-ledger.db")
 	text := `[system]
 ipv6_mode = "disabled"
 strict_vpn = true
 [[interfaces]]
 name = "eth0"
 role = "uplink"
+provenance_id = 1
 [[interfaces]]
 name = "wg0"
 role = "vpn"
+provenance_id = 2
 [wireguard]
 interface = "wg0"
 endpoint_port = 51820
@@ -407,6 +410,7 @@ safe_apply_timeout_seconds = 90
 [state]
 directory = "` + dir + `"
 database = "` + databasePath + `"
+provenance_ledger = "` + ledgerPath + `"
 [integrations]
 docker_enabled = false
 threat_feed = false
@@ -431,24 +435,19 @@ notifications = false
 	if runner.calls == 0 {
 		t.Fatal("pristine state did not perform the first-use ownership check")
 	}
-	releaseClaims, err := state.AcquireClaimPublicationLock(ctx, dir)
+	releaseClaims, err := state.AcquireClaimPublicationLock(ctx, filepath.Join(dir, "test-runtime"))
 	if err != nil {
 		t.Fatal(err)
 	}
 	preflightCtx, cancel := context.WithTimeout(ctx, 250*time.Millisecond)
 	preflight, preflightErr := OpenQuiet(preflightCtx, configPath, &countingOwnedRunner{})
 	cancel()
-	if preflightErr != nil {
-		releaseClaims()
-		t.Fatalf("quiet rollback preflight waited on the outer safe-apply lock: %v", preflightErr)
-	}
-	rolledBack, rollbackErr := preflight.RollbackExpired(ctx)
-	if closeErr := preflight.Close(); closeErr != nil {
-		t.Error(closeErr)
-	}
 	releaseClaims()
-	if rollbackErr != nil || rolledBack {
-		t.Fatalf("no-pending rollback preflight was not a lock-free no-op: rolled_back=%t err=%v", rolledBack, rollbackErr)
+	if preflight != nil || preflightErr == nil || !strings.Contains(preflightErr.Error(), "context deadline exceeded") {
+		if preflight != nil {
+			_ = preflight.Close()
+		}
+		t.Fatalf("state initialization bypassed the held global lock: runtime=%#v err=%v", preflight, preflightErr)
 	}
 	if err := runtime.Close(); err != nil {
 		t.Fatal(err)

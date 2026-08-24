@@ -6,7 +6,32 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/unknown0152/nft-firewall-v2/internal/version"
 )
+
+func TestStageRCandidateOnlyRefusesWebStartup(t *testing.T) {
+	previous := version.BuildDisposition
+	previousVersion := version.Version
+	version.BuildDisposition = version.StageRCandidateOnly
+	t.Cleanup(func() {
+		version.BuildDisposition = previous
+		version.Version = previousVersion
+	})
+
+	if err := candidateStartupGuard(); err == nil {
+		t.Fatal("candidate-only nftfw-web startup was accepted")
+	}
+	version.BuildDisposition = "development"
+	version.Version = "2.0.2~stage.r.aaaaaaaaaaaa"
+	if err := candidateStartupGuard(); err == nil {
+		t.Fatal("candidate-version nftfw-web startup was accepted under a forged disposition")
+	}
+	version.Version = previousVersion
+	if err := candidateStartupGuard(); err != nil {
+		t.Fatalf("development nftfw-web startup guard failed: %v", err)
+	}
+}
 
 func TestDashboardIsReadOnlyAndUsesSameOriginAssets(t *testing.T) {
 	handler := newHandler("/nonexistent/nftfw-status.sock")

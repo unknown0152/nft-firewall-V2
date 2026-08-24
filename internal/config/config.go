@@ -18,21 +18,23 @@ import (
 	"syscall"
 
 	"github.com/BurntSushi/toml"
+	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 )
 
 type Config struct {
-	System       SystemConfig       `toml:"system"`
-	Interfaces   []Interface        `toml:"interfaces"`
-	Zones        []Zone             `toml:"zones"`
-	Services     []Service          `toml:"services"`
-	Policies     []Policy           `toml:"policies"`
-	NAT          []NATRule          `toml:"nat"`
-	WireGuard    WireGuardConfig    `toml:"wireguard"`
-	Runtime      RuntimeConfig      `toml:"runtime"`
-	State        StateConfig        `toml:"state"`
-	Integrations IntegrationsConfig `toml:"integrations"`
-	ThreatFeeds  []ThreatFeedConfig `toml:"threat_feeds"`
-	GeoSets      []GeoSetConfig     `toml:"geo_sets"`
+	System         SystemConfig       `toml:"system"`
+	Interfaces     []Interface        `toml:"interfaces"`
+	Zones          []Zone             `toml:"zones"`
+	Services       []Service          `toml:"services"`
+	Policies       []Policy           `toml:"policies"`
+	NAT            []NATRule          `toml:"nat"`
+	WireGuard      WireGuardConfig    `toml:"wireguard"`
+	Runtime        RuntimeConfig      `toml:"runtime"`
+	State          StateConfig        `toml:"state"`
+	Integrations   IntegrationsConfig `toml:"integrations"`
+	DockerNetworks []DockerNetwork    `toml:"docker_networks"`
+	ThreatFeeds    []ThreatFeedConfig `toml:"threat_feeds"`
+	GeoSets        []GeoSetConfig     `toml:"geo_sets"`
 }
 
 type SystemConfig struct {
@@ -41,10 +43,11 @@ type SystemConfig struct {
 }
 
 type Interface struct {
-	Name  string   `toml:"name"`
-	Role  string   `toml:"role"`
-	Zone  string   `toml:"zone"`
-	CIDRs []string `toml:"cidrs"`
+	Name         string   `toml:"name"`
+	Role         string   `toml:"role"`
+	Zone         string   `toml:"zone"`
+	CIDRs        []string `toml:"cidrs"`
+	ProvenanceID uint8    `toml:"provenance_id"`
 }
 
 type Zone struct {
@@ -99,8 +102,9 @@ type RuntimeConfig struct {
 }
 
 type StateConfig struct {
-	Directory string `toml:"directory"`
-	Database  string `toml:"database"`
+	Directory        string `toml:"directory"`
+	Database         string `toml:"database"`
+	ProvenanceLedger string `toml:"provenance_ledger"`
 }
 
 type IntegrationsConfig struct {
@@ -108,6 +112,18 @@ type IntegrationsConfig struct {
 	ThreatFeed    bool `toml:"threat_feed"`
 	GeoIP         bool `toml:"geoip"`
 	Notifications bool `toml:"notifications"`
+}
+
+// DockerNetwork is the immutable authorization identity for one routed
+// Docker bridge. Docker's generated network ID is deliberately absent: it is
+// used only to make a single observation race-consistent and may change after
+// an approved recreation of the same stable tuple.
+type DockerNetwork struct {
+	Name            string   `toml:"name"`
+	Driver          string   `toml:"driver"`
+	BridgeInterface string   `toml:"bridge_interface"`
+	Subnets         []string `toml:"subnets"`
+	Gateways        []string `toml:"gateways"`
 }
 
 type ThreatFeedConfig struct {
@@ -130,6 +146,7 @@ type GeoSetConfig struct {
 
 var namePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,62}$`)
 var ifacePattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`)
+var dockerNetworkPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
 var fwmarkPattern = regexp.MustCompile(`^(0x[0-9a-fA-F]{1,8}|[0-9]{1,10})$`)
 var countryPattern = regexp.MustCompile(`^[A-Za-z]{2}$`)
 
@@ -138,7 +155,11 @@ func Defaults() Config {
 		System:    SystemConfig{IPv6Mode: "disabled", StrictVPN: true},
 		WireGuard: WireGuardConfig{Interface: "wg0", EndpointPort: 51820, Fwmark: "0xca6c", KeepRecent: 2, TCPMSS: 1360, HandshakeSecond: 180},
 		Runtime:   RuntimeConfig{MaxBlockClaims: 100000, MaxSetMembers: 65536, SafeApplySeconds: 90},
-		State:     StateConfig{Directory: "/var/lib/nftfw", Database: "/var/lib/nftfw/state.db"},
+		State: StateConfig{
+			Directory:        "/var/lib/nftfw",
+			Database:         "/var/lib/nftfw/generation-state/state.db",
+			ProvenanceLedger: "/var/lib/nftfw/provenance-ledger.db",
+		},
 	}
 }
 
@@ -261,7 +282,7 @@ func secureConfigPath(path string) error {
 }
 
 func Validate(c Config) error {
-	if len(c.Interfaces) > 64 || len(c.Zones) > 256 || len(c.Services) > 1024 || len(c.Policies) > 10000 || len(c.NAT) > 10000 || len(c.ThreatFeeds) > 64 || len(c.GeoSets) > 64 {
+	if len(c.Interfaces) > provenance.MaxActive || len(c.DockerNetworks) > provenance.MaxActive || len(c.Zones) > 256 || len(c.Services) > 1024 || len(c.Policies) > 10000 || len(c.NAT) > 10000 || len(c.ThreatFeeds) > 64 || len(c.GeoSets) > 64 {
 		return errors.New("configuration collection limit exceeded")
 	}
 	if c.System.IPv6Mode != "disabled" && c.System.IPv6Mode != "vpn" && c.System.IPv6Mode != "native" {
@@ -282,14 +303,21 @@ func Validate(c Config) error {
 	if len(c.Runtime.TrustedServices) > 32 {
 		return errors.New("runtime.trusted_services exceeds 32 entries")
 	}
-	if !filepath.IsAbs(c.State.Directory) || filepath.Clean(c.State.Directory) == "/" {
-		return errors.New("state.directory must be an absolute non-root directory")
+	if !filepath.IsAbs(c.State.Directory) || filepath.Clean(c.State.Directory) != c.State.Directory || filepath.Clean(c.State.Directory) == "/" || strings.ContainsAny(c.State.Directory, "?#%") {
+		return errors.New("state.directory must be an absolute canonical non-root directory")
 	}
-	if !filepath.IsAbs(c.State.Database) || filepath.Dir(filepath.Clean(c.State.Database)) != filepath.Clean(c.State.Directory) {
-		return errors.New("state.database must be an absolute file directly inside state.directory")
+	stateRoot := filepath.Clean(c.State.Directory)
+	if c.State.Database != filepath.Join(stateRoot, "generation-state", "state.db") {
+		return errors.New("state.database must be the canonical state.directory/generation-state/state.db")
+	}
+	if c.State.ProvenanceLedger != filepath.Join(stateRoot, "provenance-ledger.db") {
+		return errors.New("state.provenance_ledger must be the separate state.directory/provenance-ledger.db")
 	}
 	if c.Integrations.Notifications {
 		return errors.New("integrations.notifications is not implemented in the core; use a separate audit adapter")
+	}
+	if c.Integrations.DockerEnabled != (len(c.DockerNetworks) > 0) {
+		return errors.New("integrations.docker_enabled must be true exactly when [[docker_networks]] entries are configured")
 	}
 	if c.Integrations.ThreatFeed != (len(c.ThreatFeeds) > 0) {
 		return errors.New("integrations.threat_feed must be true exactly when [[threat_feeds]] entries are configured")
@@ -337,6 +365,7 @@ func Validate(c Config) error {
 		return errors.New("at least one interface is required")
 	}
 	interfaces := map[string]Interface{}
+	assignments := make([]provenance.Assignment, 0, len(c.Interfaces))
 	for _, in := range c.Interfaces {
 		if !ifacePattern.MatchString(in.Name) {
 			return fmt.Errorf("interface %q has invalid name", in.Name)
@@ -347,12 +376,22 @@ func Validate(c Config) error {
 		if _, ok := interfaces[in.Name]; ok {
 			return fmt.Errorf("duplicate interface %q", in.Name)
 		}
+		if in.ProvenanceID < provenance.MinID || in.ProvenanceID > provenance.MaxID {
+			return fmt.Errorf("interface %q provenance_id must be %d..%d", in.Name, provenance.MinID, provenance.MaxID)
+		}
+		assignments = append(assignments, provenance.Assignment{Name: in.Name, ID: in.ProvenanceID})
 		interfaces[in.Name] = in
 		for _, cidr := range in.CIDRs {
 			if err := validateCIDR(cidr, true); err != nil {
 				return fmt.Errorf("interface %s cidr: %w", in.Name, err)
 			}
 		}
+	}
+	if err := provenance.ValidateActive(assignments); err != nil {
+		return err
+	}
+	if err := validateDockerNetworks(c.DockerNetworks, interfaces); err != nil {
+		return err
 	}
 	uplinks := 0
 	for _, in := range c.Interfaces {
@@ -537,8 +576,8 @@ func Validate(c Config) error {
 			}
 		}
 		incoming, ok := interfaces[rule.ExternalInterface]
-		if !ok || (incoming.Role != "uplink" && incoming.Role != "lan") {
-			return fmt.Errorf("NAT rule %s external_interface must be a declared uplink or lan interface", rule.Name)
+		if !ok || (incoming.Role != "uplink" && incoming.Role != "lan" && incoming.Role != "vpn") {
+			return fmt.Errorf("NAT rule %s external_interface must be a declared uplink, lan, or vpn interface", rule.Name)
 		}
 		if rule.Protocol != "tcp" && rule.Protocol != "udp" {
 			return fmt.Errorf("NAT rule %s protocol must be tcp or udp", rule.Name)
@@ -647,6 +686,103 @@ func Validate(c Config) error {
 		return errors.New("strict VPN mode requires wireguard.interface")
 	}
 	return nil
+}
+
+func validateDockerNetworks(networks []DockerNetwork, interfaces map[string]Interface) error {
+	names := make(map[string]bool, len(networks))
+	bridges := make(map[string]string, len(networks))
+	type ownedPrefix struct {
+		network string
+		prefix  netip.Prefix
+	}
+	var prefixes []ownedPrefix
+	for _, network := range networks {
+		if !dockerNetworkPattern.MatchString(network.Name) || names[network.Name] {
+			return fmt.Errorf("invalid or duplicate Docker network name %q", network.Name)
+		}
+		names[network.Name] = true
+		if network.Driver != "bridge" {
+			return fmt.Errorf("docker network %s driver must be bridge", network.Name)
+		}
+		if !ifacePattern.MatchString(network.BridgeInterface) {
+			return fmt.Errorf("docker network %s has invalid bridge_interface %q", network.Name, network.BridgeInterface)
+		}
+		if prior, exists := bridges[network.BridgeInterface]; exists {
+			return fmt.Errorf("docker bridge interface %q is shared by networks %s and %s", network.BridgeInterface, prior, network.Name)
+		}
+		bridges[network.BridgeInterface] = network.Name
+		configuredInterface, exists := interfaces[network.BridgeInterface]
+		if !exists || configuredInterface.Role != "container" {
+			return fmt.Errorf("docker network %s bridge_interface %q must be a declared container interface", network.Name, network.BridgeInterface)
+		}
+		if len(network.Subnets) == 0 || len(network.Subnets) != len(network.Gateways) {
+			return fmt.Errorf("docker network %s requires one explicit gateway for every subnet", network.Name)
+		}
+		if len(network.Subnets) > 16 {
+			return fmt.Errorf("docker network %s exceeds 16 subnet/gateway pairs", network.Name)
+		}
+		canonicalSubnets := make([]string, 0, len(network.Subnets))
+		seenSubnets := map[string]bool{}
+		seenGateways := map[string]bool{}
+		for index, rawSubnet := range network.Subnets {
+			prefix, err := netip.ParsePrefix(strings.TrimSpace(rawSubnet))
+			if err != nil || prefix.Bits() == 0 {
+				return fmt.Errorf("docker network %s has invalid subnet %q", network.Name, rawSubnet)
+			}
+			prefix = prefix.Masked()
+			canonical := prefix.String()
+			if strings.TrimSpace(rawSubnet) != canonical || seenSubnets[canonical] {
+				return fmt.Errorf("docker network %s has non-canonical or duplicate subnet %q", network.Name, rawSubnet)
+			}
+			for _, prior := range prefixes {
+				if prefix.Overlaps(prior.prefix) {
+					return fmt.Errorf("docker network %s subnet %s overlaps docker network %s subnet %s", network.Name, prefix, prior.network, prior.prefix)
+				}
+			}
+			prefixes = append(prefixes, ownedPrefix{network: network.Name, prefix: prefix})
+			seenSubnets[canonical] = true
+			canonicalSubnets = append(canonicalSubnets, canonical)
+
+			rawGateway := strings.TrimSpace(network.Gateways[index])
+			gateway, err := netip.ParseAddr(rawGateway)
+			if err != nil || !gateway.IsValid() || gateway.IsUnspecified() || gateway.IsMulticast() || !prefix.Contains(gateway) || gateway.Is4() != prefix.Addr().Is4() {
+				return fmt.Errorf("docker network %s gateway %q is not usable within subnet %s", network.Name, network.Gateways[index], prefix)
+			}
+			if gateway == prefix.Addr() || seenGateways[gateway.String()] || rawGateway != gateway.String() {
+				return fmt.Errorf("docker network %s has non-canonical, duplicate, or network-address gateway %q", network.Name, network.Gateways[index])
+			}
+			seenGateways[gateway.String()] = true
+		}
+		configuredCIDRs := canonicalPrefixes(configuredInterface.CIDRs)
+		for _, raw := range configuredInterface.CIDRs {
+			prefix, _ := netip.ParsePrefix(strings.TrimSpace(raw))
+			if strings.TrimSpace(raw) != prefix.Masked().String() {
+				return fmt.Errorf("docker bridge interface %s CIDR %q must be a canonical subnet", network.BridgeInterface, raw)
+			}
+		}
+		sort.Strings(canonicalSubnets)
+		if len(configuredCIDRs) != len(canonicalSubnets) {
+			return fmt.Errorf("docker network %s subnets do not match declared interface %s CIDRs", network.Name, network.BridgeInterface)
+		}
+		for index := range configuredCIDRs {
+			if configuredCIDRs[index] != canonicalSubnets[index] {
+				return fmt.Errorf("docker network %s subnets do not match declared interface %s CIDRs", network.Name, network.BridgeInterface)
+			}
+		}
+	}
+	return nil
+}
+
+func canonicalPrefixes(values []string) []string {
+	result := make([]string, 0, len(values))
+	for _, raw := range values {
+		prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
+		if err == nil {
+			result = append(result, prefix.Masked().String())
+		}
+	}
+	sort.Strings(result)
+	return result
 }
 
 func validEndpointAddress(address netip.Addr) bool {

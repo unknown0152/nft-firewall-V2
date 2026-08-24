@@ -1,5 +1,39 @@
 # Changelog
 
+## 2.0.2 — Stage R release candidate (not deployable)
+
+This entry describes source-only remediation whose pre-freeze Stage R matrix
+passes. It is not a final release announcement. Stage R2 privileged package, boot, network, Docker, and
+real-OVPN acceptance has **not been executed**; no 2.0.2 tag or final artifact
+exists.
+
+- Reserve the high conntrack-mark byte for immutable ingress provenance while
+  preserving the lower 24 bits, tag original-direction input/forward flows
+  only once, and require matching provenance on reply accepts.
+- Add explicit interface provenance IDs and a separate monotonic provenance
+  ledger with permanent retired-ID tombstones.
+- Authorize routed Docker bridges by stable configured name, bridge driver,
+  explicit Linux interface, subnet, and gateway rather than a generated
+  Docker network ID.
+- Add generation publication/recovery state for prepared commits, durable
+  enforcement pointers, crash-boundary recovery, and read-only enforcement
+  verification.
+- Make package and source installation nonactivating: installation may reload
+  systemd metadata but does not enable, start, stop, or restart NFTFW units.
+- Keep the base daemon and rollback timer/service independent of early restore
+  before first commit. Add the remain-active early unit, nonactivating
+  readiness verifier, and inert final `Requisite=`/`After=` templates.
+- Add unprivileged Stage R contracts and immutable v2.0.1 expected-red proofs
+  for provenance, package lifecycle, and dependency-graph defects.
+- Quarantine untagged candidate output with an explicit
+  `RELEASE CANDIDATE - NOT DEPLOYABLE` disposition, commit-bound pre-release
+  version, composite binary identity, runtime refusal, and non-installable
+  package guard.
+- Bind exact Git export contents, source/history and both extracted-tree secret
+  scans, protected build parents, deterministic double builds, R2 evidence,
+  annotated tag object, post-tag validation, and final approval through
+  external checksummed records without rewriting the frozen source report.
+
 ## 2.0.1 — Security and release hardening
 
 - Reject contradictory interface-to-zone assignments across both supported

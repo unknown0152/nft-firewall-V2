@@ -1,13 +1,17 @@
 # NFT Firewall V2 Security Audit
 
-Audit date: 2026-08-16, 2026-08-17, and 2026-08-23 UTC. Scope: production Go, configuration/compiler,
+Audit date: 2026-08-16, 2026-08-17, 2026-08-23, and 2026-08-24 UTC. Scope: production Go, configuration/compiler,
 nftables ownership, Unix APIs, persistence/rollback, systemd, integrations,
 web, installers, tests, dependencies, Git history, and release contents.
 
-Current source disposition: the tagged `2.0.1` release passes its unprivileged
-source, artifact, archive-scan, and reproducibility gates. Privileged/live
-acceptance remains separately gated in `TEST_RESULTS.md`; this document must
-not be read as approval to install or mutate a live host.
+Current source disposition: **2.0.2 RELEASE CANDIDATE - NOT DEPLOYABLE**.
+Source-only pre-freeze Stage R gates pass, while post-freeze candidate
+construction/comparison and all R2 privileged package, boot, network, Docker,
+and real-OVPN acceptance remain separate. The findings below through NFV2-030
+record the tagged 2.0.1 audit history; their evidence is not
+silently promoted across the 2.0.2 provenance, persistence, Docker-identity,
+and systemd/package changes. Current results and missing gates are listed in
+`TEST_RESULTS.md`. This document is not approval to install or mutate a host.
 
 ## Findings repaired
 
@@ -46,8 +50,25 @@ not be read as approval to install or mutate a live host.
 
 Verification labels in this table describe regression coverage. Any
 namespace, real-provider, Docker, host, reboot, or other privileged evidence
-is historical `v2.0.0` evidence unless `TEST_RESULTS.md` explicitly records a
-current `2.0.1` rerun.
+is historical evidence unless `TEST_RESULTS.md` explicitly records a current
+2.0.2 rerun against the same candidate commit.
+
+## 2.0.2 source repairs
+
+These repairs passed the current pinned source-only matrix. Their privileged
+packet, package, boot, Docker, and provider behavior remains an R2 gate.
+
+| ID | Finding | Severity | Source repair | Current status |
+| --- | --- | --- | --- | --- |
+| NFV2-031 | Broad established/reply acceptance did not prove the original ingress/egress path | HIGH | Reserve the high connection-mark byte for write-once interface provenance and require exact marked reply paths | SOURCE-CLOSED; R2 packet proof pending |
+| NFV2-032 | Configuration-only provenance IDs could be reused after an interface disappeared | HIGH | Add a separate monotonic allocation ledger with retired tombstones and a digest bound into generation evidence | SOURCE-CLOSED; R2 persistence proof pending |
+| NFV2-033 | A foreign nftables rule could already use the reserved mark mask | HIGH | Audit the complete bounded nft JSON ruleset before mutation and refuse any foreign mask collision | SOURCE-CLOSED; R2 collision proof pending |
+| NFV2-034 | Mutable/stale generation evidence could make recovery ambiguous after a crash | HIGH | Publish immutable script/snapshot pairs with exact checksums, fsync ordering, commit protocol, and conservative ambiguity retention | SOURCE-CLOSED; R2 crash/boot proof pending |
+| NFV2-035 | Apply, reconcile, claim publication, and recovery could interleave across processes | HIGH | Use one global mutation lock plus the canonical claim-publication lock and verified rollback paths | SOURCE-CLOSED; R2 concurrency proof pending |
+| NFV2-036 | Docker name-only observation could accept a recreated or drifted bridge | HIGH | Bind the stable ID/name/driver/bridge/subnet/gateway tuple and revalidate immutable observation ID | SOURCE-CLOSED; live Docker proof pending |
+| NFV2-037 | Package/systemd dependency edges could activate too early or imply readiness | HIGH | Keep install inert, separate early restore from nonactivating readiness, and ship final dependency edges only as administrator-selected examples | SOURCE-CLOSED; VM/reboot proof pending |
+| NFV2-038 | An outer RC filename alone did not prevent an extracted payload from running or installing | HIGH | Embed a commit-bound Stage R version/disposition/composite identity; quarantine CLI/daemon/web and refuse candidate package/source installation | SOURCE-CLOSED; package inspection pending |
+| NFV2-039 | Release approval and scan claims could become circular or stale | HIGH | Keep frozen reports pre-build; emit exact external build/comparison/secret evidence; bind R2, tag object, post-tag validation, and final approval by SHA-256 | SOURCE-CLOSED; external candidate evidence pending |
 
 ## Adversarial review areas
 
@@ -56,8 +77,8 @@ current `2.0.1` rerun.
 | Shell/argument injection | Go invokes fixed binaries with argument arrays; interfaces/names/addresses validated; no Go shell string execution |
 | nft ownership | Global flush rejected; only fixed family/table tuples may be deleted; unrelated-table tests pass |
 | Hidden allows | Compiler review found only loopback, protocol bootstrap, endpoint bootstrap, reply-only, trusted lease, stateful input/forward, and declared policies |
-| Conntrack bypass | Output has no broad state accept and physical-forward drops precede state accept; current compiler/order regressions pass, while active `2.0.1` TCP/UDP leak tests remain gated |
-| IPv6 bypass | Three explicit modes, early disabled hooks, and dual-stack sets pass current compiler/unit review; `2.0.1` namespace/real-VPN capture remains gated |
+| Conntrack bypass | 2.0.2 source regressions require write-once ingress provenance and remove broad established accepts; direct TCP/UDP alternate-ingress and leak packet proof remains an unexecuted R2 gate |
+| IPv6 bypass | Three explicit modes and disabled-mode hooks retain unit coverage; 2.0.2 namespace/real-VPN capture remains an unexecuted R2 gate |
 | Unsafe temp/path use | Go uses secure temp APIs; protected state/config/cache paths reject symlinks and unsafe parents; package temp paths are fixed templates |
 | Socket permissions | Control mode/root peer authorization; status is deliberately dashboard-group readable; unsafe existing socket objects rejected |
 | Request/resource bounds | API, nft output, config, Docker output, feeds, Geo files, set counts, and audit fields bounded |
@@ -65,7 +86,7 @@ current `2.0.1` rerun.
 | Rollback | Persistent deadline, exact guard validation, checksummed artifacts, independent timer, and current unprivileged crash/ambiguity/timeout regressions; live-host execution remains gated |
 | Web XSS/CSRF/file access | No mutable endpoint, no templated user HTML, DOM uses `textContent`, fixed routes/assets, strict CSP/headers |
 | HTTP resource limits | Loopback default, read/header/write/idle timeouts, 16 KiB headers, status-only upstream response limit |
-| Secret logging | Status omits keys/peer IDs; controller observation is aggregate; test config excluded; worktree/history scans pass and final extracted archives remain gated |
+| Secret logging | Status omits keys/peer IDs; controller observation is aggregate; test config excluded; current-tree scan passes while exact frozen history and extracted archives remain post-freeze gates |
 | Capabilities/systemd | Static units bind the root daemon to `CAP_NET_ADMIN`; web has no capabilities; isolated staged verification passes and installation/runtime verification remains gated |
 
 ## Accepted residual risks
@@ -81,9 +102,8 @@ current `2.0.1` rerun.
    repeatedly fight reconciliation. V2 detects/repairs its own objects only.
 5. The local dashboard has no application authentication. Its loopback bind,
    service sandbox, and status-only socket are required controls.
-6. No `2.0.1` full-machine reboot or live-host acceptance has been executed.
-   Historical `v2.0.0` service/boot-branch evidence is not promoted to this
-   candidate.
+6. No 2.0.2 full-machine reboot or live-host acceptance has been executed.
+   Historical service/boot evidence is not promoted to this candidate.
 7. Release checksums and provenance are not cryptographically signed. A
    release operator must add a signature using an independently controlled
    identity; the build does not fabricate one.
@@ -93,8 +113,12 @@ unresolved high/critical implementation findings.
 
 ## Final scan evidence
 
-The `2.0.1` staticcheck, govulncheck, gosec, full race, ShellCheck, fuzz,
-Gitleaks history/worktree/extracted-release, package/archive inspection, and
-two-build reproducibility gates pass against the tagged release. Historical
-`2.0.0` privileged evidence is retained in that tag's reports and is not
-promoted to this release.
+The 2.0.2 pre-freeze source passed Go 1.25.13 unit/race/vet/module/fmt,
+staticcheck v0.7.0, govulncheck v1.7.0, gosec v2.28.0, nine bounded fuzz
+targets, complete changed-shell analysis, Stage R source/guard/comparator
+contracts, and the deterministic current-tree secret scan with zero findings.
+Exact frozen-commit history scans, extracted archive scans, package/archive
+inspection, and the two-build comparison are post-freeze external gates. No
+2.0.2 privileged R2 or extracted final-release evidence exists.
+Historical privileged evidence is retained in its original tag reports and is
+not promoted to this candidate.

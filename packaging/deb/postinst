@@ -4,8 +4,18 @@ set -eu
 getent group nftfw >/dev/null 2>&1 || addgroup --system nftfw
 getent group nftfw-web >/dev/null 2>&1 || addgroup --system nftfw-web
 id nftfw-web >/dev/null 2>&1 || adduser --system --ingroup nftfw-web --home /var/empty --no-create-home --disabled-login nftfw-web
+
+for directory in /etc/nftfw /run/nftfw /var/lib/nftfw /var/lib/nftfw/backups \
+    /var/lib/nftfw/generation-state /var/lib/nftfw/generations; do
+    if [ -L "$directory" ] || { [ -e "$directory" ] && [ ! -d "$directory" ]; }; then
+        echo "Refusing unsafe NFT Firewall directory: $directory" >&2
+        exit 1
+    fi
+done
 install -d -o root -g nftfw -m 0750 /etc/nftfw
-install -d -o root -g root -m 0700 /var/lib/nftfw /var/lib/nftfw/backups
+install -d -o root -g nftfw-web -m 0750 /run/nftfw
+install -d -o root -g root -m 0700 /var/lib/nftfw /var/lib/nftfw/backups \
+    /var/lib/nftfw/generation-state /var/lib/nftfw/generations
 if [ -L /etc/nftfw/nftfw.toml ] || [ ! -f /etc/nftfw/nftfw.toml ]; then
     echo "Configuration must be a regular, non-symlink file: /etc/nftfw/nftfw.toml" >&2
     exit 1
@@ -16,10 +26,8 @@ chmod 0640 /etc/nftfw/nftfw.toml
 
 if [ -d /run/systemd/system ]; then
     systemctl daemon-reload
-    systemctl enable nftfw-early.service nftfwd.service nftfw-rollback.timer nftfw-web.service >/dev/null
-    systemctl restart nftfwd.service nftfw-rollback.timer nftfw-web.service
 fi
 
-echo "NFT Firewall V2 installed; the package did not create or apply a new candidate policy."
-echo "If committed state already existed, the restarted daemon may have reconciled that committed policy."
+echo "NFT Firewall V2 installed without enabling, starting, or restarting any unit."
+echo "The package did not create or apply a candidate policy or enforcement pointer."
 echo "Edit /etc/nftfw/nftfw.toml, then run: nftfw config validate && nftfw plan"

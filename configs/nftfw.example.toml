@@ -10,12 +10,21 @@ name = "eth0"
 role = "uplink"
 zone = "wan"
 cidrs = ["192.0.2.10/32"]
+provenance_id = 1 # permanent; never reuse for another interface
 
 [[interfaces]]
 name = "wg0"
 role = "vpn"
 zone = "vpn"
 cidrs = ["10.77.0.2/32"]
+provenance_id = 2
+
+[[interfaces]]
+name = "br-media"
+role = "container"
+zone = "containers"
+cidrs = ["172.19.0.0/16"]
+provenance_id = 3
 
 [[zones]]
 name = "wan"
@@ -29,6 +38,11 @@ networks = ["192.168.1.0/24"]
 name = "vpn"
 networks = ["10.77.0.0/24"]
 interfaces = ["wg0"]
+
+[[zones]]
+name = "containers"
+networks = ["172.19.0.0/16"]
+interfaces = ["br-media"]
 
 [[services]]
 name = "ssh"
@@ -80,10 +94,18 @@ trusted_services = ["ssh"] # exact services a temporary `allow` lease may open
 
 [state]
 directory = "/var/lib/nftfw"
-database = "/var/lib/nftfw/state.db"
+database = "/var/lib/nftfw/generation-state/state.db"
+provenance_ledger = "/var/lib/nftfw/provenance-ledger.db"
 
 [integrations]
-docker_enabled = false
+docker_enabled = true
 threat_feed = false
 geoip = false
 notifications = false
+
+[[docker_networks]]
+name = "media"
+driver = "bridge"
+bridge_interface = "br-media" # com.docker.network.bridge.name
+subnets = ["172.19.0.0/16"]
+gateways = ["172.19.0.1"]

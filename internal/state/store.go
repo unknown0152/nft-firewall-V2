@@ -19,18 +19,21 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
+
 	_ "modernc.org/sqlite"
 )
 
 type Store struct {
-	DB   *sql.DB
-	Dir  string
-	Path string
-	mu   sync.Mutex
+	DB    *sql.DB
+	Dir   string // immutable snapshot/pointer/ledger root
+	DBDir string // mutable generation database and journal directory
+	Path  string
+	mu    sync.Mutex
 }
 
 const (
-	currentSchemaVersion = 5
+	currentSchemaVersion = 6
 	MaxAuditRows         = 10000
 )
 
@@ -38,14 +41,26 @@ var databaseNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$
 var claimSourcePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,63}(/[a-zA-Z0-9_.-]{1,64})?$`)
 
 type Generation struct {
-	ID               uint64
-	Checksum         string
-	ObservedHash     string
-	ScriptPath       string
-	Status           string
-	CreatedAt        time.Time
-	RollbackDeadline *time.Time
-	PreviousID       *uint64
+	ID                       uint64
+	Checksum                 string
+	SnapshotChecksum         string
+	ObservedHash             string
+	ScriptPath               string
+	SnapshotPath             string
+	Status                   string
+	CreatedAt                time.Time
+	RollbackDeadline         *time.Time
+	PreviousID               *uint64
+	BootID                   string
+	PreparedAt               *time.Time
+	PreparedPriorID          *uint64
+	PreparedPriorSum         string // predecessor policy checksum
+	PreparedPriorSnapshotSum string
+}
+
+type GenerationMetadata struct {
+	BootID     string
+	Provenance []provenance.Assignment
 }
 
 type Claim struct {
@@ -76,7 +91,7 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	if path == "" {
 		return nil, errors.New("state database path is empty")
 	}
-	path, err := prepareStatePath(path)
+	path, bootstrapAllowed, err := prepareStatePath(path)
 	if err != nil {
 		return nil, err
 	}
@@ -85,7 +100,17 @@ func Open(ctx context.Context, path string) (*Store, error) {
 		return nil, fmt.Errorf("open sqlite: %w", err)
 	}
 	db.SetMaxOpenConns(1)
-	for _, stmt := range []string{"PRAGMA busy_timeout=5000", "PRAGMA foreign_keys=ON", "PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL"} {
+	for _, stmt := range []string{"PRAGMA busy_timeout=5000", "PRAGMA foreign_keys=ON"} {
+		if _, err := db.ExecContext(ctx, stmt); err != nil {
+			db.Close()
+			return nil, fmt.Errorf("sqlite %s: %w", stmt, err)
+		}
+	}
+	if err := validateWritableInitialSchema(ctx, db, bootstrapAllowed); err != nil {
+		db.Close()
+		return nil, err
+	}
+	for _, stmt := range []string{"PRAGMA journal_mode=WAL", "PRAGMA synchronous=FULL"} {
 		if _, err := db.ExecContext(ctx, stmt); err != nil {
 			db.Close()
 			return nil, fmt.Errorf("sqlite %s: %w", stmt, err)
@@ -97,7 +122,13 @@ func Open(ctx context.Context, path string) (*Store, error) {
 			return nil, err
 		}
 	}
-	s := &Store{DB: db, Dir: filepath.Dir(path), Path: path}
+	dbDir := filepath.Dir(path)
+	root := stateRootForDatabase(path)
+	if err := validateStateRoot(root); err != nil {
+		db.Close()
+		return nil, err
+	}
+	s := &Store{DB: db, Dir: root, DBDir: dbDir, Path: path}
 	if _, markerErr := os.Stat(filepath.Join(s.Dir, activeMarkerName)); markerErr == nil {
 		var requiredTables int
 		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name IN ('schema_migrations','generations')").Scan(&requiredTables); err != nil || requiredTables != 2 {
@@ -105,9 +136,9 @@ func Open(ctx context.Context, path string) (*Store, error) {
 			return nil, errors.New("enforced state database lacks required generation schema")
 		}
 		var committed int
-		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM generations WHERE status='committed'").Scan(&committed); err != nil || committed == 0 {
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM generations WHERE status IN ('committed','commit_prepared')").Scan(&committed); err != nil || committed == 0 {
 			db.Close()
-			return nil, errors.New("enforced state database has no committed generation")
+			return nil, errors.New("enforced state database has no committed or prepared generation")
 		}
 	}
 	if err := s.migrate(ctx); err != nil {
@@ -117,35 +148,38 @@ func Open(ctx context.Context, path string) (*Store, error) {
 	return s, nil
 }
 
-func prepareStatePath(path string) (string, error) {
+func prepareStatePath(path string) (string, bool, error) {
 	abs, err := filepath.Abs(path)
 	if err != nil {
-		return "", fmt.Errorf("resolve state database path: %w", err)
+		return "", false, fmt.Errorf("resolve state database path: %w", err)
+	}
+	if strings.ContainsAny(abs, "?#%") {
+		return "", false, errors.New("state database path contains unsupported URI characters")
 	}
 	if !databaseNamePattern.MatchString(filepath.Base(abs)) {
-		return "", errors.New("state database filename contains unsupported characters")
+		return "", false, errors.New("state database filename contains unsupported characters")
 	}
 	parent := filepath.Dir(abs)
 	if err := os.MkdirAll(parent, 0o750); err != nil {
-		return "", fmt.Errorf("create state directory: %w", err)
+		return "", false, fmt.Errorf("create state directory: %w", err)
 	}
 	resolvedParent, err := filepath.EvalSymlinks(parent)
 	if err != nil {
-		return "", fmt.Errorf("resolve state directory: %w", err)
+		return "", false, fmt.Errorf("resolve state directory: %w", err)
 	}
 	if resolvedParent != parent {
-		return "", errors.New("state directory path contains a symlink")
+		return "", false, errors.New("state directory path contains a symlink")
 	}
 	parentInfo, err := os.Stat(parent)
 	if err != nil {
-		return "", fmt.Errorf("stat state directory: %w", err)
+		return "", false, fmt.Errorf("stat state directory: %w", err)
 	}
 	if !parentInfo.IsDir() || parentInfo.Mode().Perm()&0o022 != 0 {
-		return "", errors.New("state directory must be a directory and not group/other writable")
+		return "", false, errors.New("state directory must be a directory and not group/other writable")
 	}
 	parentStat, ok := parentInfo.Sys().(*syscall.Stat_t)
 	if !ok || int64(parentStat.Uid) != int64(os.Geteuid()) {
-		return "", errors.New("state directory must be owned by the current service user")
+		return "", false, errors.New("state directory must be owned by the current service user")
 	}
 	databaseExists := false
 	var databaseSize int64
@@ -156,40 +190,95 @@ func prepareStatePath(path string) (string, error) {
 				databaseSize = info.Size()
 			}
 			if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-				return "", fmt.Errorf("state file %s must be regular and non-symlink", filepath.Base(candidate))
+				return "", false, fmt.Errorf("state file %s must be regular and non-symlink", filepath.Base(candidate))
 			}
 			stat, valid := info.Sys().(*syscall.Stat_t)
 			if !valid || int64(stat.Uid) != int64(os.Geteuid()) {
-				return "", fmt.Errorf("state file %s has unsafe ownership", filepath.Base(candidate))
+				return "", false, fmt.Errorf("state file %s has unsafe ownership", filepath.Base(candidate))
 			}
 		} else if !errors.Is(statErr, os.ErrNotExist) {
-			return "", fmt.Errorf("stat state file: %w", statErr)
+			return "", false, fmt.Errorf("stat state file: %w", statErr)
 		}
 	}
-	marker := filepath.Join(parent, activeMarkerName)
+	marker := filepath.Join(stateRootForDatabase(abs), activeMarkerName)
 	if markerInfo, markerErr := os.Lstat(marker); markerErr == nil {
 		markerStat, valid := markerInfo.Sys().(*syscall.Stat_t)
 		if markerInfo.Mode()&os.ModeSymlink != 0 || !markerInfo.Mode().IsRegular() || markerInfo.Mode().Perm()&0o077 != 0 || !valid || int64(markerStat.Uid) != int64(os.Geteuid()) {
-			return "", errors.New("enforcement marker has unsafe type, permissions, or ownership")
+			return "", false, errors.New("enforcement marker has unsafe type, permissions, or ownership")
 		}
 		if !databaseExists || databaseSize == 0 {
-			return "", errors.New("state database is missing while firewall enforcement is enabled; restore state instead of creating an empty database")
+			return "", false, errors.New("state database is missing while firewall enforcement is enabled; restore state instead of creating an empty database")
 		}
 	} else if !errors.Is(markerErr, os.ErrNotExist) {
-		return "", fmt.Errorf("stat enforcement marker: %w", markerErr)
+		return "", false, fmt.Errorf("stat enforcement marker: %w", markerErr)
 	}
+	bootstrapAllowed := !databaseExists || databaseSize == 0
 	f, err := os.OpenFile(abs, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
-		return "", fmt.Errorf("create state database: %w", err)
+		return "", false, fmt.Errorf("create state database: %w", err)
 	}
 	if err := f.Chmod(0o600); err != nil {
 		f.Close()
-		return "", fmt.Errorf("secure state database: %w", err)
+		return "", false, fmt.Errorf("secure state database: %w", err)
 	}
 	if err := f.Close(); err != nil {
-		return "", err
+		return "", false, err
 	}
-	return abs, nil
+	return abs, bootstrapAllowed, nil
+}
+
+func validateWritableInitialSchema(ctx context.Context, db *sql.DB, bootstrapAllowed bool) error {
+	var migrationTables int
+	if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='schema_migrations'").Scan(&migrationTables); err != nil {
+		return fmt.Errorf("inspect initial state schema: %w", err)
+	}
+	if migrationTables == 0 {
+		var userTables int
+		if err := db.QueryRowContext(ctx, "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%'").Scan(&userTables); err != nil {
+			return fmt.Errorf("inspect unversioned state schema: %w", err)
+		}
+		if !bootstrapAllowed || userTables != 0 {
+			return errors.New("nonempty unversioned state database requires the separate offline migration procedure")
+		}
+		return nil
+	}
+	if err := validateMigrationHistory(ctx, db, false); err != nil {
+		return err
+	}
+	var version int
+	if err := db.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),0) FROM schema_migrations").Scan(&version); err != nil {
+		return err
+	}
+	if version != currentSchemaVersion {
+		return fmt.Errorf("state schema version %d is not the exact required version %d; use the separate offline migration procedure", version, currentSchemaVersion)
+	}
+	return nil
+}
+
+func stateRootForDatabase(path string) string {
+	databaseDir := filepath.Dir(path)
+	if filepath.Base(databaseDir) == "generation-state" {
+		return filepath.Dir(databaseDir)
+	}
+	return databaseDir
+}
+
+func StateRootForDatabasePath(path string) string { return stateRootForDatabase(filepath.Clean(path)) }
+
+func validateStateRoot(root string) error {
+	resolved, err := filepath.EvalSymlinks(root)
+	if err != nil || resolved != root {
+		return errors.New("state root is absent or contains a symlink")
+	}
+	info, err := os.Stat(root)
+	if err != nil || !info.IsDir() || info.Mode().Perm()&0o022 != 0 {
+		return errors.New("state root must be a directory and not group/other writable")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
+		return errors.New("state root must be owned by the current service user")
+	}
+	return nil
 }
 
 func restrictRegularFile(path string, mode os.FileMode) error {
@@ -220,12 +309,15 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create migrations: %w", err)
 	}
+	if err := validateMigrationHistory(ctx, tx, false); err != nil {
+		return err
+	}
 	var version int
 	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),0) FROM schema_migrations").Scan(&version); err != nil {
 		return err
 	}
-	if version > currentSchemaVersion {
-		return fmt.Errorf("state schema version %d is newer than supported version %d", version, currentSchemaVersion)
+	if version != 0 && version != currentSchemaVersion {
+		return fmt.Errorf("state schema version %d is not the exact required version %d; use the separate offline migration procedure", version, currentSchemaVersion)
 	}
 	if version < 1 {
 		_, err = tx.ExecContext(ctx, `
@@ -316,10 +408,47 @@ INSERT INTO schema_migrations(version, applied_at) VALUES(5, datetime('now'));`)
 			return fmt.Errorf("migration 5: %w", err)
 		}
 	}
+	if version < 6 {
+		_, err = tx.ExecContext(ctx, `
+ALTER TABLE generations RENAME TO generations_pre_v6;
+DROP INDEX IF EXISTS generations_status_idx;
+CREATE TABLE generations (
+ id INTEGER PRIMARY KEY,
+ checksum TEXT NOT NULL,
+	 snapshot_checksum TEXT NOT NULL DEFAULT '',
+ script_path TEXT NOT NULL,
+ snapshot_path TEXT NOT NULL DEFAULT '',
+ status TEXT NOT NULL CHECK(status IN ('pending','applied','commit_prepared','committed','rolled_back')),
+ created_at TEXT NOT NULL,
+ rollback_deadline TEXT,
+ previous_id INTEGER REFERENCES generations(id),
+ observed_hash TEXT NOT NULL DEFAULT '',
+ boot_id TEXT NOT NULL,
+ commit_prepared_at TEXT,
+ prepared_previous_id INTEGER,
+	 prepared_previous_checksum TEXT NOT NULL DEFAULT '',
+	 prepared_previous_snapshot_checksum TEXT NOT NULL DEFAULT ''
+);
+CREATE INDEX generations_status_idx ON generations(status);
+INSERT INTO generations(
+ id,checksum,snapshot_checksum,script_path,snapshot_path,status,created_at,rollback_deadline,
+ previous_id,observed_hash,boot_id,commit_prepared_at,prepared_previous_id,
+	 prepared_previous_checksum,prepared_previous_snapshot_checksum
+)
+SELECT id,checksum,'',script_path,'',status,created_at,rollback_deadline,
+	 previous_id,observed_hash,'legacy-v2.0.1',NULL,NULL,'',''
+FROM generations_pre_v6;
+DROP TABLE generations_pre_v6;
+INSERT INTO schema_migrations(version, applied_at) VALUES(6, datetime('now'));
+`)
+		if err != nil {
+			return fmt.Errorf("migration 6: %w", err)
+		}
+	}
 	if err := tx.Commit(); err != nil {
 		return fmt.Errorf("commit migrations: %w", err)
 	}
-	return nil
+	return s.syncDatabase()
 }
 
 func (s *Store) NextGeneration(ctx context.Context) (uint64, error) {
@@ -330,7 +459,7 @@ func (s *Store) NextGeneration(ctx context.Context) (uint64, error) {
 	return max + 1, nil
 }
 
-func (s *Store) SaveGeneration(ctx context.Context, id uint64, checksum, script string, previous *uint64, deadline *time.Time) error {
+func (s *Store) SaveGenerationWithMetadata(ctx context.Context, id uint64, checksum, script string, previous *uint64, deadline *time.Time, metadata GenerationMetadata) error {
 	if id == 0 {
 		return errors.New("generation id must be positive")
 	}
@@ -340,41 +469,48 @@ func (s *Store) SaveGeneration(ctx context.Context, id uint64, checksum, script 
 	if !validScriptChecksum(script, checksum) {
 		return errors.New("generation script checksum is invalid")
 	}
+	if metadata.BootID == "" {
+		return errors.New("generation boot id is required")
+	}
+	if len(metadata.Provenance) == 0 {
+		return errors.New("generation provenance manifest is required")
+	}
+	if err := provenance.ValidateActive(metadata.Provenance); err != nil {
+		return fmt.Errorf("generation provenance manifest: %w", err)
+	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	genDir := filepath.Join(s.Dir, "generations")
-	if err := os.MkdirAll(genDir, 0o750); err != nil {
-		return err
-	}
-	path := filepath.Join(genDir, fmt.Sprintf("%020d.nft", id))
-	tmp, err := os.CreateTemp(genDir, ".generation-*.tmp")
+	genDir, err := secureGenerationsDirectory(s.Dir, true)
 	if err != nil {
 		return err
 	}
-	tmpPath := tmp.Name()
-	defer os.Remove(tmpPath)
-	if err := tmp.Chmod(0o600); err != nil {
-		tmp.Close()
-		return err
+	path := filepath.Join(genDir, fmt.Sprintf("%020d.nft", id))
+	if existing, readErr := secureActiveFile(path, maxActiveSnapshot); readErr == nil {
+		if string(existing) != script {
+			return fmt.Errorf("immutable generation script %d already exists with different content", id)
+		}
+	} else if errors.Is(readErr, os.ErrNotExist) {
+		if err := writeImmutable(path, []byte(script)); err != nil {
+			return err
+		}
+	} else {
+		return readErr
 	}
-	if _, err := tmp.WriteString(script); err != nil {
-		tmp.Close()
-		return err
+	var priorPointer *EnforcementPointer
+	if previous != nil {
+		var priorPolicyChecksum, priorSnapshotChecksum string
+		if err := s.DB.QueryRowContext(ctx, "SELECT checksum,snapshot_checksum FROM generations WHERE id=? AND status='committed'", *previous).Scan(&priorPolicyChecksum, &priorSnapshotChecksum); err != nil {
+			return fmt.Errorf("read prior committed generation: %w", err)
+		}
+		priorPointer = &EnforcementPointer{Schema: pointerSchema, Generation: *previous, SnapshotChecksum: priorSnapshotChecksum, PolicyChecksum: priorPolicyChecksum}
 	}
-	if err := tmp.Sync(); err != nil {
-		tmp.Close()
-		return err
+	snapshot := GenerationSnapshot{
+		Schema: snapshotSchema, Generation: id, Checksum: checksum, Script: script,
+		Provenance: append([]provenance.Assignment(nil), metadata.Provenance...),
+		Previous:   priorPointer, BootID: metadata.BootID,
 	}
-	if err := tmp.Close(); err != nil {
-		return err
-	}
-	if err := os.Link(tmpPath, path); err != nil {
-		return err
-	}
-	if err := os.Remove(tmpPath); err != nil {
-		return err
-	}
-	if err := syncDirectory(genDir); err != nil {
+	snapshotPath, err := s.WriteGenerationSnapshot(snapshot)
+	if err != nil {
 		return err
 	}
 	now := time.Now().UTC()
@@ -382,17 +518,25 @@ func (s *Store) SaveGeneration(ctx context.Context, id uint64, checksum, script 
 	if deadline != nil {
 		deadlineText = deadline.UTC().Format(time.RFC3339Nano)
 	}
-	_, err = s.DB.ExecContext(ctx, `INSERT INTO generations(id,checksum,script_path,status,created_at,rollback_deadline,previous_id) VALUES(?,?,?,?,?,?,?)`, id, checksum, path, "pending", now.Format(time.RFC3339Nano), deadlineText, previous)
+	_, err = s.DB.ExecContext(ctx, `INSERT INTO generations(
+id,checksum,snapshot_checksum,script_path,snapshot_path,status,created_at,rollback_deadline,previous_id,
+observed_hash,boot_id,commit_prepared_at,prepared_previous_id,prepared_previous_checksum,prepared_previous_snapshot_checksum
+) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`, id, checksum, snapshot.Pointer().SnapshotChecksum, path, snapshotPath, "pending", now.Format(time.RFC3339Nano), deadlineText, previous, "", metadata.BootID, nil, nil, "", "")
 	if err != nil {
-		_ = os.Remove(path)
 		return err
 	}
-	return nil
+	return s.syncDatabase()
 }
 
 func (s *Store) MarkApplied(ctx context.Context, id uint64) error {
-	_, err := s.DB.ExecContext(ctx, "UPDATE generations SET status='applied' WHERE id=?", id)
-	return err
+	result, err := s.DB.ExecContext(ctx, "UPDATE generations SET status='applied' WHERE id=? AND status='pending'", id)
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(result); err != nil {
+		return fmt.Errorf("mark generation applied: %w", err)
+	}
+	return s.syncDatabase()
 }
 
 func (s *Store) SetObservedHash(ctx context.Context, id uint64, hash string) error {
@@ -411,38 +555,185 @@ func (s *Store) SetObservedHash(ctx context.Context, id uint64, hash string) err
 	if count != 1 {
 		return sql.ErrNoRows
 	}
-	return nil
+	return s.syncDatabase()
 }
-func (s *Store) Commit(ctx context.Context, id uint64) error {
+
+// PrepareCommit durably records the only prior pointer state accepted by
+// recovery. The immutable snapshot must already be durable.
+func (s *Store) PrepareCommit(ctx context.Context, id uint64) (*Generation, error) {
+	g, err := s.Generation(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if g.Status != "applied" {
+		return nil, fmt.Errorf("generation %d status %s cannot enter commit_prepared", id, g.Status)
+	}
+	snapshot, err := LoadGenerationSnapshot(s.Dir, id)
+	if err != nil {
+		return nil, fmt.Errorf("read immutable generation snapshot: %w", err)
+	}
+	if pointer := snapshot.Pointer(); g.Checksum != pointer.PolicyChecksum || g.SnapshotChecksum != pointer.SnapshotChecksum {
+		return nil, errors.New("generation database checksums disagree with immutable snapshot")
+	}
+	var priorID any
+	priorPolicyChecksum := ""
+	priorSnapshotChecksum := ""
+	if snapshot.Previous != nil {
+		priorID = snapshot.Previous.Generation
+		priorPolicyChecksum = snapshot.Previous.PolicyChecksum
+		priorSnapshotChecksum = snapshot.Previous.SnapshotChecksum
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	result, err := s.DB.ExecContext(ctx, `UPDATE generations
+SET status='commit_prepared',commit_prepared_at=?,prepared_previous_id=?,prepared_previous_checksum=?,prepared_previous_snapshot_checksum=?
+WHERE id=? AND status='applied'`, now, priorID, priorPolicyChecksum, priorSnapshotChecksum, id)
+	if err != nil {
+		return nil, err
+	}
+	if err := requireOneRow(result); err != nil {
+		return nil, fmt.Errorf("prepare generation commit: %w", err)
+	}
+	if err := s.syncDatabase(); err != nil {
+		return nil, err
+	}
+	return s.Generation(ctx, id)
+}
+
+// PreparedDeadline is intentionally a single narrow query. Commit code calls
+// it as the final persisted-deadline read immediately before pointer rename.
+func (s *Store) PreparedDeadline(ctx context.Context, id uint64) (*time.Time, error) {
+	var raw sql.NullString
+	if err := s.DB.QueryRowContext(ctx, "SELECT rollback_deadline FROM generations WHERE id=? AND status='commit_prepared'", id).Scan(&raw); err != nil {
+		return nil, err
+	}
+	if !raw.Valid {
+		return nil, nil
+	}
+	deadline, err := time.Parse(time.RFC3339Nano, raw.String)
+	if err != nil {
+		return nil, err
+	}
+	return &deadline, nil
+}
+
+func (s *Store) FinalizeCommit(ctx context.Context, id uint64) error {
 	tx, err := s.DB.BeginTx(ctx, nil)
 	if err != nil {
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, "UPDATE generations SET status='rolled_back' WHERE status='pending' AND id<>?", id); err != nil {
+	defer tx.Rollback()
+	if _, err = tx.ExecContext(ctx, "UPDATE generations SET status='rolled_back' WHERE status IN ('pending','applied') AND id<>?", id); err != nil {
 		tx.Rollback()
 		return err
 	}
-	if _, err = tx.ExecContext(ctx, "UPDATE generations SET status='committed', rollback_deadline=NULL WHERE id=?", id); err != nil {
-		tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE generations
+SET status='committed',rollback_deadline=NULL,commit_prepared_at=NULL
+WHERE id=? AND status='commit_prepared'`, id)
+	if err != nil {
 		return err
 	}
-	if err = tx.Commit(); err != nil {
+	if err := requireOneRow(result); err != nil {
+		return fmt.Errorf("finalize generation commit: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)`, time.Now().UTC().Format(time.RFC3339Nano), "system", "generation_committed", fmt.Sprintf("generation=%d", id)); err != nil {
 		return err
 	}
-	return s.Audit(ctx, "system", "generation_committed", fmt.Sprintf("generation=%d", id))
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.syncDatabase()
+}
+
+// Commit is kept for compatibility with store-level callers. Reconciliation
+// uses the explicit prepared-pointer protocol and never calls this shortcut.
+func (s *Store) Commit(ctx context.Context, id uint64) error {
+	snapshot, err := LoadGenerationSnapshot(s.Dir, id)
+	if err != nil {
+		return err
+	}
+	current, exists, err := ReadEnforcementPointer(s.Dir)
+	if err != nil {
+		return err
+	}
+	if snapshot.Previous == nil && exists || snapshot.Previous != nil && (!exists || !snapshot.Previous.Equal(current)) {
+		return errors.New("cannot commit from an unexpected enforcement pointer")
+	}
+	if _, err := s.PrepareCommit(ctx, id); err != nil {
+		return err
+	}
+	prepared, err := PrepareEnforcementPointer(s.Dir, snapshot.Pointer())
+	if err != nil {
+		return err
+	}
+	defer CancelPreparedPointer(prepared)
+	deadline, err := s.PreparedDeadline(ctx, id)
+	if err != nil {
+		return err
+	}
+	if deadline != nil && !time.Now().UTC().Before(*deadline) {
+		if err := s.MarkRolledBack(ctx, id); err != nil {
+			return err
+		}
+		return fmt.Errorf("generation %d expired before pointer publication", id)
+	}
+	if err := PublishPreparedPointer(prepared); err != nil {
+		return err
+	}
+	return s.FinalizeCommit(ctx, id)
 }
 func (s *Store) MarkRolledBack(ctx context.Context, id uint64) error {
-	_, err := s.DB.ExecContext(ctx, "UPDATE generations SET status='rolled_back' WHERE id=?", id)
-	return err
+	result, err := s.DB.ExecContext(ctx, `UPDATE generations
+SET status='rolled_back',commit_prepared_at=NULL
+WHERE id=? AND status IN ('pending','applied','commit_prepared','committed')`, id)
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(result); err != nil {
+		return err
+	}
+	return s.syncDatabase()
+}
+
+// FinalizeRecoveryRollback records a boot/timer recovery decision and its
+// audit evidence atomically. Callers invoke it only after the selected prior
+// kernel state (or verified first-use absence) has been established.
+func (s *Store) FinalizeRecoveryRollback(ctx context.Context, id uint64, detail string) error {
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	result, err := tx.ExecContext(ctx, `UPDATE generations
+SET status='rolled_back',commit_prepared_at=NULL
+WHERE id=? AND status IN ('pending','applied','commit_prepared')`, id)
+	if err != nil {
+		return err
+	}
+	if err := requireOneRow(result); err != nil {
+		return fmt.Errorf("finalize recovered generation rollback: %w", err)
+	}
+	if _, err := tx.ExecContext(ctx, `INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)`,
+		time.Now().UTC().Format(time.RFC3339Nano), "system", "generation_recovery_rolled_back", detail); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.syncDatabase()
 }
 
 func (s *Store) Pending(ctx context.Context) (*Generation, error) {
-	row := s.DB.QueryRowContext(ctx, `SELECT id,checksum,observed_hash,script_path,status,created_at,rollback_deadline,previous_id FROM generations WHERE status IN ('pending','applied') ORDER BY id DESC LIMIT 1`)
+	row := s.DB.QueryRowContext(ctx, `SELECT `+generationColumns+` FROM generations WHERE status IN ('pending','applied','commit_prepared') ORDER BY id DESC LIMIT 1`)
 	return scanGeneration(row)
 }
 
 func (s *Store) LastKnownGood(ctx context.Context) (*Generation, error) {
-	row := s.DB.QueryRowContext(ctx, `SELECT id,checksum,observed_hash,script_path,status,created_at,rollback_deadline,previous_id FROM generations WHERE status='committed' ORDER BY id DESC LIMIT 1`)
+	row := s.DB.QueryRowContext(ctx, `SELECT `+generationColumns+` FROM generations WHERE status='committed' ORDER BY id DESC LIMIT 1`)
+	return scanGeneration(row)
+}
+
+func (s *Store) Generation(ctx context.Context, id uint64) (*Generation, error) {
+	row := s.DB.QueryRowContext(ctx, `SELECT `+generationColumns+` FROM generations WHERE id=?`, id)
 	return scanGeneration(row)
 }
 
@@ -453,18 +744,32 @@ func (s *Store) ExpectedGeneration(ctx context.Context) (*Generation, error) {
 	if err == nil && pending.Status == "applied" {
 		return pending, nil
 	}
+	if err == nil && pending.Status == "commit_prepared" {
+		pointer, exists, pointerErr := ReadEnforcementPointer(s.Dir)
+		if pointerErr != nil {
+			return nil, pointerErr
+		}
+		if exists && (EnforcementPointer{Schema: pointerSchema, Generation: pending.ID, SnapshotChecksum: pending.SnapshotChecksum, PolicyChecksum: pending.Checksum}).Equal(pointer) {
+			return pending, nil
+		}
+	}
 	if err != nil && !errors.Is(err, sql.ErrNoRows) {
 		return nil, err
 	}
 	return s.LastKnownGood(ctx)
 }
 
+const generationColumns = `id,checksum,snapshot_checksum,observed_hash,script_path,snapshot_path,status,created_at,
+rollback_deadline,previous_id,boot_id,commit_prepared_at,prepared_previous_id,prepared_previous_checksum,prepared_previous_snapshot_checksum`
+
 func scanGeneration(row interface{ Scan(...any) error }) (*Generation, error) {
 	var g Generation
 	var created string
 	var previous sql.NullInt64
 	var deadlineVal sql.NullString
-	if err := row.Scan(&g.ID, &g.Checksum, &g.ObservedHash, &g.ScriptPath, &g.Status, &created, &deadlineVal, &previous); err != nil {
+	var preparedAt sql.NullString
+	var preparedPrevious sql.NullInt64
+	if err := row.Scan(&g.ID, &g.Checksum, &g.SnapshotChecksum, &g.ObservedHash, &g.ScriptPath, &g.SnapshotPath, &g.Status, &created, &deadlineVal, &previous, &g.BootID, &preparedAt, &preparedPrevious, &g.PreparedPriorSum, &g.PreparedPriorSnapshotSum); err != nil {
 		return nil, err
 	}
 	var err error
@@ -486,16 +791,45 @@ func scanGeneration(row interface{ Scan(...any) error }) (*Generation, error) {
 		v := uint64(previous.Int64)
 		g.PreviousID = &v
 	}
+	if preparedAt.Valid {
+		t, err := time.Parse(time.RFC3339Nano, preparedAt.String)
+		if err != nil {
+			return nil, err
+		}
+		g.PreparedAt = &t
+	}
+	if preparedPrevious.Valid {
+		if preparedPrevious.Int64 <= 0 {
+			return nil, errors.New("generation has an invalid prepared prior generation reference")
+		}
+		v := uint64(preparedPrevious.Int64)
+		g.PreparedPriorID = &v
+	}
 	return &g, nil
+}
+
+func requireOneRow(result sql.Result) error {
+	count, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if count != 1 {
+		return sql.ErrNoRows
+	}
+	return nil
 }
 
 func (s *Store) ReadScript(g *Generation) (string, error) {
 	if g == nil {
 		return "", errors.New("nil generation")
 	}
-	expectedDir := filepath.Join(s.Dir, "generations") + string(os.PathSeparator)
+	expectedDir, err := secureGenerationsDirectory(s.Dir, false)
+	if err != nil {
+		return "", err
+	}
+	expectedPath := filepath.Join(expectedDir, fmt.Sprintf("%020d.nft", g.ID))
 	abs, err := filepath.Abs(g.ScriptPath)
-	if err != nil || !strings.HasPrefix(abs, expectedDir) {
+	if err != nil || abs != g.ScriptPath || abs != expectedPath {
 		return "", errors.New("generation script path escapes the state directory")
 	}
 	info, err := os.Lstat(abs)
@@ -547,6 +881,35 @@ func syncDirectory(path string) error {
 	}
 	defer dir.Close()
 	return dir.Sync()
+}
+
+// syncDatabase checkpoints committed WAL content, fsyncs every existing
+// database file, and then fsyncs the database directory. State transitions do
+// not report success until this durability boundary has completed.
+func (s *Store) syncDatabase() error {
+	if s == nil || s.DB == nil || s.Path == "" {
+		return errors.New("state database is unavailable")
+	}
+	if _, err := s.DB.Exec("PRAGMA wal_checkpoint(FULL)"); err != nil {
+		return fmt.Errorf("checkpoint state database: %w", err)
+	}
+	for _, path := range []string{s.Path, s.Path + "-wal"} {
+		file, err := os.Open(path)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return err
+		}
+		if err := file.Sync(); err != nil {
+			file.Close()
+			return err
+		}
+		if err := file.Close(); err != nil {
+			return err
+		}
+	}
+	return syncDirectory(s.DBDir)
 }
 
 func (s *Store) AddClaim(ctx context.Context, c Claim) (int64, error) {
@@ -1075,14 +1438,48 @@ func (s *Store) PurgeExpiredClaims(ctx context.Context, now time.Time) (int64, e
 }
 
 func (s *Store) Audit(ctx context.Context, actor, event, detail string) error {
+	detail, err := validateAuditRecord(actor, event, detail)
+	if err != nil {
+		return err
+	}
+	_, err = s.DB.ExecContext(ctx, "INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)", time.Now().UTC().Format(time.RFC3339Nano), actor, event, detail)
+	return err
+}
+
+// AuditDurable inserts one audit record transactionally, checkpoints the
+// committed WAL image into the main database, and fsyncs the database files
+// and directory. A caller may treat the audited transition as ready only
+// after this method returns nil.
+func (s *Store) AuditDurable(ctx context.Context, actor, event, detail string) error {
+	detail, err := validateAuditRecord(actor, event, detail)
+	if err != nil {
+		return err
+	}
+	if s == nil || s.DB == nil {
+		return errors.New("state database is unavailable")
+	}
+	tx, err := s.DB.BeginTx(ctx, nil)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if _, err := tx.ExecContext(ctx, "INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)", time.Now().UTC().Format(time.RFC3339Nano), actor, event, detail); err != nil {
+		return err
+	}
+	if err := tx.Commit(); err != nil {
+		return err
+	}
+	return s.syncDatabase()
+}
+
+func validateAuditRecord(actor, event, detail string) (string, error) {
 	if actor == "" || event == "" || len(actor) > 128 || len(event) > 128 {
-		return errors.New("audit actor or event is invalid")
+		return "", errors.New("audit actor or event is invalid")
 	}
 	if len(detail) > 4096 {
 		detail = detail[:4096]
 	}
-	_, err := s.DB.ExecContext(ctx, "INSERT INTO audit(created_at,actor,event,detail) VALUES(?,?,?,?)", time.Now().UTC().Format(time.RFC3339Nano), actor, event, detail)
-	return err
+	return detail, nil
 }
 
 func (s *Store) RecentAudit(ctx context.Context, limit int) ([]map[string]any, error) {

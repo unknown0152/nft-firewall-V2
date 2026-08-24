@@ -26,9 +26,11 @@ strict_vpn = true
 [[interfaces]]
 name = "eth0"
 role = "uplink"
+provenance_id = 1
 [[interfaces]]
 name = "wg0"
 role = "vpn"
+provenance_id = 2
 [[zones]]
 name = "lan"
 networks = ["192.168.1.0/24"]
@@ -48,7 +50,8 @@ endpoint_port = 51820
 fwmark = "0xca6c"
 [state]
 directory = "/tmp/nftfw"
-database = "/tmp/nftfw/state.db"
+database = "/tmp/nftfw/generation-state/state.db"
+provenance_ledger = "/tmp/nftfw/provenance-ledger.db"
 `
 
 func TestLoadRejectsUnknownKeys(t *testing.T) {
@@ -70,6 +73,35 @@ func TestLoadValidatesTopology(t *testing.T) {
 	}
 	if c.Runtime.SafeApplySeconds != 90 {
 		t.Fatalf("unexpected default safe-apply timeout: %d", c.Runtime.SafeApplySeconds)
+	}
+}
+
+func TestValidateRequiresExactCanonicalStatePaths(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.State.Database = "/tmp/nftfw/generation-state/../generation-state/state.db"
+	if err := Validate(c); err == nil {
+		t.Fatal("non-canonical generation database path accepted")
+	}
+	c, err = Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.State.ProvenanceLedger = "/tmp/nftfw/generation-state/../provenance-ledger.db"
+	if err := Validate(c); err == nil {
+		t.Fatal("non-canonical provenance ledger path accepted")
+	}
+	c, err = Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.State.Directory = "/tmp/nft%66w"
+	c.State.Database = "/tmp/nft%66w/generation-state/state.db"
+	c.State.ProvenanceLedger = "/tmp/nft%66w/provenance-ledger.db"
+	if err := Validate(c); err == nil {
+		t.Fatal("percent-encoded state root accepted")
 	}
 }
 
@@ -274,6 +306,74 @@ func TestValidateNATSchema(t *testing.T) {
 	c.NAT = append(c.NAT, NATRule{Name: "duplicate", Source: "any", ExternalInterface: "eth0", Protocol: "tcp", ExternalPort: 8443, Destination: "172.19.0.6", DestinationPort: 443})
 	if err := Validate(c); err == nil {
 		t.Fatal("conflicting NAT binding accepted")
+	}
+}
+
+func TestValidateRequiresUniqueExplicitProvenanceIDs(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, invalid := range []uint8{0, 255} {
+		c.Interfaces[0].ProvenanceID = invalid
+		if err := Validate(c); err == nil {
+			t.Fatalf("invalid provenance id %d accepted", invalid)
+		}
+	}
+	for _, invalid := range []string{"-1", "256"} {
+		malformed := strings.Replace(validTOML, "provenance_id = 1", "provenance_id = "+invalid, 1)
+		if _, err := Load(writeConfig(t, malformed)); err == nil {
+			t.Fatalf("out-of-range TOML provenance id %s decoded into uint8", invalid)
+		}
+	}
+	c, _ = Load(writeConfig(t, validTOML))
+	c.Interfaces[1].ProvenanceID = c.Interfaces[0].ProvenanceID
+	if err := Validate(c); err == nil {
+		t.Fatal("duplicate provenance id accepted")
+	}
+}
+
+func TestValidateDockerStableTupleAndVPNNAT(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Interfaces = append(c.Interfaces, Interface{
+		Name: "br-media", Role: "container", Zone: "containers", ProvenanceID: 3,
+		CIDRs: []string{"172.19.0.0/16", "fd00:19::/64"},
+	})
+	c.Zones = append(c.Zones, Zone{Name: "containers", Interfaces: []string{"br-media"}})
+	c.Integrations.DockerEnabled = true
+	c.DockerNetworks = []DockerNetwork{{
+		Name: "media", Driver: "bridge", BridgeInterface: "br-media",
+		Subnets: []string{"172.19.0.0/16", "fd00:19::/64"}, Gateways: []string{"172.19.0.1", "fd00:19::1"},
+	}}
+	c.NAT = []NATRule{{Name: "public-web", Source: "any", ExternalInterface: "wg0", Protocol: "tcp", ExternalPort: 443, Destination: "172.19.0.5", DestinationPort: 443}}
+	if err := Validate(c); err != nil {
+		t.Fatalf("valid Docker tuple or VPN NAT rejected: %v", err)
+	}
+
+	mutations := []struct {
+		name string
+		edit func(*Config)
+	}{
+		{"missing bridge option", func(c *Config) { c.DockerNetworks[0].BridgeInterface = "" }},
+		{"wrong driver", func(c *Config) { c.DockerNetworks[0].Driver = "overlay" }},
+		{"undeclared bridge", func(c *Config) { c.DockerNetworks[0].BridgeInterface = "br-other" }},
+		{"subnet drift", func(c *Config) { c.DockerNetworks[0].Subnets[0] = "172.20.0.0/16" }},
+		{"gateway drift", func(c *Config) { c.DockerNetworks[0].Gateways[0] = "172.20.0.1" }},
+		{"missing gateway", func(c *Config) { c.DockerNetworks[0].Gateways = c.DockerNetworks[0].Gateways[:1] }},
+	}
+	for _, mutation := range mutations {
+		candidate := c
+		candidate.Interfaces = append([]Interface(nil), c.Interfaces...)
+		candidate.DockerNetworks = append([]DockerNetwork(nil), c.DockerNetworks...)
+		candidate.DockerNetworks[0].Subnets = append([]string(nil), c.DockerNetworks[0].Subnets...)
+		candidate.DockerNetworks[0].Gateways = append([]string(nil), c.DockerNetworks[0].Gateways...)
+		mutation.edit(&candidate)
+		if err := Validate(candidate); err == nil {
+			t.Errorf("%s accepted", mutation.name)
+		}
 	}
 }
 

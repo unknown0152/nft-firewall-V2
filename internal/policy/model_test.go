@@ -8,7 +8,7 @@ import (
 
 func TestExplainUsesCompilerModel(t *testing.T) {
 	c := config.Defaults()
-	c.Interfaces = []config.Interface{{Name: "eth0", Role: "uplink"}, {Name: "wg0", Role: "vpn"}}
+	c.Interfaces = []config.Interface{{Name: "eth0", Role: "uplink", ProvenanceID: 1}, {Name: "wg0", Role: "vpn", ProvenanceID: 2}}
 	c.Zones = []config.Zone{{Name: "lan", Networks: []string{"192.168.1.0/24"}}}
 	c.Services = []config.Service{{Name: "ssh", Protocol: "tcp", Ports: []int{22}}}
 	c.Policies = []config.Policy{{Name: "lan-ssh", From: "lan", To: "host", Service: "ssh", Action: "allow"}}
@@ -35,7 +35,7 @@ func FuzzExplainAlwaysReturnsAVerdict(f *testing.F) {
 	f.Add("invalid", "unknown", "udp", -1)
 	f.Fuzz(func(t *testing.T, from, to, protocol string, port int) {
 		c := config.Defaults()
-		c.Interfaces = []config.Interface{{Name: "eth0", Role: "uplink"}, {Name: "wg0", Role: "vpn"}}
+		c.Interfaces = []config.Interface{{Name: "eth0", Role: "uplink", ProvenanceID: 1}, {Name: "wg0", Role: "vpn", ProvenanceID: 2}}
 		c.Zones = []config.Zone{{Name: "lan", Networks: []string{"192.168.1.0/24"}}}
 		c.Services = []config.Service{{Name: "ssh", Protocol: "tcp", Ports: []int{22}}}
 		c.Policies = []config.Policy{{Name: "lan-ssh", From: "lan", To: "host", Service: "ssh", Action: "allow"}}
@@ -52,7 +52,7 @@ func FuzzExplainAlwaysReturnsAVerdict(f *testing.F) {
 
 func TestExplicitDenyPrecedesAllowDeterministically(t *testing.T) {
 	c := config.Defaults()
-	c.Interfaces = []config.Interface{{Name: "eth0", Role: "uplink"}, {Name: "wg0", Role: "vpn"}}
+	c.Interfaces = []config.Interface{{Name: "eth0", Role: "uplink", ProvenanceID: 1}, {Name: "wg0", Role: "vpn", ProvenanceID: 2}}
 	c.Zones = []config.Zone{{Name: "lan", Networks: []string{"192.168.1.0/24"}}}
 	c.Services = []config.Service{{Name: "ssh", Protocol: "tcp", Ports: []int{22}}}
 	c.Policies = []config.Policy{
@@ -71,7 +71,7 @@ func TestExplicitDenyPrecedesAllowDeterministically(t *testing.T) {
 
 func TestExplainEffectiveMatchesRuntimePrecedenceAndIPv6Mode(t *testing.T) {
 	c := config.Defaults()
-	c.Interfaces = []config.Interface{{Name: "eth0", Role: "uplink"}, {Name: "wg0", Role: "vpn"}}
+	c.Interfaces = []config.Interface{{Name: "eth0", Role: "uplink", ProvenanceID: 1}, {Name: "wg0", Role: "vpn", ProvenanceID: 2}}
 	c.Zones = []config.Zone{{Name: "lan", Networks: []string{"192.168.1.0/24"}}}
 	c.Services = []config.Service{{Name: "ssh", Protocol: "tcp", Ports: []int{22}}}
 	c.Runtime.TrustedServices = []string{"ssh"}

@@ -1,137 +1,140 @@
-# NFT Firewall V2 Final Acceptance Report
+# NFT Firewall V2 Acceptance Report Template
+
+Release approval status: STAGE_R_CANDIDATE_ONLY
 
 | Item | Value |
 | --- | --- |
+| Disposition | `@RELEASE_DISPOSITION@` |
 | Version | `@RELEASE_VERSION@` |
+| Artifact version | `@RELEASE_ARTIFACT_VERSION@` |
 | Git commit | `@GIT_COMMIT@` |
 | Git tag | `@GIT_TAG@` |
 | Build date | `@BUILD_DATE@` |
-| Release source | `source/` inside the release bundle |
-| Detailed test record | `TEST_RESULTS.md` |
+| External artifact label | `@RELEASE_ARTIFACT_LABEL@` |
+| Release source | `source/` inside the candidate bundle |
+| Frozen source test record | `TEST_RESULTS.md` |
 
-The packaging process replaces the metadata tokens in the copy placed in a
-release bundle. The tracked source retains tokens because a commit cannot
-contain its own final hash.
+The release builder replaces the `@...@` tokens only in its copied report.
+The tracked template cannot truthfully claim the result of a later enclosing
+build. It therefore remains `STAGE_R_CANDIDATE_ONLY`; candidate-build,
+two-parent comparison, R2, tagged-build, and final-publication evidence are
+separate immutable records bound to exact hashes.
 
 ## Acceptance status
 
-`2.0.1` is a completed security-hardening software release. Its unprivileged
-source and artifact gates pass: unit/package and full race tests, vet,
-formatting, module integrity, pinned analyzers, fuzzing, shell analysis, staged
-systemd-unit verification, worktree/history/extracted-release secret scanning,
-tagged cross-architecture builds, package/archive inspection, and cross-parent
-two-build reproducibility.
+**NOT ACCEPTED FOR RELEASE OR DEPLOYMENT.**
 
-Privileged/live acceptance has not been executed for `2.0.1`. This report does
-not assert that the firewall is installed, enabled, or validated on the
-current NUC/server. Installation and host/network mutation require a separate
-approved deployment plan and the documented safety controls.
+The current 2.0.2 work is an untagged source-only Stage R candidate. No final
+package, archive, checksum set, provenance statement, or `v2.0.2` tag has been
+created. Candidate-mode output, if later built under the existing Stage R
+scope, must say `RELEASE CANDIDATE - NOT DEPLOYABLE` and is test input only.
 
-## Architecture and hardening review
+The passing pre-freeze pinned-toolchain and independent-review evidence is
+recorded in `TEST_RESULTS.md`. Deterministic candidate construction and the
+external two-parent comparison remain post-freeze Stage R gates.
 
-The candidate remains an independent Go implementation with deterministic
-policy compilation, SQLite generations, bounded runtime state, and a single
-privileged nftables mutation boundary. Normal operation is limited to the
-owned `inet nftfw_filter`, `ip nftfw_nat`, and `ip6 nftfw_filter6` tables; the
-backend rejects global flushes and unsupported or foreign management commands.
+## Privileged evidence boundary
 
-The `2.0.1` remediation set adds or strengthens:
+**R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED.**
 
-- canonical interface-to-zone ownership;
-- bounded public-only threat feeds with cross-feed aggregate limits,
-  protected topology/WireGuard endpoints, rollback compensation, and safe
-  rule ordering for management recovery and VPN bootstrap;
-- first-use collision refusal for product-named nftables tables;
-- fail-closed peer credentials and independent status/control quotas;
-- bounded audit retention and recoverable rollback accounting;
-- cross-process claim publication serialization, compensating mutations, and
-  durable desired/applied revision health;
-- bounded lock and request waits with independently timed emergency deny;
-- the typed `nftfw.status.v1` health contract and fail-closed consumers;
-- explicit administrator opt-in for root-equivalent Docker socket access; and
-- deterministic manifests plus unsigned in-toto/SLSA provenance generation;
-  and
-- mutation-free source-install preflight against staged systemd executables.
+No namespace firewall mutation, package installation, service activation,
+reboot, Docker-daemon access, real OVPN use, host-network test, or NUC
+deployment was performed for 2.0.2. Older release evidence is historical and
+is not a substitute for rerunning changed code.
 
-See `SECURITY_AUDIT.md`, `SECURITY.md`, and `CHANGELOG.md` for the detailed
-findings, operating assumptions, and release delta.
-
-## Gate summary
-
-| Gate | `2.0.1` result |
+| Gate | 2.0.2 status |
 | --- | --- |
-| Unit/package tests | PASS |
-| Changed-path race tests | PASS |
-| Vet, formatting, module integrity | PASS |
-| Shell analysis | PASS |
-| systemd staged static verification | PASS; units not installed or started |
-| Full race suite | PASS |
-| Staticcheck, govulncheck, and gosec | PASS |
-| Fuzz/property suite | PASS; all eight targets, 10 seconds each |
-| Worktree and Git-history secret scans | PASS |
-| Final extracted-archive secret scan | PASS |
-| amd64/arm64 static binaries | PASS |
-| Debian amd64/arm64 packages | PASS |
-| Release manifests and unsigned provenance | PASS |
-| ZIP/tar integrity and reproducibility | PASS; byte-identical across distinct build parents |
-| Namespace firewall/WireGuard | NOT EXECUTED FOR `2.0.1` |
-| Real provider and Docker lifecycle | NOT EXECUTED FOR `2.0.1` |
-| Guarded host safe apply/rollback | NOT EXECUTED FOR `2.0.1` |
+| Source-only Stage R contracts | See the frozen `TEST_RESULTS.md`; exact tests are identified by command rather than a brittle count |
+| Full pinned Go 1.25.13 quality/security matrix | See the frozen `TEST_RESULTS.md` |
+| Enclosing candidate package/archive build and inspection | Recorded only by generated external `CANDIDATE_BUILD_EVIDENCE-NOT-DEPLOYABLE.json` |
+| Two-parent deterministic candidate comparison | Recorded only by external `STAGE_R_CANDIDATE_COMPARISON.json` |
+| Privileged namespace provenance/retag/leak tests | R2 NOT EXECUTED |
+| Disposable-VM package lifecycle and boot recovery | R2 NOT EXECUTED |
+| Docker bridge recreation and real OVPN | R2 NOT EXECUTED |
+| Tagged final package rerun | NOT EXECUTED |
 | Actual NUC/server installation | NOT EXECUTED |
-| Full host reboot | NOT EXECUTED |
 
-Passing privileged acceptance recorded for `v2.0.0` is historical evidence,
-not a substitute for rerunning changed `2.0.1` code. See `TEST_RESULTS.md` for
-the exact separation.
+## External final-release promotion gate
 
-## Deployment prerequisites
+This frozen template is not changed merely to insert evidence produced after
+its commit. Promotion requires separate immutable records in this order:
 
-Before any production installation, an operator must:
+1. Stage R passes against one frozen, reviewed, clean commit.
+2. The completed deployment/R2 plan receives separate approval.
+3. All required privileged R2 package, boot, database, network, Docker, and
+   real-OVPN gates pass against that exact commit in approved disposable test
+   environments.
+4. An external `nftfw.r2-attestation.v1` record authorizes only tagged
+   validation and keeps deployment unauthorized.
+5. The immutable annotated `v2.0.2` tag points to that commit.
+6. Post-tag final packages are built and the required package lifecycle,
+   boot, leak, reproducibility, inspection, and secret-scan gates pass again.
+7. A `nftfw.post-tag-validation.v1` manifest binds every named PASS gate to the
+   exact commit, annotated tag object, tagged-build evidence, and artifact
+   checksum set.
+8. An external `nftfw.final-release-approval.v1` record says
+   `FINAL_RELEASE_APPROVED` and identifies the exact tagged-build evidence,
+   checksums, tag object, and post-tag validation manifest SHA-256. Deployment
+   still requires the separately approved deployment plan.
 
-1. review and validate the machine-specific configuration and paths;
-2. back up existing firewall, service, database, and network configuration;
-3. confirm the management recovery path and arm an independent rollback;
-4. decide whether access is LAN-only, VPN-only, or public with an approved
-   authentication/TLS design;
-5. verify WireGuard ownership, endpoint bootstrap, DNS, IPv4/IPv6 modes, and
-   any container topology; and
-6. explicitly approve the exact installation and any disruptive validation.
+A failure after tagging quarantines that tag and its unpublished artifacts; it
+does not permit moving the tag, rewriting the frozen report, or silently
+replacing the source.
 
-Docker integration is disabled by default. Enabling it requires both the safe
-Docker daemon settings documented in `docs/CONFIGURATION.md` and installation
-of the separate systemd socket-access drop-in, acknowledging that Docker
-socket access is effectively host-root trust.
+## Candidate limitations
 
-## Limitations and residual risk
+- Checksums and generated provenance are unsigned and do not authenticate an
+  artifact publisher.
+- Hardware, kernel, nftables, systemd, Docker, WireGuard, provider, and actual
+  topology behavior remains unproved until R2.
+- Candidate quarantine is intrinsic: `nftfw` permits only `version`, the daemon
+  and web binary refuse startup, and candidate Debian packages refuse
+  installation before unpack.
+- The dashboard is loopback-only and has no application login; it must never be
+  exposed without a separately approved authentication/TLS boundary.
+- Installation and deployment remain prohibited under the Stage R approval.
 
-1. Checksums and generated provenance are not cryptographically signed. A
-   release operator must add a signature using an independently controlled
-   identity if authenticated distribution is required.
-2. No full-machine reboot has been run for this candidate.
-3. A privileged competing firewall manager can install higher-priority rules;
-   this product detects and repairs only its owned objects.
-4. WireGuard tunnel creation, private keys, policy routing, and provider
-   availability remain operator responsibilities.
-5. Docker integration, when explicitly enabled, expands the daemon trust
-   boundary to the root-equivalent Docker API.
-6. The loopback dashboard has no application login and must not be exposed
-   publicly without a separately approved authentication/TLS layer.
+## Expected enclosing candidate artifact inventory
 
-All unprivileged software-release gates above were collected against the exact
-tagged source. The privileged/live items remain explicitly not executed and
-must not be inferred from the software-release result.
-
-## Release artifacts
-
-Expected artifact names in the enclosing release directory are:
+Candidate mode uses the visibly quarantined label below rather than a
+final-looking output directory, archive, binary, or package name. In a copied
+candidate report, `@RELEASE_ARTIFACT_LABEL@` expands to
+`2.0.2-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>`; `<commit12>` below is the
+first 12 hexadecimal characters of `@GIT_COMMIT@`. Its non-final embedded and
+Debian artifact version is `2.0.2~stage.r.<commit12>`.
 
 ```text
-nft-firewall-v2-@RELEASE_VERSION@.zip
-nft-firewall-v2-@RELEASE_VERSION@.tar.gz
+nft-firewall-v2-@RELEASE_ARTIFACT_LABEL@/
+nft-firewall-v2-@RELEASE_ARTIFACT_LABEL@.zip
+nft-firewall-v2-@RELEASE_ARTIFACT_LABEL@.tar.gz
+nftfw-linux-amd64-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>
+nftfw-linux-arm64-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>
+nftfwd-linux-amd64-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>
+nftfwd-linux-arm64-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>
+nftfw-web-linux-amd64-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>
+nftfw-web-linux-arm64-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>
+nft-firewall-v2_@RELEASE_ARTIFACT_LABEL@_amd64.deb
+nft-firewall-v2_@RELEASE_ARTIFACT_LABEL@_arm64.deb
+RELEASE-CANDIDATE-NOT-DEPLOYABLE.txt
+FINAL_ACCEPTANCE_REPORT.md
+SOURCE_SECURITY_AUDIT.md
+SOURCE_TEST_RESULTS.md
+SOURCE_HISTORY_SECRET_SCAN.json
+EXTRACTED_TREE_SECRET_SCAN.json
+CANDIDATE_BUILD_EVIDENCE-NOT-DEPLOYABLE.json
 SHA256SUMS
 ```
 
-The release builder appends binary and package checksums to the embedded copy
-of this report before manifest generation. It appends the enclosing ZIP and
-tar checksum to the external copy after archive creation, because an archive
-cannot contain its own checksum.
+The directory line is the container for the remaining listed files, not an
+entry in its own `SHA256SUMS`. The builder appends embedded binary/package
+checksums to its copied report and adds enclosing archive checksums only to the
+external copy. Each archive also embeds the standalone warning and its own
+integrity inventory. `SOURCE_HISTORY_SECRET_SCAN.json` binds the exact commit
+and its reachable history; `EXTRACTED_TREE_SECRET_SCAN.json` is published only
+when independent ZIP and tar extractions produce byte-identical PASS evidence.
+Generic binary/package names found only inside a
+quarantined archive contain the non-final artifact version and remain
+candidate test inputs. The build-evidence JSON inventories every enclosing
+candidate artifact except itself and `SHA256SUMS`; the enclosing checksum file
+then covers the evidence JSON as well. None of these integrity records changes
+this report's acceptance disposition.

@@ -4,10 +4,16 @@ set -eu
 if [ -d /run/systemd/system ]; then
     case "${1:-}" in
         upgrade)
-            systemctl stop nftfw-web.service nftfw-rollback.timer nftfwd.service >/dev/null 2>&1 || true
+            # Preserve active/inactive and enabled/disabled state across an
+            # upgrade. The administrator performs any required restart only
+            # after the separately reviewed migration and readiness checks.
+            :
             ;;
         remove|deconfigure)
-            systemctl disable --now nftfw-web.service nftfw-rollback.timer nftfwd.service nftfw-early.service >/dev/null 2>&1 || true
+            systemctl disable --now nftfw-web.service nftfw-rollback.timer \
+                nftfw-rollback.service nftfwd.service \
+                nftfw-enforcement-ready.service nftfw-early.service \
+                >/dev/null 2>&1 || true
             ;;
     esac
 fi

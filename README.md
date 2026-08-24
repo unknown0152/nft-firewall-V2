@@ -1,5 +1,10 @@
 # NFT Firewall V2
 
+> **Current 2.0.2 status: RELEASE CANDIDATE - NOT DEPLOYABLE.** Only
+> source-only Stage R work is approved. R2 privileged package, boot, network,
+> Docker, and real-OVPN evidence has not been executed. Do not install or
+> deploy this checkout or untagged candidate output.
+
 NFT Firewall V2 is a declarative Linux firewall controller for nftables,
 WireGuard, systemd, and SQLite. An operator describes zones, services,
 policies, NAT, and runtime integrations in strict TOML. The controller compiles
@@ -33,15 +38,18 @@ documented in `docs/STATUS-API.md`.
   dashboard.
 - Static amd64 and arm64 binaries and Debian packages.
 
-## First workflow
+## Future tagged-release workflow
 
-When using the source installer from an extracted release bundle, enter its
-`source/` directory first. A Git checkout already starts at that source root.
+The following workflow is documentation for a future accepted tagged release;
+it is blocked for the present candidate. Use the prebuilt package whose
+checksums and exact bytes were covered by final external approval; do not
+rebuild an extracted source tree and silently substitute different bytes.
 
 ```bash
-cd source # release bundle only
-GOTOOLCHAIN=go1.25.13 make release VERSION=2.0.1
-sudo ./scripts/install.sh
+unzip nft-firewall-v2-2.0.2.zip
+cd nft-firewall-v2
+sha256sum -c SHA256SUMS
+sudo apt install ./packages/nft-firewall-v2_2.0.2_$(dpkg --print-architecture).deb
 sudoedit /etc/nftfw/nftfw.toml
 sudo nftfw config validate
 sudo nftfw doctor
@@ -52,16 +60,21 @@ sudo nftfw commit <generation>
 ```
 
 The installer validates prerequisites, files, checksums, and staged systemd
-units before changing host paths or services, and it never applies a candidate
-firewall. Safe apply is the default. Disabling rollback requires the explicit
-`--unsafe` flag.
+units before changing host paths. It may reload systemd metadata but does not
+enable, start, stop, or restart NFTFW units and never applies a candidate
+firewall. Activation and first safe apply are separate guarded deployment
+steps. Disabling rollback requires the explicit `--unsafe` flag.
 
 ## Security boundaries
 
-`nftfwd` is the only production nftables mutation boundary. It listens on
-local Unix sockets, authenticates peers with kernel credentials, and accepts
-strict size-limited JSON. The dashboard has the status socket only, binds to
-`127.0.0.1:8787`, and has neither nftables nor Docker privileges.
+`internal/nft` is the sole code-level boundary that invokes the `nft`
+executable. `nftfwd` is the normal long-running process that reaches that
+backend; explicit root-local CLI recovery and packaged static recovery modes
+reuse the same boundary rather than implementing separate nftables mutation.
+The daemon listens on local Unix sockets, authenticates peers with kernel
+credentials, and accepts strict size-limited JSON. The dashboard has the
+status socket only, binds to `127.0.0.1:8787`, and has neither nftables nor
+Docker privileges.
 
 The controller expects the declared WireGuard interface and routing policy to
 be managed by the operator or `wg-quick`. It refreshes validated peer
@@ -70,17 +83,19 @@ tunnel.
 
 ## Build and test
 
-The audited release is built and tested with exactly Go 1.25.13, as pinned by
-`go.mod`.
+Final release gates require exactly Go 1.25.13, as pinned by `go.mod`. The
+source-only pinned matrix passes; post-freeze artifact evidence and every
+privileged R2 gate remain outstanding.
 
 ```bash
 make check
 make static vuln security
-make release VERSION=2.0.1
+make release VERSION=2.0.2+ci DISPOSITION=ci
 sudo ./tests/namespaces/run.sh
 ```
 
-Privileged acceptance tests require nftables, WireGuard, iproute2, tcpdump,
-network namespace support, and `CAP_NET_ADMIN`. Test status and deliberate
-limitations are recorded in `TEST_RESULTS.md` and
+The privileged command above is an R2-only example and was not run under Stage
+R. Privileged acceptance requires the separately approved disposable test
+environment plus nftables, WireGuard, iproute2, tcpdump, network namespaces,
+and `CAP_NET_ADMIN`. Exact status is recorded in `TEST_RESULTS.md` and
 `FINAL_ACCEPTANCE_REPORT.md`.

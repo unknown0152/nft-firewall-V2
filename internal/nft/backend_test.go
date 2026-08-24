@@ -8,7 +8,13 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/unknown0152/nft-firewall-v2/internal/state"
 )
+
+func lockedMutationContext() context.Context {
+	return state.WithMutationLock(context.Background())
+}
 
 type fakeRunner struct {
 	calls   [][]string
@@ -27,12 +33,38 @@ func TestMutationLockWaitHonorsContext(t *testing.T) {
 	defer release()
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
 	defer cancel()
+	ctx = state.WithMutationLock(ctx)
 	err = backend.ReplaceSets(ctx, map[string][]string{"blocked_v4": {"198.51.100.7/32"}})
 	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "wait for nft mutation lock") {
 		t.Fatalf("contended mutation ignored context deadline: %v", err)
 	}
 	if len(runner.calls) != 0 {
 		t.Fatalf("canceled mutation reached nft runner: %#v", runner.calls)
+	}
+}
+
+func TestEveryExportedNFTMutationRequiresGlobalLockMarker(t *testing.T) {
+	fake := &fakeRunner{tables: `{"nftables":[]}`}
+	backend := New(fake)
+	for _, test := range []struct {
+		name string
+		call func() error
+	}{
+		{name: "apply", call: func() error { return backend.Apply(context.Background(), "table inet nftfw_filter { }\n") }},
+		{name: "destroy", call: func() error { return backend.DestroyOwned(context.Background()) }},
+		{name: "update set", call: func() error { return backend.UpdateSet(context.Background(), "blocked_v4", true, nil) }},
+		{name: "replace sets", call: func() error { return backend.ReplaceSets(context.Background(), nil) }},
+		{name: "replace containers", call: func() error { return backend.ReplaceContainerNetworks(context.Background(), nil, nil) }},
+		{name: "replace claims", call: func() error { return backend.ReplaceClaimSets(context.Background(), nil, nil, nil, nil) }},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			if err := test.call(); err == nil || !strings.Contains(err.Error(), "global mutation lock") {
+				t.Fatalf("unlocked mutation was not rejected: %v", err)
+			}
+		})
+	}
+	if len(fake.calls) != 0 {
+		t.Fatalf("unlocked mutations reached nft runner: %#v", fake.calls)
 	}
 }
 
@@ -103,7 +135,7 @@ func TestValidateScriptRejectsGlobalFlush(t *testing.T) {
 }
 
 func TestFirstUseProtectionRefusesExistingAndRacedTableCollisions(t *testing.T) {
-	ctx := context.Background()
+	ctx := lockedMutationContext()
 	existing := `{"nftables":[{"table":{"family":"inet","name":"nftfw_filter"}}]}`
 	f := &fakeRunner{tables: existing}
 	b := New(f)
@@ -173,7 +205,7 @@ func TestBoundedStringWriterCapsCommandOutput(t *testing.T) {
 func TestReplaceClaimSetsEncodesKernelTimeoutAtomically(t *testing.T) {
 	f := &fakeRunner{}
 	b := New(f)
-	if err := b.ReplaceClaimSets(context.Background(), []string{"203.0.113.8/32"}, nil, []TimedElement{{Prefix: "198.51.100.4/32", TimeoutSeconds: 90}}, nil); err != nil {
+	if err := b.ReplaceClaimSets(lockedMutationContext(), []string{"203.0.113.8/32"}, nil, []TimedElement{{Prefix: "198.51.100.4/32", TimeoutSeconds: 90}}, nil); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.scripts) != 2 || f.scripts[0] != f.scripts[1] {
@@ -184,7 +216,7 @@ func TestReplaceClaimSetsEncodesKernelTimeoutAtomically(t *testing.T) {
 			t.Fatalf("claim transaction lacks %q: %s", want, f.scripts[0])
 		}
 	}
-	if err := b.ReplaceClaimSets(context.Background(), nil, nil, []TimedElement{{Prefix: "198.51.100.4/32", TimeoutSeconds: -1}}, nil); err == nil {
+	if err := b.ReplaceClaimSets(lockedMutationContext(), nil, nil, []TimedElement{{Prefix: "198.51.100.4/32", TimeoutSeconds: -1}}, nil); err == nil {
 		t.Fatal("negative kernel lease timeout accepted")
 	}
 }
@@ -192,7 +224,7 @@ func TestApplyDestroysOnlyOwnedTables(t *testing.T) {
 	f := &fakeRunner{tables: `{"nftables":[{"table":{"family":"inet","name":"nftfw_filter"}},{"table":{"family":"ip","name":"third_party"}}]}`}
 	b := New(f)
 	script := "table inet nftfw_filter { }\n"
-	if err := b.Apply(context.Background(), script); err != nil {
+	if err := b.Apply(lockedMutationContext(), script); err != nil {
 		t.Fatal(err)
 	}
 	var seen bool
@@ -225,7 +257,7 @@ func TestCheckCandidateUsesApplyTransactionWithoutApplying(t *testing.T) {
 }
 func TestDestroyOwnedNoopsWhenAbsent(t *testing.T) {
 	f := &fakeRunner{tables: `{"nftables":[]}`}
-	if err := New(f).DestroyOwned(context.Background()); err != nil {
+	if err := New(f).DestroyOwned(lockedMutationContext()); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.calls) != 1 {
@@ -236,10 +268,10 @@ func TestDestroyOwnedNoopsWhenAbsent(t *testing.T) {
 func TestReplaceSetsRejectsWrongFamilyAndUsesOneApply(t *testing.T) {
 	f := &fakeRunner{}
 	b := New(f)
-	if err := b.ReplaceSets(context.Background(), map[string][]string{"wg_bootstrap_v4": {"2001:db8::1/128"}}); err == nil {
+	if err := b.ReplaceSets(lockedMutationContext(), map[string][]string{"wg_bootstrap_v4": {"2001:db8::1/128"}}); err == nil {
 		t.Fatal("wrong-family endpoint accepted")
 	}
-	if err := b.ReplaceSets(context.Background(), map[string][]string{"wg_bootstrap_v4": {"198.51.100.10/32"}, "wg_bootstrap_v6": {"2001:db8::10/128"}}); err != nil {
+	if err := b.ReplaceSets(lockedMutationContext(), map[string][]string{"wg_bootstrap_v4": {"198.51.100.10/32"}, "wg_bootstrap_v6": {"2001:db8::10/128"}}); err != nil {
 		t.Fatal(err)
 	}
 	var checks, applies int
@@ -258,7 +290,7 @@ func TestReplaceSetsRejectsWrongFamilyAndUsesOneApply(t *testing.T) {
 
 func TestReplaceContainerNetworksUsesOneCrossTableTransaction(t *testing.T) {
 	f := &fakeRunner{}
-	if err := New(f).ReplaceContainerNetworks(context.Background(), []string{"172.19.0.0/16"}, []string{"fd00:19::/64"}); err != nil {
+	if err := New(f).ReplaceContainerNetworks(lockedMutationContext(), []string{"172.19.0.0/16"}, []string{"fd00:19::/64"}); err != nil {
 		t.Fatal(err)
 	}
 	if len(f.scripts) != 2 || f.scripts[0] != f.scripts[1] {
@@ -297,9 +329,20 @@ func (r integrityRunner) Run(_ context.Context, args ...string) (string, string,
 		for _, chain := range []string{"input", "output", "forward"} {
 			addChain(chain, "filter", chain, policy, "")
 		}
-		for _, item := range [][2]string{{"input", "nftfw:input-default-deny"}, {"output", "nftfw:output-default-deny"}, {"forward", "nftfw:forward-default-deny"}, {"forward", "nftfw:forward-physical-deny"}, {"forward", "nftfw:container-vpn-mss-out-v4"}, {"forward", "nftfw:container-vpn-mss-out-v6"}, {"forward", "nftfw:container-vpn-mss-in-v4"}, {"forward", "nftfw:container-vpn-mss-in-v6"}, {"forward", "nftfw:forward-uplink-reply-only"}, {"output", "nftfw:vpn-only-egress"}} {
+		for _, item := range [][2]string{{"input", "nftfw:input-default-deny"}, {"input", "nftfw:input-reply-only"}, {"output", "nftfw:output-default-deny"}, {"forward", "nftfw:forward-default-deny"}, {"forward", "nftfw:forward-physical-deny"}, {"output", "nftfw:vpn-only-egress"}} {
 			if !r.missingMarker || item[1] != "nftfw:vpn-only-egress" {
 				addRule(item[0], item[1])
+			}
+		}
+		for _, interfaceName := range []string{"eth0", "wg0"} {
+			for _, marker := range [][2]string{
+				{"input", "nftfw:provenance-tag-input:"},
+				{"output", "nftfw:provenance-tag-output:"},
+				{"forward", "nftfw:provenance-tag-forward:"},
+				{"output", "nftfw:provenance-reply-output:"},
+				{"forward", "nftfw:provenance-reply-forward:"},
+			} {
+				addRule(marker[0], marker[1]+interfaceName)
 			}
 		}
 	case "ip/nftfw_nat":

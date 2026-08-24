@@ -9,53 +9,67 @@ import (
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
+	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
 	"github.com/unknown0152/nft-firewall-v2/internal/version"
 	"github.com/unknown0152/nft-firewall-v2/internal/wireguard"
 )
 
-const StatusSchema = "nftfw.status.v1"
+const StatusSchema = "nftfw.status.v2"
 
 type Snapshot struct {
-	Schema             string                   `json:"schema"`
-	Version            string                   `json:"version"`
-	Status             string                   `json:"status"`
-	Reason             string                   `json:"reason"`
-	Active             bool                     `json:"active"`
-	PolicyMatch        bool                     `json:"policy_match"`
-	ActiveGeneration   uint64                   `json:"active_generation,omitempty"`
-	PendingGeneration  uint64                   `json:"pending_generation,omitempty"`
-	PendingDeadline    *time.Time               `json:"pending_deadline,omitempty"`
-	OwnedTables        []nft.Table              `json:"owned_tables,omitempty"`
-	Drift              bool                     `json:"drift"`
-	Database           string                   `json:"database"`
-	Integrations       []state.IntegrationState `json:"integrations,omitempty"`
-	KillSwitch         string                   `json:"kill_switch"`
-	KillSwitchEnforced bool                     `json:"kill_switch_enforced"`
-	PolicyChecksum     string                   `json:"policy_checksum,omitempty"`
-	PolicyHash         string                   `json:"policy_hash,omitempty"`
-	IPv6Mode           string                   `json:"ipv6_mode"`
-	ZoneCount          int                      `json:"zone_count"`
-	PolicyCount        int                      `json:"policy_count"`
-	BlockClaims        int                      `json:"block_claims"`
-	BlockedAddresses   int                      `json:"blocked_addresses"`
-	ClaimsBySource     map[string]int           `json:"claims_by_source,omitempty"`
-	ClaimsDesiredRev   uint64                   `json:"claims_desired_revision"`
-	ClaimsAppliedRev   uint64                   `json:"claims_applied_revision"`
-	WireGuard          wireguard.Observation    `json:"wireguard"`
-	RecentAudit        []map[string]any         `json:"recent_audit,omitempty"`
+	Schema                 string                   `json:"schema"`
+	Version                string                   `json:"version"`
+	Status                 string                   `json:"status"`
+	Reason                 string                   `json:"reason"`
+	Active                 bool                     `json:"active"`
+	PolicyMatch            bool                     `json:"policy_match"`
+	ActiveGeneration       uint64                   `json:"active_generation,omitempty"`
+	PendingGeneration      uint64                   `json:"pending_generation,omitempty"`
+	PendingDeadline        *time.Time               `json:"pending_deadline,omitempty"`
+	OwnedTables            []nft.Table              `json:"owned_tables,omitempty"`
+	Drift                  bool                     `json:"drift"`
+	Database               string                   `json:"database"`
+	Integrations           []state.IntegrationState `json:"integrations,omitempty"`
+	KillSwitch             string                   `json:"kill_switch"`
+	KillSwitchEnforced     bool                     `json:"kill_switch_enforced"`
+	PolicyChecksum         string                   `json:"policy_checksum,omitempty"`
+	PolicyHash             string                   `json:"policy_hash,omitempty"`
+	IPv6Mode               string                   `json:"ipv6_mode"`
+	ZoneCount              int                      `json:"zone_count"`
+	PolicyCount            int                      `json:"policy_count"`
+	BlockClaims            int                      `json:"block_claims"`
+	BlockedAddresses       int                      `json:"blocked_addresses"`
+	ClaimsBySource         map[string]int           `json:"claims_by_source,omitempty"`
+	ClaimsDesiredRev       uint64                   `json:"claims_desired_revision"`
+	ClaimsAppliedRev       uint64                   `json:"claims_applied_revision"`
+	WireGuard              wireguard.Observation    `json:"wireguard"`
+	RecentAudit            []map[string]any         `json:"recent_audit,omitempty"`
+	ProvenanceMask         string                   `json:"provenance_mask"`
+	ProvenanceKeepMask     string                   `json:"provenance_keep_mask"`
+	ProvenanceLedger       string                   `json:"provenance_ledger"`
+	ProvenanceDigest       string                   `json:"provenance_digest,omitempty"`
+	ProvenanceActive       int                      `json:"provenance_active"`
+	ProvenanceRetired      int                      `json:"provenance_retired"`
+	ProvenanceMappings     []provenance.Assignment  `json:"provenance_mappings,omitempty"`
+	ProvenanceAuditScope   string                   `json:"provenance_audit_scope"`
+	ProvenanceAuditStatus  string                   `json:"provenance_audit_status"`
+	ProvenanceForeignRules int                      `json:"provenance_foreign_rules"`
 }
 
 type Provider struct {
-	Store              *state.Store
-	Backend            *nft.Backend
-	WG                 *wireguard.Controller
-	WGName             string
-	WGHealthyWithin    time.Duration
-	IPv6Mode           string
-	ZoneCount          int
-	PolicyCount        int
-	ActiveIntegrations map[string]bool
+	Store                  *state.Store
+	Backend                *nft.Backend
+	WG                     *wireguard.Controller
+	WGName                 string
+	WGHealthyWithin        time.Duration
+	IPv6Mode               string
+	ZoneCount              int
+	PolicyCount            int
+	ActiveIntegrations     map[string]bool
+	Ledger                 *provenance.Ledger
+	RequireProvenance      bool
+	AuditForeignProvenance bool
 }
 
 func (p Provider) Snapshot(ctx context.Context) (Snapshot, error) {
@@ -66,7 +80,8 @@ func (p Provider) Snapshot(ctx context.Context) (Snapshot, error) {
 		Schema: StatusSchema, Version: version.Current().Version,
 		Status: "HEALTHY", Database: "ok", KillSwitch: "enforced",
 		IPv6Mode: p.IPv6Mode, ZoneCount: p.ZoneCount, PolicyCount: p.PolicyCount,
-		ClaimsBySource: map[string]int{},
+		ClaimsBySource: map[string]int{}, ProvenanceMask: "0xff000000",
+		ProvenanceKeepMask: "0x00ffffff", ProvenanceLedger: "unavailable",
 	}
 	degrade := func(reason string) {
 		s.Status = "DEGRADED"
@@ -77,6 +92,41 @@ func (p Provider) Snapshot(ctx context.Context) (Snapshot, error) {
 	if err := p.Store.QuickCheck(ctx); err != nil {
 		s.Database = "degraded"
 		degrade("database integrity check failed")
+	}
+	if p.Ledger != nil {
+		assignments, assignmentErr := p.Ledger.Assignments(ctx)
+		digest, digestErr := p.Ledger.Digest(ctx)
+		if assignmentErr != nil || digestErr != nil {
+			s.ProvenanceLedger = "degraded"
+			degrade("monotonic provenance ledger validation failed")
+		} else {
+			s.ProvenanceLedger = "ok"
+			s.ProvenanceDigest = digest
+			s.ProvenanceMappings = assignments
+			for _, assignment := range assignments {
+				if assignment.Retired {
+					s.ProvenanceRetired++
+				} else {
+					s.ProvenanceActive++
+				}
+			}
+			if p.RequireProvenance && s.ProvenanceActive == 0 {
+				degrade("monotonic provenance ledger has no active mappings")
+			}
+		}
+	} else if p.RequireProvenance {
+		degrade("monotonic provenance ledger is unavailable")
+	}
+	if p.AuditForeignProvenance {
+		s.ProvenanceAuditScope = nft.ProvenanceCollisionScope
+		foreignAudit, auditErr := p.Backend.AuditForeignProvenanceMask(ctx)
+		if auditErr != nil {
+			s.ProvenanceAuditStatus = "degraded"
+			degrade("foreign provenance ownership audit failed: " + auditErr.Error())
+		} else {
+			s.ProvenanceAuditStatus = "ok"
+			s.ProvenanceForeignRules = foreignAudit.ForeignRules
+		}
 	}
 	var expected *state.Generation
 	expectedArtifactValid := false

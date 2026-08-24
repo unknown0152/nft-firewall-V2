@@ -1,5 +1,12 @@
 # Testing
 
+Current disposition: **2.0.2 RELEASE CANDIDATE - NOT DEPLOYABLE**. The
+source-only commands and results that actually ran are recorded in
+`TEST_RESULTS.md`. Every privileged section below belongs to separately
+approved Stage R2 and is currently **NOT EXECUTED** for 2.0.2. R2 approval or
+a later R2 pass is not deployment approval; actual server installation still
+requires separate explicit approval of the completed deployment plan.
+
 Test outcomes use only `PASS`, `FAIL`, `BLOCKED`, `NOT APPLICABLE`, or
 `NOT EXECUTED`. A namespace simulation and an external provider tunnel are
 reported separately.
@@ -17,11 +24,16 @@ staticcheck ./...
 govulncheck ./...
 gosec -quiet -exclude-generated -exclude=G104,G204,G304,G302 ./...
 ./tests/packaging/systemd_preflight.sh amd64
+bash ./tests/stage-r/run.sh
 ```
 
 The systemd preflight uses temporary unit copies and staged executables, so it
 can validate a fresh-host source installation before final paths exist and
 without installing or starting anything.
+
+The Stage R runner checks package nonactivation, the early/ready/rollback
+dependency graph, packaged CLI contracts, release-candidate metadata, and
+immutable v2.0.1 expected-red defects without installing or starting anything.
 
 Unit tests cover strict config, compiler invariants, owned transaction
 validation, JSON fingerprints, API size/schema/peer rules, state migrations,
@@ -38,6 +50,8 @@ go test ./internal/config -run '^$' -fuzz FuzzDecode -fuzztime 5s
 
 ## Namespace lab
 
+**Stage R2 only — NOT EXECUTED for 2.0.2.**
+
 ```bash
 sudo ./tests/namespaces/run.sh
 ```
@@ -48,7 +62,8 @@ actual compiler/backend output and tests:
 
 - repeated atomic apply and boot snapshot restoration;
 - no trusted-lease replay and kernel timeout expiry;
-- corrupt snapshot emergency deny;
+- corrupt authoritative generation snapshot rejection with zero nft mutation
+  and readiness blocked;
 - rule modification/deletion, table deletion, and unrelated-table survival;
 - typed IPv4 DNAT;
 - healthy host/container IPv4 and IPv6 traffic through WireGuard;
@@ -66,6 +81,8 @@ LEAKED IPV6 INTERNET PACKETS: 0
 Missing prerequisites exit 77 and print `BLOCKED`; they do not produce PASS.
 
 ## Real WireGuard acceptance
+
+**Stage R2 only — NOT EXECUTED for 2.0.2.**
 
 Place a root-owned mode `0600` profile at the path below. The harness parses
 only the fields it needs and never prints or archives the private key.
@@ -85,6 +102,8 @@ refresh, daemon restart, tunnel loss, physical packet capture, tunnel
 recovery, and Docker recovery. Synthetic traffic only is captured.
 
 ## Other privileged suites
+
+**Stage R2 only — NOT EXECUTED for 2.0.2.**
 
 ```bash
 sudo ./tests/acceptance/database.sh
@@ -112,8 +131,7 @@ the operator's real provider DNS record.
 
 ## Evidence
 
-Sanitized raw results live outside Git under
-`/root/nft-firewall-work/test-results/`. They are intentionally excluded from
-release archives because provider endpoint and host topology diagnostics are
-not public release material. The consolidated, non-secret result is
-`TEST_RESULTS.md`.
+Sanitized raw results, when later produced in approved disposable R2
+environments, remain outside Git and release archives because provider and
+topology diagnostics are not public release material. The consolidated,
+non-secret result belongs in `TEST_RESULTS.md`; no absent raw log is a pass.

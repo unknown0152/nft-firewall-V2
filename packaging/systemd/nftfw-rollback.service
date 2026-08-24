@@ -4,9 +4,12 @@ After=local-fs.target
 
 [Service]
 Type=oneshot
-ExecStart=/usr/lib/nftfw/nftfwd --rollback-expired --config /etc/nftfw/nftfw.toml --state-db /var/lib/nftfw/state.db
+ExecStart=/usr/lib/nftfw/nftfwd --rollback-expired --state-dir /var/lib/nftfw
+RuntimeDirectory=nftfw
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 User=root
-Group=root
+Group=nftfw-web
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -23,6 +26,7 @@ MemoryDenyWriteExecute=yes
 RestrictNamespaces=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-ReadWritePaths=/var/lib/nftfw
+ReadWritePaths=/var/lib/nftfw/generation-state /run/nftfw
+ReadOnlyPaths=/etc/nftfw /var/lib/nftfw/provenance-ledger.db -/var/lib/nftfw/provenance-ledger.db-journal -/var/lib/nftfw/provenance-ledger.db-wal -/var/lib/nftfw/provenance-ledger.db-shm /var/lib/nftfw/generations /var/lib/nftfw/backups -/var/lib/nftfw/active.snapshot.json -/var/lib/nftfw/enforcement-enabled
 CapabilityBoundingSet=CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_ADMIN

@@ -3,7 +3,8 @@ Version: @VERSION@
 Section: net
 Priority: optional
 Architecture: @ARCH@
-Depends: adduser, nftables, iproute2, wireguard-tools, systemd, ca-certificates
+X-NFTFW-Build-Disposition: @BUILD_DISPOSITION@
+Depends: adduser, nftables, iproute2, wireguard-tools, systemd, ca-certificates, sqlite3
 Maintainer: NFT Firewall V2 contributors <unknown0152@users.noreply.github.com>
 Description: Declarative nftables and WireGuard firewall controller
  Strict typed policy, scoped atomic nftables transactions, SQLite state,

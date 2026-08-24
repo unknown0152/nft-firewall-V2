@@ -15,7 +15,7 @@ func TestReconcileControllerLockWaitHonorsContext(t *testing.T) {
 	m, store, runner := newManager(t)
 	defer store.Close()
 
-	lockPath := filepath.Join(store.Dir, ".controller.lock")
+	lockPath := filepath.Join(m.MutationLockDir, "mutation.lock")
 	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		t.Fatal(err)
@@ -32,7 +32,7 @@ func TestReconcileControllerLockWaitHonorsContext(t *testing.T) {
 	defer cancel()
 	started := time.Now()
 	_, err = m.Reconcile(ctx, false)
-	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "wait for controller lock") {
+	if !errors.Is(err, context.DeadlineExceeded) || !strings.Contains(err.Error(), "wait for cross-process mutation lock") {
 		t.Fatalf("controller lock wait did not return the context error: %v", err)
 	}
 	if elapsed := time.Since(started); elapsed > time.Second {
@@ -57,7 +57,7 @@ func TestAcquireProcessLockRejectsCanceledContextBeforeAcquisition(t *testing.T)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("canceled lock acquisition returned %v", err)
 	}
-	if _, statErr := os.Lstat(filepath.Join(store.Dir, ".controller.lock")); !errors.Is(statErr, os.ErrNotExist) {
+	if _, statErr := os.Lstat(filepath.Join(m.MutationLockDir, "mutation.lock")); !errors.Is(statErr, os.ErrNotExist) {
 		t.Fatalf("canceled acquisition touched the lock path: %v", statErr)
 	}
 }
@@ -66,7 +66,7 @@ func TestGenerationByIDHonorsCanceledContext(t *testing.T) {
 	_, store, _ := newManager(t)
 	defer store.Close()
 	item := artifact(1)
-	if err := store.SaveGeneration(context.Background(), item.Generation, item.Checksum, item.Script, nil, nil); err != nil {
+	if err := store.SaveGenerationWithMetadata(context.Background(), item.Generation, item.Checksum, item.Script, nil, nil, reconcileGenerationMetadata(t, "")); err != nil {
 		t.Fatal(err)
 	}
 

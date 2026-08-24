@@ -22,6 +22,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
 	"github.com/unknown0152/nft-firewall-v2/internal/policy"
+	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/reconcile"
 	"github.com/unknown0152/nft-firewall-v2/internal/recovery"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
@@ -33,8 +34,10 @@ type Runtime struct {
 	Config              config.Config
 	Effective           policy.Effective
 	Store               *state.Store
+	Ledger              *provenance.Ledger
 	Backend             *nft.Backend
 	Manager             *reconcile.Manager
+	MutationLockDir     string
 	EndpointResolver    *wireguard.Resolver
 	WGController        *wireguard.Controller
 	threatFeedFetcher   func(context.Context, threatintel.Feed) ([]string, error)
@@ -65,15 +68,16 @@ type claimPublicationLockContextKey struct{}
 const postMutationRecoveryTimeout = 20 * time.Second
 
 func postMutationRecoveryContext(ctx context.Context) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(context.WithoutCancel(ctx), postMutationRecoveryTimeout)
+	locked := context.WithValue(context.WithoutCancel(ctx), claimPublicationLockContextKey{}, true)
+	return context.WithTimeout(state.WithMutationLock(locked), postMutationRecoveryTimeout)
 }
 
 func Open(ctx context.Context, configPath string, runner nft.Runner) (*Runtime, error) {
 	return open(ctx, configPath, runner, true)
 }
 
-// OpenQuiet is used by the frequent independent rollback check. It avoids a
-// configuration-loaded audit row for every no-op timer invocation.
+// OpenQuiet omits lifecycle/audit writes for compatibility callers. The
+// independent rollback service uses its static current-schema recovery path.
 func OpenQuiet(ctx context.Context, configPath string, runner nft.Runner) (*Runtime, error) {
 	return open(ctx, configPath, runner, false)
 }
@@ -91,29 +95,69 @@ func open(ctx context.Context, configPath string, runner nft.Runner, auditConfig
 	if override := os.Getenv("NFTFW_STATE_DB"); override != "" {
 		databasePath = override
 	}
-	st, err := state.Open(ctx, databasePath)
+	mutationLockDir := state.DefaultMutationLockDir
+	if runner != nil {
+		// An injected nft runner is the existing unprivileged test seam. Derive
+		// its isolated volatile-lock substitute without opening or migrating the
+		// database first.
+		absoluteDatabase, resolveErr := filepath.Abs(databasePath)
+		if resolveErr != nil {
+			return nil, fmt.Errorf("resolve test state database path: %w", resolveErr)
+		}
+		mutationLockDir = filepath.Join(state.StateRootForDatabasePath(absoluteDatabase), "test-runtime")
+		if err := os.MkdirAll(mutationLockDir, 0o700); err != nil {
+			return nil, fmt.Errorf("create isolated mutation lock directory: %w", err)
+		}
+	}
+	releaseInitialization, err := state.AcquireMutationLock(ctx, mutationLockDir)
+	if err != nil {
+		return nil, fmt.Errorf("lock state initialization: %w", err)
+	}
+	defer releaseInitialization()
+	lockedCtx := state.WithMutationLock(context.WithValue(ctx, claimPublicationLockContextKey{}, true))
+	st, err := state.Open(lockedCtx, databasePath)
 	if err != nil {
 		return nil, err
 	}
-	be := nft.New(runner)
-	knownGood, knownGoodErr := st.LastKnownGood(ctx)
-	pending, pendingErr := st.Pending(ctx)
-	if knownGoodErr != nil && !errors.Is(knownGoodErr, sql.ErrNoRows) {
+	var ledger *provenance.Ledger
+	if auditConfiguration {
+		ledger, err = provenance.Open(lockedCtx, c.State.ProvenanceLedger)
+		if err != nil {
+			_ = st.Close()
+			return nil, fmt.Errorf("open monotonic provenance ledger: %w", err)
+		}
+	}
+	closeState := func() {
+		if ledger != nil {
+			_ = ledger.Close()
+		}
 		_ = st.Close()
+	}
+	be := nft.New(runner)
+	knownGood, knownGoodErr := st.LastKnownGood(lockedCtx)
+	pending, pendingErr := st.Pending(lockedCtx)
+	if knownGoodErr != nil && !errors.Is(knownGoodErr, sql.ErrNoRows) {
+		closeState()
 		return nil, fmt.Errorf("inspect committed generation state: %w", knownGoodErr)
 	}
 	if pendingErr != nil && !errors.Is(pendingErr, sql.ErrNoRows) {
-		_ = st.Close()
+		closeState()
 		return nil, fmt.Errorf("inspect pending generation state: %w", pendingErr)
 	}
 	if knownGood == nil && pending == nil {
-		if err := be.ProtectFirstUse(ctx); err != nil {
-			_ = st.Close()
+		if err := be.ProtectFirstUse(lockedCtx); err != nil {
+			closeState()
 			return nil, fmt.Errorf("first-use ownership check: %w", err)
 		}
 	}
-	m := &reconcile.Manager{Backend: be, Store: st, SafeTTL: time.Duration(c.Runtime.SafeApplySeconds) * time.Second}
-	m.SafeGuard = recovery.SystemdGuard{StateDB: st.Path}.Verify
+	m := &reconcile.Manager{Backend: be, Store: st, SafeTTL: time.Duration(c.Runtime.SafeApplySeconds) * time.Second, MutationLockDir: mutationLockDir}
+	m.ForeignMarkGuard = func(guardCtx context.Context) error {
+		_, guardErr := be.AuditForeignProvenanceMask(guardCtx)
+		return guardErr
+	}
+	safeGuard := recovery.SystemdGuard{StateDir: st.Dir}
+	m.SafeGuard = safeGuard.Preflight
+	m.SafeGuardLocked = safeGuard.Revalidate
 	m.HealthCheck = func(checkCtx context.Context) error {
 		ok, detail, checkErr := be.Integrity(checkCtx)
 		if checkErr != nil {
@@ -126,35 +170,34 @@ func open(ctx context.Context, configPath string, runner nft.Runner, auditConfig
 	}
 	resolver := &wireguard.Resolver{CachePath: filepath.Join(st.Dir, "wg-endpoints.json"), KeepRecent: c.WireGuard.KeepRecent, Max: 64, MaxStale: 24 * time.Hour}
 	controller := &wireguard.Controller{}
-	runtime := &Runtime{Config: c, Effective: e, Store: st, Backend: be, Manager: m, EndpointResolver: resolver, WGController: controller}
-	// OpenQuiet is the independent safe-apply timer path. It must be able to
-	// prove that no pending generation exists while an outer safe apply holds
-	// the claim lock during rollback-guard preflight, so it performs no startup
-	// retirement writes. The normal daemon open owns lifecycle retirement.
+	runtime := &Runtime{Config: c, Effective: e, Store: st, Ledger: ledger, Backend: be, Manager: m, MutationLockDir: mutationLockDir, EndpointResolver: resolver, WGController: controller}
+	// OpenQuiet performs no startup retirement writes. The normal daemon open
+	// owns lifecycle retirement while the initialization lock remains held.
 	if auditConfiguration {
-		releaseClaims, err := runtime.acquireClaimPublicationLock(ctx)
-		if err != nil {
-			_ = st.Close()
-			return nil, fmt.Errorf("lock integration retirement: %w", err)
-		}
-		_, retirementErr := st.RetireInactiveIntegrations(ctx, runtime.activeIntegrationNames())
-		releaseClaims()
+		_, retirementErr := st.RetireInactiveIntegrations(lockedCtx, runtime.activeIntegrationNames())
 		if retirementErr != nil {
-			_ = st.Close()
+			closeState()
 			return nil, fmt.Errorf("retire inactive integrations: %w", retirementErr)
 		}
 	}
 	m.PostRestore = runtime.RestoreRuntimeState
 	if auditConfiguration {
-		_ = st.Audit(ctx, "system", "configuration_loaded", fmt.Sprintf("ipv6=%s zones=%d policies=%d", c.System.IPv6Mode, len(c.Zones), len(c.Policies)))
+		_ = st.Audit(lockedCtx, "system", "configuration_loaded", fmt.Sprintf("ipv6=%s zones=%d policies=%d", c.System.IPv6Mode, len(c.Zones), len(c.Policies)))
 	}
 	return runtime, nil
 }
 func (r *Runtime) Close() error {
-	if r == nil || r.Store == nil {
+	if r == nil {
 		return nil
 	}
-	return r.Store.Close()
+	var failures []error
+	if r.Ledger != nil {
+		failures = append(failures, r.Ledger.Close())
+	}
+	if r.Store != nil {
+		failures = append(failures, r.Store.Close())
+	}
+	return errors.Join(failures...)
 }
 
 func (r *Runtime) SecurityEvent(ctx context.Context, event, detail string) {
@@ -171,6 +214,41 @@ func (r *Runtime) Artifact(ctx context.Context) (compiler.Artifact, error) {
 }
 
 func (r *Runtime) artifactLocked(ctx context.Context) (compiler.Artifact, error) {
+	if r.Ledger == nil {
+		return compiler.Artifact{}, errors.New("writable monotonic provenance ledger is unavailable")
+	}
+	foreignAudit, err := r.Backend.AuditForeignProvenanceMask(ctx)
+	if err != nil {
+		_ = r.Store.Audit(ctx, "system", "foreign_provenance_audit_refused", fmt.Sprintf("scope=%s error=%v", nft.ProvenanceCollisionScope, err))
+		return compiler.Artifact{}, err
+	}
+	if err := r.Store.Audit(ctx, "system", "foreign_provenance_audit_passed", fmt.Sprintf("scope=%s mask=0x%08x foreign_rules=%d owned_rules=%d", foreignAudit.CollisionScope, foreignAudit.ReservedMask, foreignAudit.ForeignRules, foreignAudit.OwnedRulesIgnored)); err != nil {
+		return compiler.Artifact{}, fmt.Errorf("audit foreign provenance ownership: %w", err)
+	}
+	assignments := make([]provenance.Assignment, 0, len(r.Config.Interfaces))
+	for _, configured := range r.Config.Interfaces {
+		assignments = append(assignments, provenance.Assignment{Name: configured.Name, ID: configured.ProvenanceID})
+	}
+	if err := r.Ledger.Reserve(ctx, assignments); err != nil {
+		return compiler.Artifact{}, fmt.Errorf("durably reserve ingress provenance before compile: %w", err)
+	}
+	ledgerInventory, err := r.Ledger.Assignments(ctx)
+	if err != nil {
+		return compiler.Artifact{}, fmt.Errorf("read reserved ingress provenance: %w", err)
+	}
+	digest, err := r.Ledger.Digest(ctx)
+	if err != nil {
+		return compiler.Artifact{}, fmt.Errorf("digest reserved ingress provenance: %w", err)
+	}
+	retired := 0
+	for _, assignment := range ledgerInventory {
+		if assignment.Retired {
+			retired++
+		}
+	}
+	if err := r.Store.Audit(ctx, "system", "provenance_reserved", fmt.Sprintf("mask=0xff000000 active=%d retired=%d digest=%s", len(assignments), retired, digest)); err != nil {
+		return compiler.Artifact{}, fmt.Errorf("audit ingress provenance reservation: %w", err)
+	}
 	id, err := r.Store.NextGeneration(ctx)
 	if err != nil {
 		return compiler.Artifact{}, err
@@ -342,7 +420,7 @@ func (r *Runtime) containerNets(ctx context.Context) (v4, v6 []string, err error
 		}
 	}
 	if r.Config.Integrations.DockerEnabled {
-		observer := containers.Observer{}
+		observer := containers.Observer{Expected: r.Config.DockerNetworks}
 		ok, detail, policyErr := observer.FirewallPolicy()
 		if policyErr != nil {
 			return nil, nil, fmt.Errorf("docker integration refused: %s: %w", detail, policyErr)
@@ -377,7 +455,7 @@ func (r *Runtime) containerNets(ctx context.Context) (v4, v6 []string, err error
 
 func (r *Runtime) Status(ctx context.Context) (any, error) {
 	return health.Provider{
-		Store: r.Store, Backend: r.Backend, WG: r.WGController,
+		Store: r.Store, Ledger: r.Ledger, RequireProvenance: true, AuditForeignProvenance: true, Backend: r.Backend, WG: r.WGController,
 		WGName:          r.Config.WireGuard.Interface,
 		WGHealthyWithin: time.Duration(r.Config.WireGuard.HandshakeSecond) * time.Second,
 		IPv6Mode:        r.Config.System.IPv6Mode, ZoneCount: len(r.Config.Zones), PolicyCount: len(r.Config.Policies),
@@ -431,26 +509,34 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 		_ = r.Store.Audit(ctx, "uid:0", "firewall_plan_generated", fmt.Sprintf("generation=%d checksum=%s", a.Generation, a.Checksum))
 		return map[string]any{"generation": a.Generation, "checksum": a.Checksum, "script": a.Script}, nil
 	case "apply":
-		release, err := r.acquireClaimPublicationLock(ctx)
+		applyCtx := ctx
+		var err error
+		if req.Safe {
+			applyCtx, err = r.Manager.PreflightSafeApply(ctx)
+			if err != nil {
+				return nil, err
+			}
+		}
+		release, err := r.acquireClaimPublicationLock(applyCtx)
 		if err != nil {
 			return nil, err
 		}
 		defer release()
-		a, err := r.artifactLocked(ctx)
+		a, err := r.artifactLocked(applyCtx)
 		if err != nil {
 			return nil, err
 		}
-		if _, err := r.Store.PrepareClaimPublication(ctx); err != nil {
+		if _, err := r.Store.PrepareClaimPublication(applyCtx); err != nil {
 			return nil, fmt.Errorf("mark runtime claims pending before policy apply: %w", err)
 		}
-		lockedCtx := context.WithValue(ctx, claimPublicationLockContextKey{}, true)
+		lockedCtx := state.WithMutationLock(context.WithValue(applyCtx, claimPublicationLockContextKey{}, true))
 		result, err := r.Manager.Apply(lockedCtx, a, req.Safe)
 		if err != nil {
 			return nil, err
 		}
-		recoveryCtx, cancel := postMutationRecoveryContext(ctx)
+		recoveryCtx, cancel := postMutationRecoveryContext(applyCtx)
 		defer cancel()
-		recoveryLockedCtx := context.WithValue(recoveryCtx, claimPublicationLockContextKey{}, true)
+		recoveryLockedCtx := state.WithMutationLock(context.WithValue(recoveryCtx, claimPublicationLockContextKey{}, true))
 		if _, err := r.refreshClaimSetsLocked(recoveryCtx); err != nil {
 			rollbackErr := r.Manager.Rollback(recoveryLockedCtx, a.Generation)
 			if rollbackErr != nil {
@@ -478,8 +564,9 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 			return nil, err
 		}
 		defer release()
-		return r.addClaimAndPublishLocked(ctx, "block", func() (int64, error) {
-			return (blocks.Service{Store: r.Store, Max: r.Config.Runtime.MaxBlockClaims}).Add(ctx, req.Address, req.Source, req.Reason, "uid:0", expires)
+		lockedCtx := state.WithMutationLock(context.WithValue(ctx, claimPublicationLockContextKey{}, true))
+		return r.addClaimAndPublishLocked(lockedCtx, "block", func() (int64, error) {
+			return (blocks.Service{Store: r.Store, Max: r.Config.Runtime.MaxBlockClaims}).Add(lockedCtx, req.Address, req.Source, req.Reason, "uid:0", expires)
 		})
 	case "allow-add":
 		if len(r.Config.Runtime.TrustedServices) == 0 {
@@ -497,8 +584,9 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 			return nil, err
 		}
 		defer release()
-		return r.addClaimAndPublishLocked(ctx, "allow", func() (int64, error) {
-			return (blocks.Service{Store: r.Store, Max: r.Config.Runtime.MaxBlockClaims}).AddAllow(ctx, req.Address, req.Reason, "uid:0", expires)
+		lockedCtx := state.WithMutationLock(context.WithValue(ctx, claimPublicationLockContextKey{}, true))
+		return r.addClaimAndPublishLocked(lockedCtx, "allow", func() (int64, error) {
+			return (blocks.Service{Store: r.Store, Max: r.Config.Runtime.MaxBlockClaims}).AddAllow(lockedCtx, req.Address, req.Reason, "uid:0", expires)
 		})
 	case "block-remove":
 		release, err := r.acquireClaimPublicationLock(ctx)
@@ -506,14 +594,16 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 			return nil, err
 		}
 		defer release()
-		return nil, r.removeClaimAndPublishLocked(ctx, req.ClaimID, "block")
+		lockedCtx := state.WithMutationLock(context.WithValue(ctx, claimPublicationLockContextKey{}, true))
+		return nil, r.removeClaimAndPublishLocked(lockedCtx, req.ClaimID, "block")
 	case "allow-remove":
 		release, err := r.acquireClaimPublicationLock(ctx)
 		if err != nil {
 			return nil, err
 		}
 		defer release()
-		return nil, r.removeClaimAndPublishLocked(ctx, req.ClaimID, "allow")
+		lockedCtx := state.WithMutationLock(context.WithValue(ctx, claimPublicationLockContextKey{}, true))
+		return nil, r.removeClaimAndPublishLocked(lockedCtx, req.ClaimID, "allow")
 	default:
 		return nil, fmt.Errorf("unknown control operation %q", req.Op)
 	}
@@ -561,7 +651,16 @@ func (r *Runtime) acquireClaimPublicationLock(ctx context.Context) (func(), erro
 		r.claimMu.Unlock()
 		return nil, fmt.Errorf("wait for claim publication lock: %w", err)
 	}
-	releaseProcess, err := state.AcquireClaimPublicationLock(ctx, r.Store.Dir)
+	lockDir := r.MutationLockDir
+	if lockDir == "" && r.Manager != nil {
+		lockDir = r.Manager.MutationLockDir
+	}
+	if lockDir == "" && r.Store != nil {
+		// Compatibility for package-local unit fixtures. Open/OpenQuiet always
+		// set the explicit volatile production path above.
+		lockDir = r.Store.Dir
+	}
+	releaseProcess, err := state.AcquireClaimPublicationLock(ctx, lockDir)
 	if err != nil {
 		r.claimMu.Unlock()
 		return nil, err
@@ -570,6 +669,23 @@ func (r *Runtime) acquireClaimPublicationLock(ctx context.Context) (func(), erro
 		releaseProcess()
 		r.claimMu.Unlock()
 	}, nil
+}
+
+// publicationContext acquires the one cross-process mutation lock unless this
+// package placed both of its unexported publication marker and the state lock
+// marker on the context. Requiring both prevents an ordinary caller from
+// bypassing serialization with state.WithMutationLock alone.
+func (r *Runtime) publicationContext(ctx context.Context) (context.Context, func(), error) {
+	publicationHeld, _ := ctx.Value(claimPublicationLockContextKey{}).(bool)
+	if publicationHeld && state.MutationLockHeld(ctx) {
+		return ctx, func() {}, nil
+	}
+	release, err := r.acquireClaimPublicationLock(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	lockedCtx := context.WithValue(ctx, claimPublicationLockContextKey{}, true)
+	return state.WithMutationLock(lockedCtx), release, nil
 }
 
 func (r *Runtime) removeClaimAndPublishLocked(ctx context.Context, id int64, kind string) error {
@@ -642,8 +758,9 @@ func (r *Runtime) RollbackExpired(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if pending.RollbackDeadline == nil || time.Now().UTC().Before(*pending.RollbackDeadline) {
-		return false, nil
+	actionable, err := pendingRecoveryActionable(pending, time.Now().UTC())
+	if err != nil || !actionable {
+		return false, err
 	}
 	release, err := r.acquireClaimPublicationLock(ctx)
 	if err != nil {
@@ -657,21 +774,42 @@ func (r *Runtime) RollbackExpired(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if pending.RollbackDeadline == nil || time.Now().UTC().Before(*pending.RollbackDeadline) {
-		return false, nil
+	actionable, err = pendingRecoveryActionable(pending, time.Now().UTC())
+	if err != nil || !actionable {
+		return false, err
 	}
-	if _, err := r.Store.PrepareClaimPublication(ctx); err != nil {
-		return false, fmt.Errorf("mark runtime claims pending before expired rollback: %w", err)
-	}
-	lockedCtx := context.WithValue(ctx, claimPublicationLockContextKey{}, true)
+	lockedCtx := state.WithMutationLock(context.WithValue(ctx, claimPublicationLockContextKey{}, true))
 	rolledBack, rollbackErr := r.Manager.RollbackExpired(lockedCtx)
 	if rollbackErr != nil || !rolledBack {
 		return rolledBack, rollbackErr
+	}
+	if _, err := r.Store.PrepareClaimPublication(ctx); err != nil {
+		return true, fmt.Errorf("mark runtime claims pending after recovered rollback: %w", err)
 	}
 	recoveryCtx, cancel := postMutationRecoveryContext(ctx)
 	defer cancel()
 	_, refreshErr := r.refreshClaimSetsLocked(recoveryCtx)
 	return true, refreshErr
+}
+
+func pendingRecoveryActionable(pending *state.Generation, now time.Time) (bool, error) {
+	if pending == nil {
+		return false, nil
+	}
+	if pending.Status == "commit_prepared" {
+		return true, nil
+	}
+	bootID, err := state.CurrentBootID()
+	if err != nil {
+		return false, err
+	}
+	if pending.BootID == "" {
+		return false, errors.New("pending generation has no creating boot id")
+	}
+	if pending.BootID != bootID {
+		return true, nil
+	}
+	return pending.RollbackDeadline != nil && !now.UTC().Before(*pending.RollbackDeadline), nil
 }
 
 func (r *Runtime) Rollback(ctx context.Context, generation uint64) error {
@@ -683,7 +821,7 @@ func (r *Runtime) Rollback(ctx context.Context, generation uint64) error {
 	if _, err := r.Store.PrepareClaimPublication(ctx); err != nil {
 		return fmt.Errorf("mark runtime claims pending before rollback: %w", err)
 	}
-	lockedCtx := context.WithValue(ctx, claimPublicationLockContextKey{}, true)
+	lockedCtx := state.WithMutationLock(context.WithValue(ctx, claimPublicationLockContextKey{}, true))
 	rollbackErr := r.Manager.Rollback(lockedCtx, generation)
 	if rollbackErr != nil {
 		return rollbackErr
@@ -703,7 +841,7 @@ func (r *Runtime) Commit(ctx context.Context, generation uint64) error {
 	if _, err := r.Store.PrepareClaimPublication(ctx); err != nil {
 		return fmt.Errorf("mark runtime claims pending before commit: %w", err)
 	}
-	lockedCtx := context.WithValue(ctx, claimPublicationLockContextKey{}, true)
+	lockedCtx := state.WithMutationLock(context.WithValue(ctx, claimPublicationLockContextKey{}, true))
 	if err := r.Manager.Commit(lockedCtx, generation); err != nil {
 		return err
 	}
@@ -725,7 +863,7 @@ func (r *Runtime) Reconcile(ctx context.Context, repair bool) (reconcile.Drift, 
 	if _, err := r.Store.PrepareClaimPublication(ctx); err != nil {
 		return reconcile.Drift{}, fmt.Errorf("mark runtime claims pending before reconciliation: %w", err)
 	}
-	lockedCtx := context.WithValue(ctx, claimPublicationLockContextKey{}, true)
+	lockedCtx := state.WithMutationLock(context.WithValue(ctx, claimPublicationLockContextKey{}, true))
 	drift, reconcileErr := r.Manager.Reconcile(lockedCtx, true)
 	if reconcileErr != nil {
 		return drift, reconcileErr
@@ -737,6 +875,15 @@ func (r *Runtime) Reconcile(ctx context.Context, repair bool) (reconcile.Drift, 
 }
 
 func (r *Runtime) RefreshEndpoints(ctx context.Context) (bool, error) {
+	lockedCtx, release, err := r.publicationContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	return r.refreshEndpointsLocked(lockedCtx)
+}
+
+func (r *Runtime) refreshEndpointsLocked(ctx context.Context) (bool, error) {
 	v4, v6, preferred, err := r.bootstrapEndpoints(ctx)
 	if err != nil {
 		return false, err
@@ -796,12 +943,12 @@ func (r *Runtime) RefreshWireGuardHealth(ctx context.Context) error {
 }
 
 func (r *Runtime) RefreshClaimSets(ctx context.Context) (bool, error) {
-	release, err := r.acquireClaimPublicationLock(ctx)
+	lockedCtx, release, err := r.publicationContext(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer release()
-	return r.refreshClaimSetsLocked(ctx)
+	return r.refreshClaimSetsLocked(lockedCtx)
 }
 
 func (r *Runtime) refreshClaimSetsLocked(ctx context.Context) (bool, error) {
@@ -849,6 +996,15 @@ func (r *Runtime) refreshClaimSetsLocked(ctx context.Context) (bool, error) {
 }
 
 func (r *Runtime) RefreshContainerSets(ctx context.Context) (bool, error) {
+	lockedCtx, release, err := r.publicationContext(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	return r.refreshContainerSetsLocked(lockedCtx)
+}
+
+func (r *Runtime) refreshContainerSetsLocked(ctx context.Context) (bool, error) {
 	v4, v6, err := r.containerNets(ctx)
 	if err != nil {
 		return r.failContainerRefresh(ctx, 0, err)
@@ -893,20 +1049,20 @@ func (r *Runtime) setIntegrationStateDurable(ctx context.Context, name, status s
 // RestoreRuntimeState repopulates every mutable set after a generation
 // restore. Callers install emergency deny if any component cannot be restored.
 func (r *Runtime) RestoreRuntimeState(ctx context.Context) error {
-	var failures []error
-	var claimErr error
-	if locked, _ := ctx.Value(claimPublicationLockContextKey{}).(bool); locked {
-		_, claimErr = r.refreshClaimSetsLocked(ctx)
-	} else {
-		_, claimErr = r.RefreshClaimSets(ctx)
+	lockedCtx, release, err := r.publicationContext(ctx)
+	if err != nil {
+		return err
 	}
+	defer release()
+	var failures []error
+	_, claimErr := r.refreshClaimSetsLocked(lockedCtx)
 	if claimErr != nil {
 		failures = append(failures, fmt.Errorf("claims: %w", claimErr))
 	}
-	if _, err := r.RefreshEndpoints(ctx); err != nil {
+	if _, err := r.refreshEndpointsLocked(lockedCtx); err != nil {
 		failures = append(failures, fmt.Errorf("WireGuard endpoints: %w", err))
 	}
-	if _, err := r.RefreshContainerSets(ctx); err != nil {
+	if _, err := r.refreshContainerSetsLocked(lockedCtx); err != nil {
 		failures = append(failures, fmt.Errorf("container networks: %w", err))
 	}
 	return errors.Join(failures...)
@@ -914,12 +1070,12 @@ func (r *Runtime) RestoreRuntimeState(ctx context.Context) error {
 
 func (r *Runtime) RefreshIntegrations(ctx context.Context) error {
 	candidates := r.prepareIntegrationRefreshes(ctx)
-	release, err := r.acquireClaimPublicationLock(ctx)
+	lockedCtx, release, err := r.publicationContext(ctx)
 	if err != nil {
 		return err
 	}
 	defer release()
-	return r.refreshIntegrationsLocked(ctx, candidates)
+	return r.refreshIntegrationsLocked(lockedCtx, candidates)
 }
 
 func (r *Runtime) prepareIntegrationRefreshes(ctx context.Context) []integrationRefreshCandidate {

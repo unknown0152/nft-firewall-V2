@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/signal"
 	"path/filepath"
+	"strings"
 	"syscall"
 	"time"
 
@@ -17,54 +18,61 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
 	"github.com/unknown0152/nft-firewall-v2/internal/reconcile"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
+	"github.com/unknown0152/nft-firewall-v2/internal/version"
 )
 
 func main() {
+	if err := candidateStartupGuard(); err != nil {
+		fmt.Fprintln(os.Stderr, "nftfwd:", err)
+		os.Exit(1)
+	}
 	config := flag.String("config", "/etc/nftfw/nftfw.toml", "configuration path")
 	status := flag.String("status-socket", "/run/nftfw/status.sock", "read-only socket")
 	control := flag.String("control-socket", "/run/nftfw/control.sock", "mutation socket")
 	expired := flag.Bool("rollback-expired", false, "rollback an expired pending generation and exit")
-	stateDB := flag.String("state-db", "/var/lib/nftfw/state.db", "state database for rollback-only mode")
 	restoreActive := flag.Bool("restore-active", false, "restore the independently verified active snapshot and exit")
+	recoverCommit := flag.Bool("recover-commit-publication", false, "resolve a durable commit publication during early restore")
+	resolveStale := flag.Bool("resolve-stale-pending", false, "resolve stale pending state during early restore")
+	verifyEnforcement := flag.Bool("verify-enforcement", false, "strictly verify committed live enforcement without mutation")
 	stateDir := flag.String("state-dir", "/var/lib/nftfw", "state directory for early-boot restore mode")
 	flag.Parse()
-	if flag.NArg() != 0 || (*expired && *restoreActive) {
+	specialModes := 0
+	for _, enabled := range []bool{*expired, *restoreActive, *verifyEnforcement} {
+		if enabled {
+			specialModes++
+		}
+	}
+	if flag.NArg() != 0 || specialModes > 1 || *restoreActive && (!*recoverCommit || !*resolveStale) || !*restoreActive && (*recoverCommit || *resolveStale) {
 		fmt.Fprintln(os.Stderr, "nftfwd: invalid arguments")
 		os.Exit(2)
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 	if *restoreActive {
-		if err := restoreAtBoot(ctx, *stateDir); err != nil {
+		result, err := recoverAtBoot(ctx, *stateDir, state.DefaultMutationLockDir, nft.New(nil))
+		if err != nil {
 			fmt.Fprintln(os.Stderr, "nftfwd early boot:", err)
 			os.Exit(1)
 		}
+		fmt.Printf("firewall recovery complete: generation=%d action=%s\n", result.Generation, result.Action)
+		return
+	}
+	if *verifyEnforcement {
+		if err := verifyEnforcementState(ctx, *stateDir, state.DefaultMutationLockDir, nft.New(nil)); err != nil {
+			fmt.Fprintln(os.Stderr, "nftfwd enforcement verification:", err)
+			os.Exit(1)
+		}
+		fmt.Println("committed firewall enforcement verified")
 		return
 	}
 	if *expired {
-		rt, runtimeErr := app.OpenQuiet(ctx, *config, nil)
-		if runtimeErr == nil && filepath.Clean(rt.Store.Path) == filepath.Clean(*stateDB) {
-			defer rt.Close()
-			ok, err := rt.RollbackExpired(ctx)
-			if err != nil {
-				fmt.Fprintln(os.Stderr, "nftfwd rollback:", err)
-				os.Exit(1)
-			}
-			if ok {
-				fmt.Println("expired generation rolled back")
-			}
-			return
-		}
-		if rt != nil {
-			_ = rt.Close()
-		}
-		rolledBack, fallbackErr := rollbackExpiredWithoutRuntime(ctx, *stateDB, nft.New(nil))
-		if fallbackErr != nil {
-			fmt.Fprintln(os.Stderr, "nftfwd rollback: configured runtime unavailable and fallback failed:", fallbackErr)
+		rolledBack, rollbackErr := rollbackExpiredStatic(ctx, *stateDir, state.DefaultMutationLockDir, nft.New(nil))
+		if rollbackErr != nil {
+			fmt.Fprintln(os.Stderr, "nftfwd rollback:", rollbackErr)
 			os.Exit(1)
 		}
 		if rolledBack {
-			fmt.Fprintln(os.Stderr, "nftfwd rollback: configured runtime unavailable; rolled back the expired generation and left runtime-set publication degraded")
+			fmt.Println("stale or expired generation rolled back")
 		}
 		return
 	}
@@ -102,137 +110,136 @@ func main() {
 	}
 }
 
-// rollbackExpiredWithoutRuntime is the narrow recovery path used when the
-// configured runtime cannot be opened. A healthy database requires durable,
-// actually expired pending state; configuration failure alone never authorizes
-// mutation. If SQLite itself cannot be opened, the independently checksummed
-// committed snapshot is restored conservatively. Runtime claim publication is
-// marked dirty whenever the database is available because this path cannot
-// safely reconstruct mutable sets.
-func rollbackExpiredWithoutRuntime(ctx context.Context, databasePath string, backend *nft.Backend) (bool, error) {
-	absDatabasePath, err := filepath.Abs(databasePath)
-	if err != nil {
-		return false, fmt.Errorf("resolve rollback state path: %w", err)
+func candidateStartupGuard() error {
+	info := version.Current()
+	if info.Version == "" || info.Commit == "" || info.Date == "" || info.BuildDisposition == "" {
+		return errors.New("build identity is incomplete; refusing startup")
 	}
-	// Fast-path the guard's synchronous preflight without taking the claim
-	// publication lock. An actionable result is always reopened and rechecked
-	// under that lock, so this read cannot authorize a mutation by itself.
-	probe, probeErr := state.Open(ctx, absDatabasePath)
-	if probeErr == nil {
-		expired, inspectErr := hasExpiredPending(ctx, probe)
-		closeErr := probe.Close()
-		if inspectErr != nil {
-			return false, inspectErr
-		}
-		if closeErr != nil {
-			return false, closeErr
-		}
-		if !expired {
-			return false, nil
-		}
-	} else if ctx.Err() != nil {
-		return false, fmt.Errorf("open rollback state: %w", ctx.Err())
+	if version.IsStageRCandidateOnly() {
+		return errors.New("stage R candidate-only build is quarantined and cannot start")
 	}
-	releaseClaims, err := state.AcquireClaimPublicationLock(ctx, filepath.Dir(absDatabasePath))
+	return nil
+}
+
+func canonicalStateDatabase(stateDirectory string) (string, error) {
+	clean := filepath.Clean(stateDirectory)
+	if !filepath.IsAbs(stateDirectory) || clean != stateDirectory || clean == "/" || strings.ContainsAny(stateDirectory, "?#%") {
+		return "", errors.New("state directory must be an absolute, canonical, non-root path")
+	}
+	return filepath.Join(clean, "generation-state", "state.db"), nil
+}
+
+func foreignMarkGuard(backend *nft.Backend) func(context.Context) error {
+	return func(ctx context.Context) error {
+		_, err := backend.AuditForeignProvenanceMask(ctx)
+		return err
+	}
+}
+
+// rollbackExpiredStatic is intentionally independent of configuration,
+// daemon sockets, and the provenance writer. It locks before opening the
+// existing current-schema database, never migrates, and uses the same exact
+// pointer recovery protocol as the daemon and early boot.
+func rollbackExpiredStatic(ctx context.Context, stateDirectory, lockDirectory string, backend *nft.Backend) (bool, error) {
+	databasePath, err := canonicalStateDatabase(stateDirectory)
 	if err != nil {
 		return false, err
 	}
-	defer releaseClaims()
-	databasePath = absDatabasePath
-	store, err := state.Open(ctx, databasePath)
+	release, err := state.AcquireMutationLock(ctx, lockDirectory)
 	if err != nil {
-		if ctx.Err() != nil {
-			return false, fmt.Errorf("open rollback state: %w", ctx.Err())
+		return false, err
+	}
+	defer release()
+	store, err := state.OpenRecovery(ctx, databasePath)
+	if err != nil {
+		openErr := fmt.Errorf("open current-schema rollback state: %w", err)
+		if restoreErr := restoreVerifiedPointerWithoutDatabase(state.WithMutationLock(ctx), stateDirectory, backend); restoreErr != nil {
+			return false, errors.Join(openErr, restoreErr)
 		}
-		// A corrupt/unavailable database cannot prove whether a safe-apply
-		// deadline is still pending. Conservatively restore the independently
-		// checksummed committed snapshot immediately. This branch is deliberately
-		// limited to state-open failure; configuration errors with a healthy DB
-		// still require an actually expired pending generation below.
-		if fallbackErr := restoreRollbackFallback(ctx, filepath.Dir(databasePath), backend); fallbackErr != nil {
-			return false, errors.Join(fmt.Errorf("open rollback state: %w", err), fmt.Errorf("restore committed fallback: %w", fallbackErr))
-		}
-		return true, nil
+		return false, errors.Join(openErr, errors.New("verified pointer snapshot restored, but no database recovery transition was authorized"))
 	}
 	defer store.Close()
-	expired, err := hasExpiredPending(ctx, store)
-	if err != nil {
-		return false, err
+	manager := &reconcile.Manager{Backend: backend, Store: store, ForeignMarkGuard: foreignMarkGuard(backend), MutationLockDir: lockDirectory}
+	rolledBack, recoveryErr := manager.RollbackExpired(state.WithMutationLock(ctx))
+	if rolledBack {
+		if _, err := store.PrepareClaimPublication(ctx); err != nil {
+			return true, errors.Join(recoveryErr, fmt.Errorf("mark runtime claims unpublished after rollback: %w", err))
+		}
 	}
-	if !expired {
-		return false, nil
-	}
-	if _, err := store.PrepareClaimPublication(ctx); err != nil {
-		return false, fmt.Errorf("mark runtime claims unpublished before fallback rollback: %w", err)
-	}
-	manager := &reconcile.Manager{Backend: backend, Store: store}
-	rolledBack, err := manager.RollbackExpired(ctx)
-	if err != nil {
-		return false, err
-	}
-	if !rolledBack {
-		return false, errors.New("expired pending generation changed before fallback rollback")
-	}
-	return true, nil
+	return rolledBack, recoveryErr
 }
 
-func hasExpiredPending(ctx context.Context, store *state.Store) (bool, error) {
-	pending, err := store.Pending(ctx)
-	if errors.Is(err, sql.ErrNoRows) {
-		return false, nil
-	}
+func recoverAtBoot(ctx context.Context, stateDirectory, lockDirectory string, backend *nft.Backend) (reconcile.RecoveryResult, error) {
+	databasePath, err := canonicalStateDatabase(stateDirectory)
 	if err != nil {
-		return false, fmt.Errorf("inspect pending rollback state: %w", err)
+		return reconcile.RecoveryResult{}, err
 	}
-	return pending.RollbackDeadline != nil && !time.Now().UTC().Before(*pending.RollbackDeadline), nil
+	release, err := state.AcquireMutationLock(ctx, lockDirectory)
+	if err != nil {
+		return reconcile.RecoveryResult{}, err
+	}
+	defer release()
+	store, err := state.OpenRecovery(ctx, databasePath)
+	if err != nil {
+		openErr := fmt.Errorf("open current-schema recovery state: %w", err)
+		if restoreErr := restoreVerifiedPointerWithoutDatabase(state.WithMutationLock(ctx), stateDirectory, backend); restoreErr != nil {
+			return reconcile.RecoveryResult{}, errors.Join(openErr, restoreErr)
+		}
+		return reconcile.RecoveryResult{}, errors.Join(openErr, errors.New("verified pointer snapshot restored, but readiness remains blocked until database recovery"))
+	}
+	defer store.Close()
+	manager := &reconcile.Manager{Backend: backend, Store: store, ForeignMarkGuard: foreignMarkGuard(backend), MutationLockDir: lockDirectory}
+	return manager.RecoverAtBoot(state.WithMutationLock(ctx))
 }
 
-func restoreRollbackFallback(ctx context.Context, directory string, backend *nft.Backend) error {
-	script, enabled, err := state.LoadActiveSnapshot(directory)
+func verifyEnforcementState(ctx context.Context, stateDirectory, lockDirectory string, backend *nft.Backend) error {
+	databasePath, err := canonicalStateDatabase(stateDirectory)
 	if err != nil {
-		if !enabled {
-			return fmt.Errorf("active state is unreadable without a verified enforcement marker; refusing nftables mutation: %w", err)
-		}
-		if applyErr := backend.Apply(ctx, nft.EmergencyDenyScript); applyErr != nil {
-			return fmt.Errorf("invalid active snapshot and emergency deny failed: %w", applyErr)
-		}
-		return nil
+		return err
+	}
+	release, err := state.AcquireMutationLock(ctx, lockDirectory)
+	if err != nil {
+		return err
+	}
+	defer release()
+	store, err := state.OpenReadOnly(ctx, databasePath)
+	if err != nil {
+		return fmt.Errorf("open read-only enforcement state: %w", err)
+	}
+	defer store.Close()
+	return reconcile.VerifyEnforcement(ctx, store, backend)
+}
+
+// restoreVerifiedPointerWithoutDatabase re-establishes only the independently
+// checksummed pointer snapshot when SQLite cannot be trusted. It never guesses
+// or records a generation transition and always leaves the caller returning
+// nonzero, so readiness remains blocked for operator recovery.
+func restoreVerifiedPointerWithoutDatabase(ctx context.Context, stateDirectory string, backend *nft.Backend) error {
+	if _, err := backend.AuditForeignProvenanceMask(ctx); err != nil {
+		return fmt.Errorf("foreign conntrack-mark ownership audit before database-failure restore: %w", err)
+	}
+	script, enabled, err := state.LoadActiveSnapshot(stateDirectory)
+	if err != nil {
+		return fmt.Errorf("load verified enforcement pointer without database: %w", err)
 	}
 	if !enabled {
-		existing, inspectErr := backend.ExistingOwned(ctx)
-		if inspectErr != nil {
-			return fmt.Errorf("inspect unverified product-named nft tables: %w", inspectErr)
-		}
-		if len(existing) > 0 {
-			return errors.New("no verified enforcement marker exists; refusing automatic deletion of product-named nft tables")
-		}
-		return nil
+		return errors.New("database is unavailable and no verified enforcement pointer exists; refusing nftables mutation")
 	}
-	return backend.Apply(ctx, script)
-}
-
-func restoreAtBoot(ctx context.Context, directory string) error {
-	script, enabled, err := state.LoadActiveSnapshot(directory)
-	backend := nft.New(nil)
-	if err != nil {
-		if !enabled {
-			return fmt.Errorf("active state is unreadable without a verified enforcement marker; refusing nftables mutation: %w", err)
-		}
-		if applyErr := backend.Apply(ctx, nft.EmergencyDenyScript); applyErr != nil {
-			return fmt.Errorf("active snapshot is invalid and emergency deny failed: %w", applyErr)
-		}
-		return errors.New("active snapshot is invalid; emergency default-deny policy installed")
-	}
-	if !enabled {
-		return nil
+	// Re-audit immediately before installation. The shared lock serializes
+	// nftfw processes, but cannot exclude an independent privileged nft writer.
+	if _, err := backend.AuditForeignProvenanceMask(ctx); err != nil {
+		return fmt.Errorf("foreign conntrack-mark ownership audit before database-failure install: %w", err)
 	}
 	if err := backend.Apply(ctx, script); err != nil {
-		if fallbackErr := backend.Apply(ctx, nft.EmergencyDenyScript); fallbackErr != nil {
-			return fmt.Errorf("active snapshot restore and emergency deny both failed: %w", fallbackErr)
-		}
-		return errors.New("active snapshot restore failed; emergency default-deny policy installed")
+		return fmt.Errorf("restore verified pointer snapshot without database: %w", err)
 	}
-	fmt.Println("committed firewall snapshot restored")
+	ok, detail, err := backend.Integrity(ctx)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return fmt.Errorf("restored pointer snapshot failed owned-table integrity: %s", detail)
+	}
 	return nil
 }
 

@@ -1,0 +1,6 @@
+# Install as /etc/systemd/system/nftfwd.service.d/50-nftfw-final-early.conf
+# only during the reviewed first-commit handoff. Requisite does not activate
+# the early restore unit during a routine daemon start or restart.
+[Unit]
+Requisite=nftfw-early.service
+After=nftfw-early.service

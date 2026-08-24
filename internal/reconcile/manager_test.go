@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/unknown0152/nft-firewall-v2/internal/compiler"
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
+	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
 )
 
@@ -31,6 +33,9 @@ type runner struct {
 	ownedListCalls       int
 	collisionAtOwnedList int
 	cancelOnApply        context.CancelFunc
+	owned                bool
+	foreignMarkCollision bool
+	rulesetCalls         int
 }
 
 type denyContextRunner struct {
@@ -50,10 +55,20 @@ func (r *denyContextRunner) Run(ctx context.Context, args ...string) (string, st
 }
 
 func (r *runner) Run(_ context.Context, args ...string) (string, string, error) {
+	if len(args) == 3 && args[0] == "-j" && args[1] == "list" && args[2] == "ruleset" {
+		r.rulesetCalls++
+		if r.foreignMarkCollision {
+			return `{"nftables":[{"metainfo":{"json_schema_version":1}},{"rule":{"family":"inet","table":"foreign","chain":"input","expr":[{"match":{"op":"!=","left":{"&":[{"ct":{"key":"mark"}},4278190080]},"right":0}}]}}]}`, "", nil
+		}
+		return `{"nftables":[{"metainfo":{"json_schema_version":1}}]}`, "", nil
+	}
 	if len(args) >= 3 && args[0] == "-j" && args[1] == "list" && args[2] == "tables" {
 		r.ownedListCalls++
 		if r.foreignCollision || r.collisionAtOwnedList > 0 && r.ownedListCalls >= r.collisionAtOwnedList {
 			return `{"nftables":[{"table":{"family":"inet","name":"nftfw_filter"}}]}`, "", nil
+		}
+		if r.owned {
+			return `{"nftables":[{"table":{"family":"inet","name":"nftfw_filter"}},{"table":{"family":"ip","name":"nftfw_nat"}},{"table":{"family":"ip6","name":"nftfw_filter6"}}]}`, "", nil
 		}
 		return `{"nftables":[]}`, "", nil
 	}
@@ -65,7 +80,7 @@ func (r *runner) Run(_ context.Context, args ...string) (string, string, error) 
 		if r.tamper {
 			return fmt.Sprintf(`{"nftables":[{"table":{"family":%q,"name":%q,"comment":"tampered"}}]}`, args[3], args[4]), "", nil
 		}
-		return fmt.Sprintf(`{"nftables":[{"table":{"family":%q,"name":%q}}]}`, args[3], args[4]), "", nil
+		return recoveryOwnedTableJSON(args[3], args[4]), "", nil
 	}
 	if len(args) > 0 && args[0] == "--file" {
 		r.applyCalls++
@@ -79,6 +94,22 @@ func (r *runner) Run(_ context.Context, args ...string) (string, string, error) 
 			}
 			return "", "synthetic apply failure", sql.ErrConnDone
 		}
+		if data, readErr := os.ReadFile(args[len(args)-1]); readErr == nil {
+			script := string(data)
+			hasCreate := false
+			for _, line := range strings.Split(script, "\n") {
+				if strings.HasPrefix(strings.TrimSpace(line), "table ") {
+					hasCreate = true
+					break
+				}
+			}
+			hasDestroy := strings.Contains(script, "destroy table")
+			if hasCreate {
+				r.owned = true
+			} else if hasDestroy {
+				r.owned = false
+			}
+		}
 		if r.cancelOnApply != nil {
 			cancel := r.cancelOnApply
 			r.cancelOnApply = nil
@@ -89,6 +120,40 @@ func (r *runner) Run(_ context.Context, args ...string) (string, string, error) 
 		return "", "synthetic check failure", sql.ErrConnDone
 	}
 	return "", "", nil
+}
+
+func recoveryOwnedTableJSON(family, name string) string {
+	var objects []string
+	addChain := func(chain, typ, hook, policy string) {
+		objects = append(objects, fmt.Sprintf(`{"chain":{"family":%q,"table":%q,"name":%q,"type":%q,"hook":%q,"policy":%q}}`, family, name, chain, typ, hook, policy))
+	}
+	addRule := func(chain, comment string) {
+		objects = append(objects, fmt.Sprintf(`{"rule":{"family":%q,"table":%q,"chain":%q,"comment":%q}}`, family, name, chain, comment))
+	}
+	switch family + "/" + name {
+	case "inet/nftfw_filter":
+		for _, chain := range []string{"input", "output", "forward"} {
+			addChain(chain, "filter", chain, "drop")
+		}
+		for _, item := range [][2]string{{"input", "nftfw:input-default-deny"}, {"input", "nftfw:input-reply-only"}, {"output", "nftfw:output-default-deny"}, {"forward", "nftfw:forward-default-deny"}, {"forward", "nftfw:forward-physical-deny"}, {"output", "nftfw:vpn-only-egress"}} {
+			addRule(item[0], item[1])
+		}
+		for _, interfaceName := range []string{"eth0"} {
+			for _, marker := range [][2]string{{"input", "nftfw:provenance-tag-input:"}, {"output", "nftfw:provenance-tag-output:"}, {"forward", "nftfw:provenance-tag-forward:"}, {"output", "nftfw:provenance-reply-output:"}, {"forward", "nftfw:provenance-reply-forward:"}} {
+				addRule(marker[0], marker[1]+interfaceName)
+			}
+		}
+	case "ip/nftfw_nat":
+		addChain("prerouting", "nat", "prerouting", "accept")
+		addRule("prerouting", "nftfw:dnat-chain")
+		addChain("postrouting", "nat", "postrouting", "accept")
+	case "ip6/nftfw_filter6":
+		for _, chain := range []string{"input", "output", "forward"} {
+			addChain(chain, "filter", chain, "drop")
+		}
+		addRule("input", "nftfw:ipv6-mode-disabled")
+	}
+	return `{"nftables":[` + strings.Join(objects, ",") + `]}`
 }
 
 func TestSuccessfulKernelApplyUsesDetachedRecoveryAfterCallerCancellation(t *testing.T) {
@@ -127,7 +192,7 @@ func TestEmergencyDenyGetsIndependentContextAfterRuntimeRestoreTimeout(t *testin
 			return ctx.Err()
 		},
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+	ctx, cancel := context.WithTimeout(state.WithMutationLock(context.Background()), 30*time.Millisecond)
 	defer cancel()
 	err = manager.restoreRuntimeOrDeny(ctx)
 	if err == nil || !strings.Contains(err.Error(), "emergency default-deny policy installed") {
@@ -310,8 +375,38 @@ CREATE TRIGGER fail_mark_rolled_back BEFORE UPDATE OF status ON generations WHEN
 func artifact(id uint64) compiler.Artifact {
 	script := "table inet nftfw_filter { }\ntable ip nftfw_nat { }\ntable ip6 nftfw_filter6 { }\n"
 	sum := sha256.Sum256([]byte(script))
-	return compiler.Artifact{Generation: id, Checksum: hex.EncodeToString(sum[:]), Script: script}
+	return compiler.Artifact{Generation: id, Checksum: hex.EncodeToString(sum[:]), Script: script, Provenance: []provenance.Assignment{{Name: "eth0", ID: 1}}}
 }
+
+func permitOwnedInstall(context.Context) error { return nil }
+
+func reconcileGenerationMetadata(t *testing.T, bootID string) state.GenerationMetadata {
+	t.Helper()
+	if bootID == "" {
+		var err error
+		bootID, err = state.CurrentBootID()
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	return state.GenerationMetadata{BootID: bootID, Provenance: append([]provenance.Assignment(nil), artifact(1).Provenance...)}
+}
+
+func reserveReconcileTestProvenance(t *testing.T, root string) {
+	t.Helper()
+	ledger, err := provenance.Open(context.Background(), filepath.Join(root, "provenance-ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Reserve(context.Background(), artifact(1).Provenance); err != nil {
+		ledger.Close()
+		t.Fatal(err)
+	}
+	if err := ledger.Close(); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func newManager(t *testing.T) (*Manager, *state.Store, *runner) {
 	t.Helper()
 	s, err := state.Open(context.Background(), filepath.Join(secureTestDir(t), "state.db"))
@@ -319,8 +414,165 @@ func newManager(t *testing.T) (*Manager, *state.Store, *runner) {
 		t.Fatal(err)
 	}
 	r := &runner{}
-	return &Manager{Backend: nft.New(r), Store: s, SafeTTL: time.Millisecond, SafeGuard: func(context.Context) error { return nil }}, s, r
+	reserveReconcileTestProvenance(t, s.Dir)
+	return &Manager{Backend: nft.New(r), Store: s, SafeTTL: time.Millisecond, SafeGuard: func(context.Context) error { return nil }, SafeGuardLocked: func(context.Context) error { return nil }, ForeignMarkGuard: permitOwnedInstall, MutationLockDir: s.Dir}, s, r
 }
+
+func TestOwnedGenerationInstallsFailClosedOnGuardFailure(t *testing.T) {
+	ctx := context.Background()
+	guardFailure := errors.New("synthetic foreign mark collision")
+
+	t.Run("candidate final pre-apply audit", func(t *testing.T) {
+		m, store, fake := newManager(t)
+		defer store.Close()
+		guardCalls := 0
+		m.ForeignMarkGuard = func(context.Context) error {
+			guardCalls++
+			if guardCalls == 2 {
+				return guardFailure
+			}
+			return nil
+		}
+		if _, err := m.Apply(ctx, artifact(1), false); !errors.Is(err, guardFailure) {
+			t.Fatalf("candidate guard failure was not returned: %v", err)
+		}
+		if fake.applyCalls != 0 {
+			t.Fatalf("candidate guard failure reached nft apply: %d", fake.applyCalls)
+		}
+		generation, err := store.Generation(ctx, 1)
+		if err != nil || generation.Status != "rolled_back" {
+			t.Fatalf("guard-rejected candidate was not retired: generation=%#v err=%v", generation, err)
+		}
+	})
+
+	t.Run("guard is mandatory", func(t *testing.T) {
+		m, store, fake := newManager(t)
+		defer store.Close()
+		m.ForeignMarkGuard = nil
+		if _, err := m.Apply(ctx, artifact(1), false); err == nil || !strings.Contains(err.Error(), "guard is unavailable") {
+			t.Fatalf("missing guard did not fail closed: %v", err)
+		}
+		if fake.applyCalls != 0 {
+			t.Fatalf("missing guard reached nft apply: %d", fake.applyCalls)
+		}
+	})
+
+	t.Run("post-apply restore", func(t *testing.T) {
+		m, store, fake := newManager(t)
+		defer store.Close()
+		if _, err := m.Apply(ctx, artifact(1), false); err != nil {
+			t.Fatal(err)
+		}
+		generation, err := store.LastKnownGood(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		baseline := fake.applyCalls
+		m.ForeignMarkGuard = func(context.Context) error { return guardFailure }
+		if err := m.restore(ctx, generation); !errors.Is(err, guardFailure) {
+			t.Fatalf("restore guard failure was not returned: %v", err)
+		}
+		if fake.applyCalls != baseline {
+			t.Fatalf("restore guard failure reached nft apply: got=%d want=%d", fake.applyCalls, baseline)
+		}
+	})
+
+	t.Run("manual rollback", func(t *testing.T) {
+		m, store, fake := newManager(t)
+		defer store.Close()
+		if _, err := m.Apply(ctx, artifact(1), false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.Apply(ctx, artifact(2), true); err != nil {
+			t.Fatal(err)
+		}
+		baseline := fake.applyCalls
+		m.ForeignMarkGuard = func(context.Context) error { return guardFailure }
+		if err := m.Rollback(ctx, 2); !errors.Is(err, guardFailure) {
+			t.Fatalf("rollback guard failure was not returned: %v", err)
+		}
+		if fake.applyCalls != baseline {
+			t.Fatalf("rollback guard failure reached nft apply: got=%d want=%d", fake.applyCalls, baseline)
+		}
+	})
+
+	t.Run("drift repair", func(t *testing.T) {
+		m, store, fake := newManager(t)
+		defer store.Close()
+		if _, err := m.Apply(ctx, artifact(1), false); err != nil {
+			t.Fatal(err)
+		}
+		baseline := fake.applyCalls
+		fake.owned = false
+		m.ForeignMarkGuard = func(context.Context) error { return guardFailure }
+		if _, err := m.Reconcile(ctx, true); !errors.Is(err, guardFailure) {
+			t.Fatalf("drift-repair guard failure was not returned: %v", err)
+		}
+		if fake.applyCalls != baseline {
+			t.Fatalf("drift-repair guard failure reached nft apply: got=%d want=%d", fake.applyCalls, baseline)
+		}
+	})
+
+	t.Run("boot establishment", func(t *testing.T) {
+		m, store, fake := newManager(t)
+		defer store.Close()
+		if _, err := m.Apply(ctx, artifact(1), false); err != nil {
+			t.Fatal(err)
+		}
+		generation, err := store.LastKnownGood(ctx)
+		if err != nil {
+			t.Fatal(err)
+		}
+		snapshot, err := state.LoadVerifiedGenerationSnapshot(store.Dir, generation.ID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		baseline := fake.applyCalls
+		fake.owned = false
+		m.ForeignMarkGuard = func(context.Context) error { return guardFailure }
+		if err := m.establishAndVerify(ctx, generation, snapshot); !errors.Is(err, guardFailure) {
+			t.Fatalf("boot-establishment guard failure was not returned: %v", err)
+		}
+		if fake.applyCalls != baseline {
+			t.Fatalf("boot-establishment guard failure reached nft apply: got=%d want=%d", fake.applyCalls, baseline)
+		}
+	})
+}
+
+func TestCommitForeignMarkCollisionLeavesCandidateAndPointerUncommitted(t *testing.T) {
+	ctx := context.Background()
+	m, store, fake := newManager(t)
+	defer store.Close()
+	m.SafeTTL = time.Minute
+	if _, err := m.Apply(ctx, artifact(1), false); err != nil {
+		t.Fatal(err)
+	}
+	prior, exists, err := state.ReadEnforcementPointer(store.Dir)
+	if err != nil || !exists {
+		t.Fatalf("read predecessor pointer: exists=%t err=%v", exists, err)
+	}
+	if _, err := m.Apply(ctx, artifact(2), true); err != nil {
+		t.Fatal(err)
+	}
+	baselineApplies := fake.applyCalls
+	guardFailure := errors.New("synthetic foreign mark collision at commit")
+	m.ForeignMarkGuard = func(context.Context) error { return guardFailure }
+	if err := m.Commit(ctx, 2); !errors.Is(err, guardFailure) {
+		t.Fatalf("commit did not return foreign-mark guard failure: %v", err)
+	}
+	if fake.applyCalls != baselineApplies {
+		t.Fatalf("commit guard failure mutated nftables: got=%d want=%d", fake.applyCalls, baselineApplies)
+	}
+	pointer, exists, err := state.ReadEnforcementPointer(store.Dir)
+	if err != nil || !exists || !prior.Equal(pointer) {
+		t.Fatalf("commit guard failure changed pointer: pointer=%#v exists=%t err=%v", pointer, exists, err)
+	}
+	candidate, err := store.Generation(ctx, 2)
+	if err != nil || candidate.Status != "applied" {
+		t.Fatalf("commit guard failure changed candidate status: generation=%#v err=%v", candidate, err)
+	}
+}
+
 func TestSafeApplyCommitAndTimeoutRollback(t *testing.T) {
 	ctx := context.Background()
 	m, s, _ := newManager(t)
@@ -359,18 +611,20 @@ func TestSafeApplyCommitAndTimeoutRollback(t *testing.T) {
 
 func TestReconcileRestoresRuntimeStateAndFailsClosedOnError(t *testing.T) {
 	ctx := context.Background()
-	m, store, _ := newManager(t)
+	m, store, runner := newManager(t)
 	defer store.Close()
 	if _, err := m.Apply(ctx, artifact(1), false); err != nil {
 		t.Fatal(err)
 	}
 	restores := 0
 	m.PostRestore = func(context.Context) error { restores++; return nil }
+	runner.owned = false
 	drift, err := m.Reconcile(ctx, true)
 	if err != nil || !drift.Repaired || restores != 1 {
 		t.Fatalf("reconcile did not restore runtime state: drift=%#v calls=%d err=%v", drift, restores, err)
 	}
 	m.PostRestore = func(context.Context) error { return errors.New("synthetic runtime failure") }
+	runner.owned = false
 	if _, err := m.Reconcile(ctx, true); err == nil || !strings.Contains(err.Error(), "emergency default-deny") {
 		t.Fatalf("runtime restore failure did not fail closed: %v", err)
 	}
@@ -417,17 +671,17 @@ func TestCommittedSnapshotTracksCommitAndRollback(t *testing.T) {
 		t.Fatal(err)
 	}
 	assertActiveScript(t, store.Dir, second.Script)
-	if err := m.Rollback(ctx, second.Generation); err != nil {
-		t.Fatal(err)
+	if err := m.Rollback(ctx, second.Generation); err == nil || !strings.Contains(err.Error(), "restricted to pending") {
+		t.Fatalf("committed generation rollback was accepted: %v", err)
 	}
-	assertActiveScript(t, store.Dir, first.Script)
+	assertActiveScript(t, store.Dir, second.Script)
 }
 
 func TestFirstGenerationRollbackClearsBootEnforcement(t *testing.T) {
 	ctx := context.Background()
 	m, store, _ := newManager(t)
 	defer store.Close()
-	if _, err := m.Apply(ctx, artifact(1), false); err != nil {
+	if _, err := m.Apply(ctx, artifact(1), true); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Rollback(ctx, 1); err != nil {
@@ -442,7 +696,7 @@ func TestFirstUseProtectionRearmsAfterFirstGenerationRollback(t *testing.T) {
 	ctx := context.Background()
 	m, store, runner := newManager(t)
 	defer store.Close()
-	if _, err := m.Apply(ctx, artifact(1), false); err != nil {
+	if _, err := m.Apply(ctx, artifact(1), true); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Rollback(ctx, 1); err != nil {
@@ -462,7 +716,7 @@ func TestFirstPendingRecoveryPreservesUnverifiedProductNamedTable(t *testing.T) 
 	m, store, runner := newManager(t)
 	defer store.Close()
 	candidate := artifact(1)
-	if err := store.SaveGeneration(ctx, candidate.Generation, candidate.Checksum, candidate.Script, nil, nil); err != nil {
+	if err := store.SaveGenerationWithMetadata(ctx, candidate.Generation, candidate.Checksum, candidate.Script, nil, nil, reconcileGenerationMetadata(t, "")); err != nil {
 		t.Fatal(err)
 	}
 	runner.foreignCollision = true
@@ -483,7 +737,7 @@ func TestFirstPendingRecoveryWithNoTablesFinalizesWithoutMutation(t *testing.T) 
 	m, store, runner := newManager(t)
 	defer store.Close()
 	candidate := artifact(1)
-	if err := store.SaveGeneration(ctx, candidate.Generation, candidate.Checksum, candidate.Script, nil, nil); err != nil {
+	if err := store.SaveGenerationWithMetadata(ctx, candidate.Generation, candidate.Checksum, candidate.Script, nil, nil, reconcileGenerationMetadata(t, "")); err != nil {
 		t.Fatal(err)
 	}
 	drift, err := m.Reconcile(ctx, true)
@@ -602,6 +856,53 @@ func TestRollbackRejectsHistoricalCommittedGeneration(t *testing.T) {
 	}
 }
 
+func TestRollbackVerifiesCandidateProvenanceAndPublishedPredecessor(t *testing.T) {
+	ctx := context.Background()
+
+	t.Run("candidate provenance ledger", func(t *testing.T) {
+		m, store, fake := newManager(t)
+		defer store.Close()
+		if _, err := m.Apply(ctx, artifact(1), false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.Apply(ctx, artifact(2), true); err != nil {
+			t.Fatal(err)
+		}
+		baselineApplies := fake.applyCalls
+		ledgerPath := filepath.Join(store.Dir, "provenance-ledger.db")
+		if err := os.Rename(ledgerPath, ledgerPath+".missing"); err != nil {
+			t.Fatal(err)
+		}
+		if err := m.Rollback(ctx, 2); err == nil || !strings.Contains(err.Error(), "provenance ledger") {
+			t.Fatalf("rollback accepted a candidate without its provenance ledger: %v", err)
+		}
+		if fake.applyCalls != baselineApplies {
+			t.Fatalf("rollback mutated nftables before candidate verification: applies=%d want=%d", fake.applyCalls, baselineApplies)
+		}
+	})
+
+	t.Run("exact published predecessor row", func(t *testing.T) {
+		m, store, fake := newManager(t)
+		defer store.Close()
+		if _, err := m.Apply(ctx, artifact(1), false); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := m.Apply(ctx, artifact(2), true); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := store.DB.ExecContext(ctx, `UPDATE generations SET snapshot_checksum=? WHERE id=1`, strings.Repeat("0", 64)); err != nil {
+			t.Fatal(err)
+		}
+		baselineApplies := fake.applyCalls
+		if err := m.Rollback(ctx, 2); err == nil {
+			t.Fatal("rollback accepted a predecessor whose database row diverged from its immutable snapshot")
+		}
+		if fake.applyCalls != baselineApplies {
+			t.Fatalf("rollback mutated nftables before predecessor verification: applies=%d want=%d", fake.applyCalls, baselineApplies)
+		}
+	})
+}
+
 func TestHealthFailureRollsBackCandidate(t *testing.T) {
 	ctx := context.Background()
 	m, s, _ := newManager(t)
@@ -627,9 +928,10 @@ func TestPendingGenerationSurvivesRestart(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	reserveReconcileTestProvenance(t, s.Dir)
 	r := &runner{}
 	past := time.Now().Add(-time.Hour)
-	m := &Manager{Backend: nft.New(r), Store: s, SafeTTL: time.Minute, Now: func() time.Time { return past }, SafeGuard: func(context.Context) error { return nil }}
+	m := &Manager{Backend: nft.New(r), Store: s, SafeTTL: time.Minute, Now: func() time.Time { return past }, SafeGuard: func(context.Context) error { return nil }, SafeGuardLocked: func(context.Context) error { return nil }, ForeignMarkGuard: permitOwnedInstall, MutationLockDir: dir}
 	if _, err := m.Apply(ctx, artifact(1), true); err != nil {
 		t.Fatal(err)
 	}
@@ -641,10 +943,10 @@ func TestPendingGenerationSurvivesRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.Close()
-	m = &Manager{Backend: nft.New(r), Store: s}
+	m = &Manager{Backend: nft.New(r), Store: s, ForeignMarkGuard: permitOwnedInstall, MutationLockDir: dir}
 	ok, err := m.RollbackExpired(ctx)
-	if err != nil || !ok {
-		t.Fatalf("restarted controller did not roll back persistent pending generation: ok=%t err=%v", ok, err)
+	if !ok || err == nil || !strings.Contains(err.Error(), "readiness remains blocked") {
+		t.Fatalf("first-generation recovery did not roll back and block readiness: ok=%t err=%v", ok, err)
 	}
 	if err := m.Rollback(ctx, 1); err != nil {
 		t.Fatalf("rollback was not idempotent: %v", err)
@@ -679,6 +981,42 @@ func TestSafeApplyRequiresIndependentGuard(t *testing.T) {
 	if _, err := m.Apply(context.Background(), artifact(1), true); err == nil {
 		t.Fatal("safe apply with failed rollback guard was accepted")
 	}
+	m.SafeGuard = func(context.Context) error { return nil }
+	m.SafeGuardLocked = nil
+	if _, err := m.Apply(context.Background(), artifact(1), true); err == nil {
+		t.Fatal("safe apply without locked rollback-guard revalidation was accepted")
+	}
+}
+
+func TestSafeApplyPreflightsBeforeMutationLockAndRevalidatesUnderIt(t *testing.T) {
+	m, store, _ := newManager(t)
+	defer store.Close()
+	var sequence []string
+	m.SafeGuard = func(ctx context.Context) error {
+		if state.MutationLockHeld(ctx) {
+			return errors.New("preflight inherited mutation lock")
+		}
+		release, err := state.AcquireMutationLock(ctx, m.MutationLockDir)
+		if err != nil {
+			return fmt.Errorf("preflight could not run its independent lock user: %w", err)
+		}
+		release()
+		sequence = append(sequence, "preflight")
+		return nil
+	}
+	m.SafeGuardLocked = func(ctx context.Context) error {
+		if !state.MutationLockHeld(ctx) {
+			return errors.New("locked verification ran without mutation lock")
+		}
+		sequence = append(sequence, "revalidate")
+		return nil
+	}
+	if _, err := m.Apply(context.Background(), artifact(1), true); err != nil {
+		t.Fatal(err)
+	}
+	if got, want := strings.Join(sequence, ","), "preflight,revalidate"; got != want {
+		t.Fatalf("safe guard sequence=%q want=%q", got, want)
+	}
 }
 
 func TestPersistedButUnappliedGenerationRollsBackOnStartup(t *testing.T) {
@@ -690,7 +1028,7 @@ func TestPersistedButUnappliedGenerationRollsBackOnStartup(t *testing.T) {
 	}
 	deadline := time.Now().Add(time.Minute)
 	previous := uint64(1)
-	if err := store.SaveGeneration(ctx, 2, artifact(2).Checksum, artifact(2).Script, &previous, &deadline); err != nil {
+	if err := store.SaveGenerationWithMetadata(ctx, 2, artifact(2).Checksum, artifact(2).Script, &previous, &deadline, reconcileGenerationMetadata(t, "")); err != nil {
 		t.Fatal(err)
 	}
 	drift, err := m.Reconcile(ctx, true)
@@ -707,7 +1045,7 @@ func TestCommitRejectsPersistedButUnappliedGeneration(t *testing.T) {
 	ctx := context.Background()
 	m, store, _ := newManager(t)
 	defer store.Close()
-	if err := store.SaveGeneration(ctx, 1, artifact(1).Checksum, artifact(1).Script, nil, nil); err != nil {
+	if err := store.SaveGenerationWithMetadata(ctx, 1, artifact(1).Checksum, artifact(1).Script, nil, nil, reconcileGenerationMetadata(t, "")); err != nil {
 		t.Fatal(err)
 	}
 	if err := m.Commit(ctx, 1); err == nil {

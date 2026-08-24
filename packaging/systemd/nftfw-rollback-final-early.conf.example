@@ -1,0 +1,6 @@
+# Install as
+# /etc/systemd/system/nftfw-rollback.service.d/50-nftfw-final-early.conf only
+# during the reviewed first-commit handoff. Requisite does not activate early.
+[Unit]
+Requisite=nftfw-early.service
+After=nftfw-early.service

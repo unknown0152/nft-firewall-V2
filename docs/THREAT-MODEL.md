@@ -1,5 +1,10 @@
 # Threat Model
 
+This is the intended 2.0.2 candidate boundary. The candidate is not deployable;
+Stage R2 packet, package, boot, Docker, and provider evidence is not executed.
+Passing those gates would still not authorize server installation without
+separate explicit approval of the completed deployment plan.
+
 ## Assets and goals
 
 Assets are management reachability, the confidentiality of traffic that must
@@ -15,7 +20,7 @@ updates, and recovery that does not erase unrelated firewall state.
 | Threat | Boundary and control | Residual risk |
 | --- | --- | --- |
 | Remote network attacker | Default-deny input/forward; no network control API; local dashboard | A deliberately allowed service remains in scope of that service's security |
-| Compromised container | Container/uplink drop before conntrack; VPN-only NAT; observed bridge sets | Rootful Docker itself remains privileged and can alter host state |
+| Compromised container | Exact stable bridge tuple, immutable ingress provenance, physical-forward deny, and VPN-only NAT | Rootful Docker itself remains privileged and can alter host state |
 | Malicious local user | Root peer credentials; protected config/state/runtime dirs; bounded schemas | A user granted root or Docker socket access is outside this boundary |
 | Compromised dashboard | Separate UID, status socket only, no capabilities, control or Docker socket | Status data is visible to the dashboard group by design |
 | Malformed config | Strict unknown-key rejection, limits, typed references, topology validation, `nft --check` | Semantically valid policy can still deny operator traffic; safe apply mitigates |
@@ -29,9 +34,9 @@ updates, and recovery that does not erase unrelated firewall state.
 | Command injection | No shell strings in Go; validated fixed argument arrays; Docker `--` separator | Shell acceptance scripts are privileged test tooling, not runtime input APIs |
 | API/socket abuse | Kernel peer credentials, separate sockets, mode checks, request limits, operation field allowlists | Root control clients can intentionally change policy |
 | Stale state | Expiry validation, integration timestamps, cache maximum age, reconciliation | Retained failed-feed claims can over-block until operator repair |
-| Database corruption | Quick checks, transactional migration, online backup, committed snapshot fallback, emergency deny | Audit events written only to a destroyed DB require external journal/backup recovery |
+| Database corruption | Separate monotonic provenance ledger, generation pointer/snapshot checks, transactional migration, online generation backup, and a conditional independently verified restore that still blocks readiness | Unusable immutable evidence stops before nft mutation; audit events written only to a destroyed DB require external journal/backup recovery; ledger recovery is merge-only |
 | IPv6 bypass | Explicit modes; early disabled hooks; dual-stack policy and leak tests | Third-party higher-priority rules remain an operator integration concern |
-| Conntrack bypass | No blanket output established accept; physical forward drop precedes state accept; active-flow tests | Kernel conntrack/nft implementation is trusted |
+| Conntrack bypass | Write-once original-ingress provenance, exact masked reply accepts, no blanket forward/output established accept, and unconditional physical-forward deny | Kernel conntrack/nft implementation is trusted; R2 active-flow/retag packet proof remains required |
 | Docker privilege exposure | Socket hidden by packaged unit unless an explicit drop-in grants it; local host pinned; dashboard isolation; hardened daemon config | An operator-enabled Docker socket remains effectively host-root trust |
 | Unsafe rollback | Generation checksums, eligibility checks, prior generation, independent fallback | Disabling both systemd and daemon rollback removes this protection |
 | Secret disclosure | Keys never stored in SQLite/audit/status; config mode checks; release secret scan | Operators can still expose secrets through external logging or shell history |
@@ -40,10 +45,12 @@ updates, and recovery that does not erase unrelated firewall state.
 ## Failure policy
 
 Invalid desired input, ambiguous topology, unsafe files, malformed integration
-data, failed kernel validation, or runtime-set restoration failure never
-replace known-good policy. Integrations retain their prior source claims and
-become degraded. Required boot enforcement with unusable state installs an
-owned emergency deny policy.
+data, or failed kernel validation never replace known-good policy. Integrations
+retain their prior source claims and become degraded. Missing or invalid
+immutable boot evidence returns an error before nft mutation and blocks
+readiness. Emergency deny is reserved for the distinct case in which an owned
+generation installation succeeds but restoration of separate mutable runtime
+security state fails.
 
 Fail closed does not mean destroying working state. V2 prefers retaining the
 last known good generation plus an auditable health error.

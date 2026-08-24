@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
+	"github.com/unknown0152/nft-firewall-v2/internal/version"
 )
 
 const pageHTML = `<!doctype html>
@@ -82,6 +83,10 @@ const appCSS = `:root{color-scheme:light;--ink:#17201d;--muted:#66716d;--line:#d
 const appJS = `const el=id=>document.getElementById(id);const set=(id,value,fallback='-')=>{el(id).textContent=value===undefined||value===null||value===''?fallback:String(value)};const when=value=>{if(!value)return 'Never';const d=new Date(value);return Number.isNaN(d.valueOf())?'Unknown':d.toLocaleString()};function row(values,empty=false){const tr=document.createElement('tr');values.forEach(value=>{const td=document.createElement('td');td.textContent=String(value);if(empty)td.className='empty';tr.appendChild(td)});return tr}function fill(id,rows,columns,label){const body=el(id);body.replaceChildren();if(!rows.length){const tr=row([label],true);tr.firstChild.colSpan=columns;body.appendChild(tr);return}rows.forEach(values=>body.appendChild(row(values)))}function badge(id,ok,good,bad){const node=el(id);node.textContent=ok?good:bad;node.className='tag '+(ok?'ok':'bad')}function render(data){const hasPrimary=Object.prototype.hasOwnProperty.call(data,'policy_hash');const hasChecksum=Object.prototype.hasOwnProperty.call(data,'policy_checksum');const primaryHash=data.policy_hash;const checksum=data.policy_checksum;const primaryValid=hasPrimary&&typeof primaryHash==='string'&&/^[0-9a-f]{64}$/.test(primaryHash);const checksumValid=hasChecksum&&typeof checksum==='string'&&/^[0-9a-f]{64}$/.test(checksum);const hashValid=primaryValid&&checksumValid&&primaryHash===checksum;const policyHash=primaryHash;const contract=data.schema==='nftfw.status.v1'&&data.active===true&&data.policy_match===true&&data.kill_switch_enforced===true&&hashValid&&data.protected===true;const healthy=data.status==='HEALTHY'&&contract;const overall=el('overall');overall.lastChild.textContent=healthy?'Healthy':'Degraded';overall.querySelector('.status-dot').className='status-dot '+(healthy?'ok':'bad');set('generation',data.active_generation||'None');set('killswitch',data.kill_switch_enforced===true?'Enforced':'Degraded');set('blocked',data.blocked_addresses,0);set('ipv6',data.ipv6_mode);set('checksum',hashValid?policyHash.slice(0,16)+'...':'Invalid');set('policy-count',String(data.zone_count||0)+' / '+String(data.policy_count||0));set('database',data.database);set('pending',data.pending_generation?String(data.pending_generation)+(data.pending_deadline?' until '+when(data.pending_deadline):''):'None');badge('drift',data.policy_match===true,'In sync','Drift');const wg=data.wireguard||{};badge('wg-health',wg.healthy===true,'Healthy','Degraded');set('wg-interface',wg.interface);set('wg-peers',wg.peer_count,0);set('wg-endpoints',wg.endpoint_count,0);set('wg-handshake',wg.latest_handshake?when(wg.latest_handshake)+' ('+String(wg.age_seconds||0)+'s ago)':'Never');set('reason',data.reason||wg.reason||'None');const claims=Object.entries(data.claims_by_source||{}).sort((a,b)=>a[0].localeCompare(b[0])).map(item=>[item[0],item[1]]);set('claim-total',String(data.block_claims||0)+' active block claims');fill('claims',claims,2,'No active claims');const integrations=(data.integrations||[]).map(item=>[item.name,item.status,item.entry_count,when(item.last_success)]);fill('integrations',integrations,4,'No integrations enabled');const audit=(data.recent_audit||[]).map(item=>[when(item.created_at),item.event,item.actor,item.detail]);fill('audit',audit,4,'No audit events');set('updated','Updated '+new Date().toLocaleTimeString())}async function refresh(){const button=el('refresh');button.disabled=true;try{const response=await fetch('/api/status',{cache:'no-store',headers:{Accept:'application/json'}});if(!response.ok)throw new Error('status unavailable');render(await response.json())}catch(error){const overall=el('overall');overall.lastChild.textContent='Unavailable';overall.querySelector('.status-dot').className='status-dot bad';set('reason','Status service unavailable')}finally{button.disabled=false}}el('refresh').addEventListener('click',refresh);refresh();setInterval(refresh,5000);`
 
 func main() {
+	if err := candidateStartupGuard(); err != nil {
+		fmt.Fprintln(os.Stderr, "nftfw-web:", err)
+		os.Exit(1)
+	}
 	bind := os.Getenv("NFTFW_WEB_BIND")
 	if bind == "" {
 		bind = "127.0.0.1:8787"
@@ -112,6 +117,17 @@ func main() {
 			fmt.Fprintln(os.Stderr, "nftfw-web shutdown:", err)
 		}
 	}
+}
+
+func candidateStartupGuard() error {
+	info := version.Current()
+	if info.Version == "" || info.Commit == "" || info.Date == "" || info.BuildDisposition == "" {
+		return errors.New("build identity is incomplete; refusing startup")
+	}
+	if version.IsStageRCandidateOnly() {
+		return errors.New("stage R candidate-only build is quarantined and cannot start")
+	}
+	return nil
 }
 
 func newHandler(statusSocket string) http.Handler {

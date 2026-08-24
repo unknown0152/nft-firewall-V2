@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then echo "BLOCKED: namespace test requires root"; exit 77; fi
-for tool in ip nft wg ping timeout tcpdump python3; do command -v "$tool" >/dev/null || { echo "BLOCKED: missing $tool"; exit 77; }; done
+for tool in ip nft wg ping timeout tcpdump python3 sha256sum; do command -v "$tool" >/dev/null || { echo "BLOCKED: missing $tool"; exit 77; }; done
 
 tag="nftfw-$PPID-$$"
 host_ns="${tag}-host"; inet_ns="${tag}-inet"; vpn_ns="${tag}-vpn"; ctr_ns="${tag}-ctr"
@@ -89,19 +89,22 @@ table inet test_vpn_filter {
 }
 NFT
 
-cat > "$lab_tmp/nftfw.toml" <<'TOML'
+cat > "$lab_tmp/nftfw.toml" <<TOML
 [system]
 ipv6_mode = "vpn"
 strict_vpn = true
 [[interfaces]]
 name = "h-ext"
 role = "uplink"
+provenance_id = 1
 [[interfaces]]
 name = "wg-test"
 role = "vpn"
+provenance_id = 2
 [[interfaces]]
 name = "c-host"
 role = "container"
+provenance_id = 3
 cidrs = ["172.30.0.0/24", "fd00:30::/64"]
 [[zones]]
 name = "lan"
@@ -184,8 +187,9 @@ max_set_members = 65536
 safe_apply_timeout_seconds = 90
 trusted_services = ["active-tcp"]
 [state]
-directory = "/tmp/nftfw-lab-state"
-database = "/tmp/nftfw-lab-state/state.db"
+directory = "$lab_tmp/state"
+database = "$lab_tmp/state/generation-state/state.db"
+provenance_ledger = "$lab_tmp/state/provenance-ledger.db"
 TOML
 chmod 600 "$lab_tmp/nftfw.toml"
 
@@ -194,7 +198,7 @@ flow_probe="$root_dir/tests/namespaces/flow_probe.py"
 case "$(uname -m)" in x86_64) build_arch=amd64 ;; aarch64|arm64) build_arch=arm64 ;; *) echo "BLOCKED: unsupported test architecture"; exit 77 ;; esac
 nftfw_bin="$root_dir/dist/nftfw-linux-$build_arch"
 nftfwd_bin="$root_dir/dist/nftfwd-linux-$build_arch"
-nftfw_local=(env NFTFW_CONFIG="$lab_tmp/nftfw.toml" NFTFW_STATE_DB="$lab_tmp/state.db" NFTFW_CONTROL_SOCKET="$lab_tmp/no-control.sock" NFTFW_LOCAL=1 "$nftfw_bin")
+nftfw_local=(env NFTFW_CONFIG="$lab_tmp/nftfw.toml" NFTFW_STATE_DB="$lab_tmp/state/generation-state/state.db" NFTFW_CONTROL_SOCKET="$lab_tmp/no-control.sock" NFTFW_LOCAL=1 "$nftfw_bin")
 ip netns exec "$host_ns" "${nftfw_local[@]}" apply --unsafe >/dev/null
 ip netns exec "$host_ns" "${nftfw_local[@]}" apply --unsafe >/dev/null
 echo "ATOMIC REPEATED APPLY: PASS"
@@ -207,7 +211,7 @@ owned_names=(nftfw_filter nftfw_nat nftfw_filter6)
 for index in "${!owned_names[@]}"; do
     ip netns exec "$host_ns" nft delete table "${owned_families[$index]}" "${owned_names[$index]}"
 done
-ip netns exec "$host_ns" "$nftfwd_bin" --restore-active --state-dir "$lab_tmp" >/dev/null
+ip netns exec "$host_ns" "$nftfwd_bin" --restore-active --state-dir "$lab_tmp/state" >/dev/null
 for index in "${!owned_names[@]}"; do
     ip netns exec "$host_ns" nft list table "${owned_families[$index]}" "${owned_names[$index]}" >/dev/null
 done
@@ -215,25 +219,40 @@ if ip netns exec "$host_ns" nft list set inet nftfw_filter trusted_v4 | grep -F 
     echo "FAIL: early boot replayed a runtime access lease"
     exit 1
 fi
-echo "EARLY BOOT ACTIVE SNAPSHOT RESTORE: PASS"
+echo "EARLY BOOT COMMITTED GENERATION RESTORE: PASS"
 echo "EARLY BOOT TRUST LEASE REPLAY PREVENTION: PASS"
 
-corrupt_state="$lab_tmp/corrupt-state"
-install -d -m 0700 "$corrupt_state"
-install -m 0600 "$lab_tmp/enforcement-enabled" "$corrupt_state/enforcement-enabled"
-printf '{"damaged":true}\n' >"$corrupt_state/active.snapshot.json"
-chmod 0600 "$corrupt_state/active.snapshot.json"
-if ip netns exec "$host_ns" "$nftfwd_bin" --restore-active --state-dir "$corrupt_state" >/dev/null 2>&1; then
-    echo "FAIL: corrupt boot snapshot was accepted"
+active_pointer="$lab_tmp/state/enforcement-enabled"
+active_generation=$(python3 - "$active_pointer" <<'PY'
+import json
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as handle:
+    generation = json.load(handle).get("generation")
+if not isinstance(generation, int) or generation <= 0:
+    raise SystemExit("invalid active generation pointer")
+print(generation)
+PY
+)
+printf -v active_snapshot '%s/generations/%020d.snapshot.json' "$lab_tmp/state" "$active_generation"
+[[ -f "$active_snapshot" && ! -L "$active_snapshot" ]] || { echo "FAIL: active immutable generation snapshot is absent or unsafe"; exit 1; }
+snapshot_backup="$lab_tmp/active-generation.snapshot.backup"
+install -m 0600 "$active_snapshot" "$snapshot_backup"
+ruleset_before=$(ip netns exec "$host_ns" nft -s -j list ruleset | sha256sum | awk '{ print $1 }')
+printf '{"damaged":true}\n' >"$active_snapshot"
+chmod 0600 "$active_snapshot"
+if ip netns exec "$host_ns" "$nftfwd_bin" --restore-active --state-dir "$lab_tmp/state" >/dev/null 2>&1; then
+    echo "FAIL: corrupt authoritative generation snapshot was accepted"
     exit 1
 fi
-ip netns exec "$host_ns" nft list chain inet nftfw_filter output | grep -F 'policy drop' >/dev/null
-if ip netns exec "$host_ns" nft list chain inet nftfw_filter output | grep -F 'accept' | grep -v 'oifname "lo"' >/dev/null; then
-    echo "FAIL: emergency boot policy contains non-loopback output acceptance"
+ruleset_after=$(ip netns exec "$host_ns" nft -s -j list ruleset | sha256sum | awk '{ print $1 }')
+install -m 0600 "$snapshot_backup" "$active_snapshot"
+if [[ "$ruleset_after" != "$ruleset_before" ]]; then
+    echo "FAIL: corrupt immutable recovery evidence caused an nftables mutation"
     exit 1
 fi
-ip netns exec "$host_ns" "$nftfwd_bin" --restore-active --state-dir "$lab_tmp" >/dev/null
-echo "CORRUPT BOOT SNAPSHOT FAIL-CLOSED: PASS"
+ip netns exec "$host_ns" "$nftfwd_bin" --restore-active --state-dir "$lab_tmp/state" >/dev/null
+echo "CORRUPT IMMUTABLE SNAPSHOT ZERO NFT MUTATION: PASS"
 
 ip netns exec "$host_ns" "${nftfw_local[@]}" allow add 198.18.0.101/32 --ttl 2s >/dev/null
 ip netns exec "$host_ns" nft list set inet nftfw_filter trusted_v4 | grep -F '198.18.0.101' | grep -F 'timeout' >/dev/null

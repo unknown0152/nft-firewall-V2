@@ -1,5 +1,10 @@
 # Architecture Decisions
 
+The 2.0.2 source remains a non-deployable candidate until Stage R2 validates
+these decisions in the required privileged environments. Even a passing R2
+result would not authorize server installation without separate explicit
+approval of the completed deployment plan.
+
 Each decision records a maintenance constraint, not merely the implementation
 selected for v2.0.0.
 
@@ -52,21 +57,28 @@ complexity and library risk; text parsing is unstable.
 
 Decision: use the official `nft` executable with argument arrays, structured
 JSON inspection, bounded output, candidate files, `--check`, and atomic
-transactions behind one backend type.
+transactions. `internal/nft` is the sole code-level boundary that invokes the
+executable. The normal daemon, explicit root-local CLI recovery, and static
+recovery modes all reuse that backend rather than creating another mutation
+implementation.
 
 Future consequence: a netlink backend can replace the implementation without
 changing policy or reconciliation contracts.
 
-## SQLite claims and generations
+## Generation SQLite plus monotonic provenance ledger
 
 Problem: ownership-less JSON sets cannot represent independent reasons for one
 address and are vulnerable to partial updates.
 
-Decision: SQLite stores each provenance claim and each immutable firewall
-generation. Source replacement and effective union are transactional.
+Decision: the replaceable generation SQLite database stores claims,
+publication state, and immutable firewall-generation identities. A separate
+synchronous, insert-only ledger permanently binds interface names to ingress
+provenance IDs and retains retired tombstones. Generation backup/rollback may
+not replace or rewind that ledger.
 
 Security implications: removing one producer's claim cannot remove another;
-constraints and checksums make malformed durable state fail closed.
+surviving conntrack marks retain one interpretation across generation rollback;
+and constraints/checksums make malformed durable state fail closed.
 
 ## Unix control and status sockets
 
@@ -85,11 +97,16 @@ Problem: a CLI confirmation loop dies with SSH or the process and cannot
 restore policy early during boot.
 
 Decision: persist pending state before apply, require an active independent
-timer, and maintain a checksum-protected committed snapshot plus enforcement
-marker.
+timer, and publish commits through prepared database state, an immutable
+checksum-protected snapshot, a generation/checksum enforcement pointer, and a
+final database transition. Early recovery is idempotent across each boundary;
+a nonmutating readiness unit gates final network consumers.
 
 Security implications: CLI/daemon death and database corruption do not imply
-allow-all. A corrupt required snapshot triggers emergency default deny.
+allow-all. Missing or corrupt immutable recovery evidence stops before any
+nftables mutation and blocks readiness. Emergency default deny is reserved for
+a later failure to reconstruct mutable runtime security state after a
+generation installation has succeeded.
 
 ## Fixed endpoint refresh cadence
 
@@ -112,13 +129,16 @@ root-equivalent and must not reach the dashboard.
 Decision: only the privileged daemon may run the Docker CLI, explicitly pinned
 to `unix:///var/run/docker.sock`, and only when Docker's own iptables,
 ip6tables, forwarding, masquerade, and userland proxy mutation are disabled.
+Authorization requires the exact configured network name, `bridge` driver,
+explicit stable Linux bridge name, subnet, and gateway. The generated network
+ID only keeps one observation race-consistent and may not authorize traffic.
 The packaged service hides the socket by default; enabling observation also
 requires an explicit administrator-installed systemd drop-in.
 
 Security implications: Docker observation remains privileged and
 root-equivalent when explicitly granted, but is separated from HTTP and
-cannot be enabled through TOML alone. The firewall core receives only
-validated network prefixes.
+cannot be enabled through TOML alone. The firewall core receives only exact
+validated stable network tuples.
 
 ## Static web dashboard
 

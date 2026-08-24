@@ -4,10 +4,12 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"fmt"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
+
+	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 )
 
 func TestActiveSnapshotLifecycle(t *testing.T) {
@@ -20,18 +22,39 @@ func TestActiveSnapshotLifecycle(t *testing.T) {
 	script := "table inet nftfw_filter { }\n"
 	sum := sha256.Sum256([]byte(script))
 	checksum := hex.EncodeToString(sum[:])
-	if err := store.PublishActive(script, checksum); err != nil {
+	metadata := testGenerationMetadata(t)
+	ledger, err := provenance.Open(context.Background(), filepath.Join(dir, "provenance-ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := ledger.Reserve(context.Background(), metadata.Provenance); err != nil {
+		ledger.Close()
+		t.Fatal(err)
+	}
+	if err := ledger.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveGenerationWithMetadata(context.Background(), 1, checksum, script, nil, nil, metadata); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkApplied(context.Background(), 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Commit(context.Background(), 1); err != nil {
 		t.Fatal(err)
 	}
 	got, enabled, err := LoadActiveSnapshot(dir)
 	if err != nil || !enabled || got != script {
 		t.Fatalf("load snapshot: enabled=%t script=%q err=%v", enabled, got, err)
 	}
-	for _, name := range []string{activeSnapshotName, activeMarkerName} {
-		info, err := os.Stat(filepath.Join(dir, name))
+	for _, path := range []string{filepath.Join(dir, activeMarkerName), generationSnapshotPath(dir, 1)} {
+		info, err := os.Stat(path)
 		if err != nil || info.Mode().Perm() != 0o600 {
-			t.Fatalf("unsafe %s mode: %v %v", name, info, err)
+			t.Fatalf("unsafe %s mode: %v %v", path, info, err)
 		}
+	}
+	if _, err := os.Stat(filepath.Join(dir, activeSnapshotName)); !os.IsNotExist(err) {
+		t.Fatalf("legacy mutable snapshot was published: %v", err)
 	}
 	if err := store.ClearActive(); err != nil {
 		t.Fatal(err)
@@ -49,12 +72,14 @@ func TestActiveSnapshotFailsClosedOnDamage(t *testing.T) {
 	if _, enabled, err := LoadActiveSnapshot(dir); err == nil || !enabled {
 		t.Fatalf("missing snapshot did not fail closed: enabled=%t err=%v", enabled, err)
 	}
-	bad := `{"checksum":"` + strings.Repeat("0", 64) + `","script":"table inet nftfw_filter {}"}`
-	if err := os.WriteFile(filepath.Join(dir, activeSnapshotName), []byte(bad), 0o600); err != nil {
+	script := "table inet nftfw_filter { }\n"
+	sum := sha256.Sum256([]byte(script))
+	pointer := fmt.Sprintf(`{"schema":"%s","generation":9,"checksum":"%s"}`+"\n", pointerSchema, hex.EncodeToString(sum[:]))
+	if err := os.WriteFile(filepath.Join(dir, activeMarkerName), []byte(pointer), 0o600); err != nil {
 		t.Fatal(err)
 	}
 	if _, enabled, err := LoadActiveSnapshot(dir); err == nil || !enabled {
-		t.Fatalf("bad checksum did not fail closed: enabled=%t err=%v", enabled, err)
+		t.Fatalf("missing immutable snapshot did not fail closed: enabled=%t err=%v", enabled, err)
 	}
 }
 

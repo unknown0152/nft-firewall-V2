@@ -8,6 +8,7 @@ import (
 	"flag"
 	"fmt"
 	"net"
+	"net/netip"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -21,6 +22,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/app"
 	"github.com/unknown0152/nft-firewall-v2/internal/compiler"
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
+	"github.com/unknown0152/nft-firewall-v2/internal/containers"
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
 	"github.com/unknown0152/nft-firewall-v2/internal/policy"
@@ -39,6 +41,9 @@ func main() {
 func run(args []string) error {
 	if len(args) == 0 {
 		return errors.New("usage: nftfw <version|config|plan|apply|commit|rollback|reconcile|status|health|doctor|explain|audit|blocks|block|allow|wg|state>")
+	}
+	if version.IsStageRCandidateOnly() && args[0] != "version" {
+		return errors.New("stage R candidate-only build is quarantined; only `nftfw version [--json]` is permitted")
 	}
 	configPath := os.Getenv("NFTFW_CONFIG")
 	if configPath == "" {
@@ -349,22 +354,39 @@ func stateCommand(args []string) error {
 		return fmt.Errorf("unexpected state argument %q", args[i])
 	}
 	if database == "" {
-		database = "/var/lib/nftfw/state.db"
+		database = "/var/lib/nftfw/generation-state/state.db"
 	}
-	store, err := state.Open(context.Background(), database)
+	if args[0] == "verify" {
+		store, err := state.OpenReadOnly(context.Background(), database)
+		if err != nil {
+			return err
+		}
+		defer store.Close()
+		if err := store.QuickCheck(context.Background()); err != nil {
+			return err
+		}
+		fmt.Println("SQLite state: PASS")
+		return nil
+	}
+	if destination == "" || !filepath.IsAbs(destination) {
+		return errors.New("backup destination must be an absolute path")
+	}
+	lockDirectory := os.Getenv("NFTFW_RUNTIME_DIR")
+	if lockDirectory == "" {
+		lockDirectory = state.DefaultMutationLockDir
+	}
+	release, err := state.AcquireMutationLock(context.Background(), lockDirectory)
+	if err != nil {
+		return err
+	}
+	defer release()
+	store, err := state.OpenRecovery(context.Background(), database)
 	if err != nil {
 		return err
 	}
 	defer store.Close()
 	if err := store.QuickCheck(context.Background()); err != nil {
 		return err
-	}
-	if args[0] == "verify" {
-		fmt.Println("SQLite state: PASS")
-		return nil
-	}
-	if destination == "" || !filepath.IsAbs(destination) {
-		return errors.New("backup destination must be an absolute path")
 	}
 	if err := store.Backup(context.Background(), destination); err != nil {
 		return err
@@ -410,11 +432,11 @@ func doctor(path string) error {
 	if err != nil {
 		return err
 	}
-	artifact, err := compiler.Compile(compiler.Input{Policy: e, BootstrapV4: c.WireGuard.BootstrapIPs, BootstrapV6: c.WireGuard.BootstrapIPsV6}, 0)
-	if err != nil {
-		return fmt.Errorf("policy compile: %w", err)
+	requiredBins := []string{"nft", "wg", "ip"}
+	if c.Integrations.DockerEnabled {
+		requiredBins = append(requiredBins, "docker")
 	}
-	for _, bin := range []string{"nft", "wg", "ip"} {
+	for _, bin := range requiredBins {
 		if _, err := exec.LookPath(bin); err != nil {
 			return fmt.Errorf("required command %s is missing", bin)
 		}
@@ -447,7 +469,7 @@ func doctor(path string) error {
 	}
 	if c.WireGuard.ConfigPath != "" {
 		if err := secureSecretFile(c.WireGuard.ConfigPath); err != nil {
-			return fmt.Errorf("WireGuard configuration: %w", err)
+			return fmt.Errorf("wireguard configuration: %w", err)
 		}
 	}
 	if containerConfigured {
@@ -456,11 +478,41 @@ func doctor(path string) error {
 			return errors.New("container networking is configured but net.ipv4.ip_forward is not 1")
 		}
 	}
-	if err := nft.New(nil).CheckCandidate(context.Background(), artifact.Script); err != nil {
-		return fmt.Errorf("kernel candidate validation failed: %w", err)
+	var dockerV4, dockerV6 []string
+	if c.Integrations.DockerEnabled {
+		observer := containers.Observer{Expected: c.DockerNetworks}
+		ok, detail, err := observer.FirewallPolicy()
+		if err != nil {
+			return fmt.Errorf("docker firewall policy inspection: %w", err)
+		}
+		if !ok {
+			return fmt.Errorf("docker firewall policy is incompatible: %s", detail)
+		}
+		networks, err := observer.Networks(context.Background())
+		if err != nil {
+			return fmt.Errorf("docker stable topology observation: %w", err)
+		}
+		for _, network := range networks {
+			prefix, err := netip.ParsePrefix(network.CIDR)
+			if err != nil {
+				return fmt.Errorf("docker returned invalid subnet %q", network.CIDR)
+			}
+			if prefix.Addr().Is4() {
+				dockerV4 = append(dockerV4, prefix.String())
+			} else {
+				dockerV6 = append(dockerV6, prefix.String())
+			}
+		}
 	}
-	if err := (recovery.SystemdGuard{StateDB: c.State.Database}).Verify(context.Background()); err != nil {
-		return fmt.Errorf("safe-apply rollback guard: %w", err)
+	artifact, err := compiler.Compile(compiler.Input{Policy: e, BootstrapV4: c.WireGuard.BootstrapIPs, BootstrapV6: c.WireGuard.BootstrapIPsV6, DockerNets: dockerV4, DockerNets6: dockerV6}, 0)
+	if err != nil {
+		return fmt.Errorf("policy compile: %w", err)
+	}
+	backend := nft.New(nil)
+	guard := recovery.SystemdGuard{StateDir: c.State.Directory}
+	foreignAudit, err := doctorProtectedChecks(context.Background(), state.DefaultMutationLockDir, backend, artifact.Script, guard.Preflight, guard.Revalidate)
+	if err != nil {
+		return err
 	}
 	fmt.Println("[ok] configuration schema and semantics")
 	fmt.Println("[ok] deterministic policy compilation")
@@ -492,8 +544,37 @@ func doctor(path string) error {
 	}
 	fmt.Println("[ok] independent rollback timer enabled and active")
 	fmt.Println("[ok] exact candidate passed nft --check")
+	fmt.Printf("[ok] foreign provenance audit scope=%s rules=%d mask=0x%08x\n", foreignAudit.CollisionScope, foreignAudit.ForeignRules, foreignAudit.ReservedMask)
 	fmt.Println("[ok] no firewall changes were made")
 	return nil
+}
+
+func doctorProtectedChecks(ctx context.Context, lockDir string, backend *nft.Backend, script string, preflight, revalidate func(context.Context) error) (nft.ForeignProvenanceAudit, error) {
+	if backend == nil || preflight == nil || revalidate == nil {
+		return nft.ForeignProvenanceAudit{}, errors.New("doctor safe-apply checks are not configured")
+	}
+	// Starting the rollback service may itself take the mutation flock, so its
+	// executable preflight must complete before this process acquires the flock.
+	if err := preflight(ctx); err != nil {
+		return nft.ForeignProvenanceAudit{}, fmt.Errorf("safe-apply rollback guard preflight: %w", err)
+	}
+	release, err := state.AcquireMutationLock(ctx, lockDir)
+	if err != nil {
+		return nft.ForeignProvenanceAudit{}, fmt.Errorf("cross-process audit lock: %w", err)
+	}
+	defer release()
+	lockedCtx := state.WithMutationLock(ctx)
+	foreignAudit, err := backend.AuditForeignProvenanceMask(lockedCtx)
+	if err != nil {
+		return nft.ForeignProvenanceAudit{}, err
+	}
+	if err := backend.CheckCandidate(lockedCtx, script); err != nil {
+		return nft.ForeignProvenanceAudit{}, fmt.Errorf("kernel candidate validation failed: %w", err)
+	}
+	if err := revalidate(lockedCtx); err != nil {
+		return nft.ForeignProvenanceAudit{}, fmt.Errorf("safe-apply rollback guard locked revalidation: %w", err)
+	}
+	return foreignAudit, nil
 }
 
 func wireGuardMark(ctx context.Context, interfaceName string) (uint64, error) {

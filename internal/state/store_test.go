@@ -1,6 +1,7 @@
 package state
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"database/sql"
@@ -13,11 +14,22 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 )
 
 func testChecksum(text string) string {
 	sum := sha256.Sum256([]byte(text))
 	return hex.EncodeToString(sum[:])
+}
+
+func testGenerationMetadata(t *testing.T) GenerationMetadata {
+	t.Helper()
+	bootID, err := CurrentBootID()
+	if err != nil {
+		t.Fatal(err)
+	}
+	return GenerationMetadata{BootID: bootID, Provenance: []provenance.Assignment{{Name: "eth0", ID: 1}}}
 }
 
 func TestClaimProvenanceUnion(t *testing.T) {
@@ -179,16 +191,11 @@ func TestMigrationAndCorruptDatabase(t *testing.T) {
 	}
 }
 
-func TestAuditRowsArePrunedDuringMigrationAndOnInsert(t *testing.T) {
+func TestAuditRowsArePrunedOnInsert(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(secureTestDir(t), "state.db")
 	store, err := Open(ctx, path)
 	if err != nil {
-		t.Fatal(err)
-	}
-	// Model a v3 database whose audit table grew before the bound existed.
-	if _, err := store.DB.ExecContext(ctx, `DROP TRIGGER audit_prune_after_insert; DROP TABLE runtime_claim_publication; DELETE FROM integration_state WHERE name='runtime/claims'; DELETE FROM schema_migrations WHERE version>=4`); err != nil {
-		store.Close()
 		t.Fatal(err)
 	}
 	insertAuditRows := func(count int) {
@@ -214,14 +221,6 @@ func TestAuditRowsArePrunedDuringMigrationAndOnInsert(t *testing.T) {
 		}
 	}
 	insertAuditRows(MaxAuditRows + 7)
-	if err := store.Close(); err != nil {
-		t.Fatal(err)
-	}
-
-	store, err = Open(ctx, path)
-	if err != nil {
-		t.Fatal(err)
-	}
 	defer store.Close()
 	assertAuditBound := func() {
 		t.Helper()
@@ -308,7 +307,7 @@ func TestClaimPublicationRevisionTracksEveryDurableMutation(t *testing.T) {
 	}
 }
 
-func TestMigrationFiveInitializesExistingClaimsAsUnpublished(t *testing.T) {
+func TestWritableOpenRejectsLegacySchemaWithoutMigration(t *testing.T) {
 	ctx := context.Background()
 	path := filepath.Join(secureTestDir(t), "state.db")
 	store, err := Open(ctx, path)
@@ -319,25 +318,28 @@ func TestMigrationFiveInitializesExistingClaimsAsUnpublished(t *testing.T) {
 		store.Close()
 		t.Fatal(err)
 	}
-	if _, err := store.DB.ExecContext(ctx, `DROP TABLE runtime_claim_publication; DELETE FROM integration_state WHERE name='runtime/claims'; DELETE FROM schema_migrations WHERE version=5`); err != nil {
+	if _, err := store.DB.ExecContext(ctx, `DROP TABLE runtime_claim_publication; DELETE FROM integration_state WHERE name='runtime/claims'; DELETE FROM schema_migrations WHERE version>=5`); err != nil {
 		store.Close()
 		t.Fatal(err)
 	}
 	if err := store.Close(); err != nil {
 		t.Fatal(err)
 	}
-	store, err = Open(ctx, path)
+	before, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
 	}
-	defer store.Close()
-	publication, err := store.ClaimPublicationState(ctx)
-	if err != nil || publication.DesiredRevision != 1 || publication.AppliedRevision != 0 {
-		t.Fatalf("v4 migration trusted unknown live runtime state: %#v err=%v", publication, err)
+	store, err = Open(ctx, path)
+	if err == nil {
+		store.Close()
+		t.Fatal("legacy schema was silently migrated")
 	}
-	integration, err := store.IntegrationState(ctx, "runtime/claims")
-	if err != nil || integration.Status != "degraded" || integration.EntryCount != 1 {
-		t.Fatalf("v4 migration did not expose existing claims as degraded: %#v err=%v", integration, err)
+	after, readErr := os.ReadFile(path)
+	if readErr != nil {
+		t.Fatal(readErr)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("legacy database main image changed during rejected open")
 	}
 }
 
@@ -394,6 +396,18 @@ func TestOpenRejectsNewerSchemaAndDSNFilename(t *testing.T) {
 		store.Close()
 		t.Fatal("SQLite DSN characters in state filename accepted")
 	}
+	percentPath := filepath.Join(dir, "state%66.db")
+	if err := os.WriteFile(percentPath, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if store, err := Open(context.Background(), percentPath); err == nil {
+		store.Close()
+		t.Fatal("percent-encoded writable state path accepted")
+	}
+	if store, err := OpenReadOnly(context.Background(), percentPath); err == nil {
+		store.Close()
+		t.Fatal("percent-encoded read-only state path accepted")
+	}
 	path := filepath.Join(dir, "future.db")
 	db, err := sql.Open("sqlite", path)
 	if err != nil {
@@ -410,6 +424,33 @@ func TestOpenRejectsNewerSchemaAndDSNFilename(t *testing.T) {
 		store.Close()
 		t.Fatal("newer state schema accepted")
 	}
+	unversionedPath := filepath.Join(dir, "unversioned.db")
+	unversioned, err := sql.Open("sqlite", unversionedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := unversioned.Exec(`CREATE TABLE legacy_state(value TEXT)`); err != nil {
+		unversioned.Close()
+		t.Fatal(err)
+	}
+	if err := unversioned.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(unversionedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store, err := Open(context.Background(), unversionedPath); err == nil {
+		store.Close()
+		t.Fatal("nonempty unversioned database was treated as fresh")
+	}
+	after, err := os.ReadFile(unversionedPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("rejected unversioned database main image changed")
+	}
 }
 
 func TestNegativeGenerationReferenceFailsClosed(t *testing.T) {
@@ -420,7 +461,7 @@ func TestNegativeGenerationReferenceFailsClosed(t *testing.T) {
 		t.Fatal(err)
 	}
 	script := "table inet nftfw_filter { }\n"
-	if err := s.SaveGeneration(ctx, 1, testChecksum(script), script, nil, nil); err != nil {
+	if err := s.SaveGenerationWithMetadata(ctx, 1, testChecksum(script), script, nil, nil, testGenerationMetadata(t)); err != nil {
 		t.Fatal(err)
 	}
 	if err := s.Close(); err != nil {
@@ -460,13 +501,18 @@ func TestGenerationIntegrityAndSQLiteBackup(t *testing.T) {
 		t.Fatalf("state database mode is not 0600: info=%v err=%v", info, err)
 	}
 	script := "table inet nftfw_filter { }\n"
-	if err := s.SaveGeneration(ctx, 0, testChecksum(script), script, nil, nil); err == nil {
+	emptyMetadata := testGenerationMetadata(t)
+	emptyMetadata.Provenance = nil
+	if err := s.SaveGenerationWithMetadata(ctx, 1, testChecksum(script), script, nil, nil, emptyMetadata); err == nil || !strings.Contains(err.Error(), "provenance manifest is required") {
+		t.Fatalf("empty production provenance manifest accepted: %v", err)
+	}
+	if err := s.SaveGenerationWithMetadata(ctx, 0, testChecksum(script), script, nil, nil, testGenerationMetadata(t)); err == nil {
 		t.Fatal("zero generation id accepted")
 	}
-	if err := s.SaveGeneration(ctx, 1, strings.Repeat("0", 64), script, nil, nil); err == nil {
+	if err := s.SaveGenerationWithMetadata(ctx, 1, strings.Repeat("0", 64), script, nil, nil, testGenerationMetadata(t)); err == nil {
 		t.Fatal("generation with mismatched checksum accepted")
 	}
-	if err := s.SaveGeneration(ctx, 1, testChecksum(script), script, nil, nil); err != nil {
+	if err := s.SaveGenerationWithMetadata(ctx, 1, testChecksum(script), script, nil, nil, testGenerationMetadata(t)); err != nil {
 		t.Fatal(err)
 	}
 	g, err := s.Pending(ctx)
@@ -534,6 +580,34 @@ func TestOpenRejectsSymlinkedStatePaths(t *testing.T) {
 	if store, err := Open(context.Background(), dbLink); err == nil {
 		store.Close()
 		t.Fatal("symlinked state database accepted")
+	}
+}
+
+func TestGenerationReadsAndWritesRejectSymlinkedParent(t *testing.T) {
+	ctx := context.Background()
+	root := secureTestDir(t)
+	store, err := Open(ctx, filepath.Join(root, "generation-state", "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	external := secureTestDir(t)
+	if err := os.Symlink(external, filepath.Join(root, "generations")); err != nil {
+		t.Fatal(err)
+	}
+	script := "table inet nftfw_filter { }\n"
+	if err := store.SaveGenerationWithMetadata(ctx, 1, testChecksum(script), script, nil, nil, testGenerationMetadata(t)); err == nil || !strings.Contains(err.Error(), "non-symlink") {
+		t.Fatalf("generation write accepted symlinked parent: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(external, fmt.Sprintf("%020d.snapshot.json", 1)), []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := LoadGenerationSnapshot(root, 1); err == nil || !strings.Contains(err.Error(), "non-symlink") {
+		t.Fatalf("snapshot load accepted symlinked parent: %v", err)
+	}
+	generation := &Generation{ID: 1, Checksum: testChecksum(script), ScriptPath: filepath.Join(root, "generations", fmt.Sprintf("%020d.nft", 1))}
+	if _, err := store.ReadScript(generation); err == nil || !strings.Contains(err.Error(), "non-symlink") {
+		t.Fatalf("script read accepted symlinked parent: %v", err)
 	}
 }
 

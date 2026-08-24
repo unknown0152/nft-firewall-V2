@@ -1,0 +1,13 @@
+{
+  "schema": "nftfw.r2-attestation.v1",
+  "status": "R2_PASSED_TAG_BUILD_AUTHORIZED",
+  "target_version": "2.0.2",
+  "git_commit": "@EXACT_40_HEX_GIT_COMMIT@",
+  "stage_r_candidate_comparison_sha256": "@EXACT_64_HEX_COMPARISON_SHA256@",
+  "privileged_evidence": {
+    "package_boot_network_docker_ovpn": "PASS"
+  },
+  "privileged_evidence_manifest_sha256": "@EXACT_64_HEX_PRIVILEGED_EVIDENCE_MANIFEST_SHA256@",
+  "publication_authorized": false,
+  "deployment_authorized": false
+}

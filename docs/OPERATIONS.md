@@ -1,5 +1,9 @@
 # Operations
 
+The current 2.0.2 source is a non-deployable Stage R candidate. These commands
+describe future operation after final acceptance; none was run on the NUC as
+part of Stage R.
+
 ## Command reference
 
 | Command | Purpose |
@@ -81,7 +85,7 @@ between block and allow ownership.
 sudo nftfw status --json | jq .
 sudo nftfw health
 sudo nftfw audit
-journalctl -u nftfw-early -u nftfwd -u nftfw-rollback.service -u nftfw-web
+journalctl -u nftfw-early -u nftfw-enforcement-ready -u nftfwd -u nftfw-rollback.service -u nftfw-web
 ```
 
 Status includes active/pending generation, checksum, kill-switch state,
@@ -101,12 +105,15 @@ ssh -L 8787:127.0.0.1:8787 <host>
 
 ```bash
 sudo install -d -m 0700 /var/lib/nftfw/backups
-sudo nftfw state backup /var/lib/nftfw/backups/state-$(date -u +%Y%m%dT%H%M%SZ).db
-sudo nftfw state verify --database /var/lib/nftfw/state.db
+sudo nftfw state backup /var/lib/nftfw/backups/state-$(date -u +%Y%m%dT%H%M%SZ).db \
+  --database /var/lib/nftfw/generation-state/state.db
+sudo nftfw state verify --database /var/lib/nftfw/generation-state/state.db
 ```
 
 The backup destination must be absolute, new, and beneath a protected
-root-owned directory. The online SQLite backup is transactionally consistent.
+root-owned directory. The online generation-database backup is transactionally
+consistent. It does not back up or authorize replacement of the separate
+monotonic `/var/lib/nftfw/provenance-ledger.db`.
 
 ## Drift policy
 

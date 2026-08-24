@@ -64,6 +64,71 @@ type containerSetRunner struct {
 	replacementErr error
 }
 
+type runtimeSetLockRunner struct {
+	mutationCalls int
+}
+
+func (r *runtimeSetLockRunner) Run(_ context.Context, args ...string) (string, string, error) {
+	if len(args) >= 3 && args[0] == "-j" && args[1] == "list" && args[2] == "tables" {
+		return `{"nftables":[{"table":{"family":"inet","name":"nftfw_filter"}},{"table":{"family":"ip","name":"nftfw_nat"}}]}`, "", nil
+	}
+	if len(args) > 0 && args[0] == "--file" {
+		r.mutationCalls++
+	}
+	return "", "", nil
+}
+
+func TestPublicRuntimeSetMutationsWaitForGlobalLock(t *testing.T) {
+	store := openRuntimeTestStore(t)
+	lockDir := secureRuntimeTestDir(t)
+	runner := &runtimeSetLockRunner{}
+	runtime := &Runtime{Store: store, Backend: nft.New(runner), MutationLockDir: lockDir}
+	release, err := state.AcquireMutationLock(context.Background(), lockDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	for _, test := range []struct {
+		name string
+		call func(context.Context) error
+	}{
+		{name: "endpoints", call: func(ctx context.Context) error { _, err := runtime.RefreshEndpoints(ctx); return err }},
+		{name: "claims", call: func(ctx context.Context) error { _, err := runtime.RefreshClaimSets(ctx); return err }},
+		{name: "containers", call: func(ctx context.Context) error { _, err := runtime.RefreshContainerSets(ctx); return err }},
+		{name: "restore", call: runtime.RestoreRuntimeState},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Millisecond)
+			defer cancel()
+			if err := test.call(ctx); err == nil || !strings.Contains(err.Error(), "context deadline exceeded") {
+				t.Fatalf("public mutation bypassed held global lock: %v", err)
+			}
+		})
+	}
+	if runner.mutationCalls != 0 {
+		t.Fatalf("blocked public paths reached nft mutation: %d", runner.mutationCalls)
+	}
+}
+
+func TestRestoreRuntimeStateReusesGenuineHeldLockContext(t *testing.T) {
+	store := openRuntimeTestStore(t)
+	lockDir := secureRuntimeTestDir(t)
+	runner := &runtimeSetLockRunner{}
+	runtime := &Runtime{Store: store, Backend: nft.New(runner), MutationLockDir: lockDir}
+	release, err := state.AcquireMutationLock(context.Background(), lockDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	ctx := state.WithMutationLock(context.WithValue(context.Background(), claimPublicationLockContextKey{}, true))
+	if err := runtime.RestoreRuntimeState(ctx); err != nil {
+		t.Fatalf("restore self-deadlocked or failed under genuine held lock: %v", err)
+	}
+	if runner.mutationCalls != 3 {
+		t.Fatalf("restore did not publish all mutable set classes: calls=%d", runner.mutationCalls)
+	}
+}
+
 func (r containerSetRunner) Run(_ context.Context, args ...string) (string, string, error) {
 	if len(args) >= 3 && args[0] == "-j" && args[1] == "list" && args[2] == "tables" {
 		if r.inspectionErr != nil {

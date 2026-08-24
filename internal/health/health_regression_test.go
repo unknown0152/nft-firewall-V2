@@ -37,10 +37,11 @@ func newHealthyProvider(t *testing.T) (*state.Store, Provider, string) {
 	script := "add table inet nftfw_filter\n"
 	sum := sha256.Sum256([]byte(script))
 	checksum := hex.EncodeToString(sum[:])
-	if err := store.SaveGeneration(ctx, 1, checksum, script, nil, nil); err != nil {
+	saveHealthGeneration(t, store, 1, checksum, script)
+	if err := store.SetObservedHash(ctx, 1, fingerprint); err != nil {
 		t.Fatal(err)
 	}
-	if err := store.SetObservedHash(ctx, 1, fingerprint); err != nil {
+	if err := store.MarkApplied(ctx, 1); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Commit(ctx, 1); err != nil {

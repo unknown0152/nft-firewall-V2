@@ -2,14 +2,18 @@
 Description=NFT Firewall V2 early boot enforcement restore
 Documentation=file:/usr/share/doc/nft-firewall-v2/RECOVERY.md
 After=local-fs.target
-Before=network-pre.target nftfwd.service
+Before=network-pre.target nftfwd.service nftfw-enforcement-ready.service
 ConditionPathExists=/var/lib/nftfw/enforcement-enabled
 
 [Service]
 Type=oneshot
-ExecStart=/usr/lib/nftfw/nftfwd --restore-active --state-dir /var/lib/nftfw
+ExecStart=/usr/lib/nftfw/nftfwd --restore-active --recover-commit-publication --resolve-stale-pending --state-dir /var/lib/nftfw
+RemainAfterExit=yes
+RuntimeDirectory=nftfw
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 User=root
-Group=root
+Group=nftfw-web
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -26,7 +30,8 @@ MemoryDenyWriteExecute=yes
 RestrictNamespaces=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6 AF_NETLINK
-ReadOnlyPaths=/var/lib/nftfw
+ReadWritePaths=/var/lib/nftfw/generation-state
+ReadOnlyPaths=/etc/nftfw /var/lib/nftfw/provenance-ledger.db -/var/lib/nftfw/provenance-ledger.db-journal -/var/lib/nftfw/provenance-ledger.db-wal -/var/lib/nftfw/provenance-ledger.db-shm /var/lib/nftfw/generations /var/lib/nftfw/backups -/var/lib/nftfw/active.snapshot.json /var/lib/nftfw/enforcement-enabled
 CapabilityBoundingSet=CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_ADMIN
 

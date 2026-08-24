@@ -3,15 +3,10 @@ package reconcile
 
 import (
 	"context"
-	"crypto/sha256"
 	"database/sql"
-	"encoding/hex"
 	"errors"
 	"fmt"
-	"os"
-	"path/filepath"
 	"sync"
-	"syscall"
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/compiler"
@@ -20,15 +15,23 @@ import (
 )
 
 type Manager struct {
-	Backend     *nft.Backend
-	Store       *state.Store
-	SafeTTL     time.Duration
-	Now         func() time.Time
-	HealthCheck func(context.Context) error
-	SafeGuard   func(context.Context) error
-	PostRestore func(context.Context) error
-	mu          sync.Mutex
+	Backend          *nft.Backend
+	Store            *state.Store
+	SafeTTL          time.Duration
+	Now              func() time.Time
+	HealthCheck      func(context.Context) error
+	SafeGuard        func(context.Context) error
+	SafeGuardLocked  func(context.Context) error
+	ForeignMarkGuard func(context.Context) error
+	PostRestore      func(context.Context) error
+	// MutationLockDir is the shared volatile runtime directory used by every
+	// daemon, early-recovery, verifier-adjacent, and timer process. Production
+	// callers set it to state.DefaultMutationLockDir.
+	MutationLockDir string
+	mu              sync.Mutex
 }
+
+type safeGuardPreflightContextKey struct{}
 
 type Result struct {
 	Generation uint64
@@ -44,6 +47,46 @@ const (
 	emergencyDenyAttemptTimeout  = 8 * time.Second
 )
 
+func (m *Manager) auditForeignMarkOwnership(ctx context.Context) error {
+	if m.ForeignMarkGuard == nil {
+		return errors.New("foreign conntrack-mark ownership guard is unavailable")
+	}
+	if err := m.ForeignMarkGuard(ctx); err != nil {
+		return fmt.Errorf("foreign conntrack-mark ownership audit: %w", err)
+	}
+	return nil
+}
+
+// installOwnedGeneration is the single mutation seam for a compiled or
+// restored generation. Every caller already holds the common process mutation
+// lock; this final audit is deliberately adjacent to Backend.Apply. It cannot
+// serialize an independent privileged nft writer, which remains an explicit
+// trusted-root/runtime-writer boundary.
+func (m *Manager) installOwnedGeneration(ctx context.Context, script string) error {
+	if err := m.auditForeignMarkOwnership(ctx); err != nil {
+		return err
+	}
+	return m.Backend.Apply(ctx, script)
+}
+
+// PreflightSafeApply starts and proves the independent rollback path before a
+// caller takes the common process mutation lock. The returned context is the
+// only marker Apply accepts as proof that this exact preflight completed.
+func (m *Manager) PreflightSafeApply(ctx context.Context) (context.Context, error) {
+	if m == nil || m.SafeGuard == nil || m.SafeGuardLocked == nil {
+		return nil, errors.New("safe apply requires preflight and locked rollback-guard verification")
+	}
+	if err := m.SafeGuard(ctx); err != nil {
+		return nil, fmt.Errorf("safe apply refused: %w", err)
+	}
+	return context.WithValue(ctx, safeGuardPreflightContextKey{}, true), nil
+}
+
+func safeGuardPreflightComplete(ctx context.Context) bool {
+	complete, _ := ctx.Value(safeGuardPreflightContextKey{}).(bool)
+	return complete
+}
+
 func mutationRecoveryContext(ctx context.Context) (context.Context, context.CancelFunc) {
 	return context.WithTimeout(context.WithoutCancel(ctx), mutationRecoveryTimeout)
 }
@@ -57,20 +100,31 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 	if err := m.requireNoPending(ctx); err != nil {
 		return Result{}, err
 	}
-	if safe {
-		if m.SafeGuard == nil {
-			return Result{}, errors.New("safe apply requires an independent rollback guard")
+	if safe && !safeGuardPreflightComplete(ctx) {
+		preflightCtx, err := m.PreflightSafeApply(ctx)
+		if err != nil {
+			return Result{}, err
 		}
-		if err := m.SafeGuard(ctx); err != nil {
-			return Result{}, fmt.Errorf("safe apply refused: %w", err)
-		}
+		ctx = preflightCtx
 	}
 	release, err := m.acquireProcessLock(ctx)
 	if err != nil {
 		return Result{}, err
 	}
 	defer release()
+	ctx = state.WithMutationLock(ctx)
 	if err := m.requireNoPending(ctx); err != nil {
+		return Result{}, err
+	}
+	if safe {
+		if m.SafeGuardLocked == nil {
+			return Result{}, errors.New("safe apply requires locked rollback-guard verification")
+		}
+		if err := m.SafeGuardLocked(ctx); err != nil {
+			return Result{}, fmt.Errorf("safe apply locked revalidation refused: %w", err)
+		}
+	}
+	if err := m.auditForeignMarkOwnership(ctx); err != nil {
 		return Result{}, err
 	}
 	now := time.Now
@@ -96,10 +150,15 @@ func (m *Manager) Apply(ctx context.Context, artifact compiler.Artifact, safe bo
 		d := now().UTC().Add(ttl)
 		deadline = &d
 	}
-	if err := m.Store.SaveGeneration(ctx, artifact.Generation, artifact.Checksum, artifact.Script, prevID, deadline); err != nil {
+	bootID, err := state.CurrentBootID()
+	if err != nil {
+		return Result{}, fmt.Errorf("read creating boot id: %w", err)
+	}
+	metadata := state.GenerationMetadata{BootID: bootID, Provenance: artifact.Provenance}
+	if err := m.Store.SaveGenerationWithMetadata(ctx, artifact.Generation, artifact.Checksum, artifact.Script, prevID, deadline, metadata); err != nil {
 		return Result{}, fmt.Errorf("persist pending generation: %w", err)
 	}
-	if err := m.Backend.Apply(ctx, artifact.Script); err != nil {
+	if err := m.installOwnedGeneration(ctx, artifact.Script); err != nil {
 		_ = m.Store.Audit(ctx, "system", "generation_apply_failed", fmt.Sprintf("generation=%d error=%v", artifact.Generation, err))
 		if nft.MutationAttempted(err) {
 			recoveryCtx, cancel := mutationRecoveryContext(ctx)
@@ -186,7 +245,7 @@ func (m *Manager) restore(ctx context.Context, previous *state.Generation) error
 	if err != nil {
 		return err
 	}
-	if err := m.Backend.Apply(ctx, script); err != nil {
+	if err := m.installOwnedGeneration(ctx, script); err != nil {
 		return err
 	}
 	if err := m.recordFingerprint(ctx, previous.ID); err != nil {
@@ -233,6 +292,7 @@ func (m *Manager) Commit(ctx context.Context, id uint64) error {
 		return err
 	}
 	defer release()
+	ctx = state.WithMutationLock(ctx)
 	pending, err := m.Store.Pending(ctx)
 	if err != nil {
 		return err
@@ -273,27 +333,65 @@ func (m *Manager) commitLocked(ctx context.Context, id uint64) error {
 	if err != nil {
 		return err
 	}
-	script, err := m.Store.ReadScript(g)
+	if g.Status != "applied" {
+		return fmt.Errorf("generation %d status %s cannot be committed", id, g.Status)
+	}
+	snapshot, err := state.LoadGenerationSnapshot(m.Store.Dir, id)
 	if err != nil {
-		return fmt.Errorf("read committed generation: %w", err)
+		return fmt.Errorf("read immutable generation snapshot: %w", err)
 	}
-	if err := m.Store.Commit(ctx, id); err != nil {
-		recoveryCtx, cancel := mutationRecoveryContext(ctx)
-		defer cancel()
-		rollbackErr := m.rollbackLocked(recoveryCtx, id)
-		if rollbackErr != nil {
-			return fmt.Errorf("commit generation: %w; rollback also failed: %v", err, rollbackErr)
-		}
-		return fmt.Errorf("commit generation: %w; generation was rolled back", err)
+	current, exists, err := state.ReadEnforcementPointer(m.Store.Dir)
+	if err != nil {
+		return err
 	}
-	if err := m.Store.PublishActive(script, g.Checksum); err != nil {
-		recoveryCtx, cancel := mutationRecoveryContext(ctx)
-		defer cancel()
-		rollbackErr := m.rollbackLocked(recoveryCtx, id)
-		if rollbackErr != nil {
-			return fmt.Errorf("publish active boot snapshot: %w; rollback also failed: %v", err, rollbackErr)
+	if snapshot.Previous == nil {
+		if exists {
+			return errors.New("first commit requires an absent enforcement pointer")
 		}
-		return fmt.Errorf("publish active boot snapshot: %w; generation was rolled back", err)
+	} else if !exists || !snapshot.Previous.Equal(current) {
+		return errors.New("current enforcement pointer does not match generation's recorded predecessor")
+	}
+	// A foreign privileged writer can claim the reserved conntrack-mark byte
+	// during the safe-apply TTL. Re-audit while the cooperative mutation lock is
+	// held and before either durable commit preparation or pointer publication.
+	// The final deadline read must remain the last I/O before the pointer rename.
+	if err := m.auditForeignMarkOwnership(ctx); err != nil {
+		return err
+	}
+	if _, err := m.Store.PrepareCommit(ctx, id); err != nil {
+		return fmt.Errorf("durably prepare generation commit: %w", err)
+	}
+	preparedPointer, err := state.PrepareEnforcementPointer(m.Store.Dir, snapshot.Pointer())
+	if err != nil {
+		return fmt.Errorf("prepare enforcement pointer after durable commit state: %w", err)
+	}
+	defer state.CancelPreparedPointer(preparedPointer)
+	// This is the final persisted-deadline read. Until the rename below, only
+	// the injected/userspace clock is consulted; no intervening I/O occurs.
+	deadline, err := m.Store.PreparedDeadline(ctx, id)
+	if err != nil {
+		return fmt.Errorf("read final commit deadline: %w", err)
+	}
+	now := time.Now
+	if m.Now != nil {
+		now = m.Now
+	}
+	if deadline != nil && !now().UTC().Before(*deadline) {
+		if err := state.CancelPreparedPointer(preparedPointer); err != nil {
+			return fmt.Errorf("generation %d expired; cancel prepared pointer: %w", id, err)
+		}
+		if err := m.rollbackLocked(ctx, id); err != nil {
+			return fmt.Errorf("generation %d expired and rollback failed: %w", id, err)
+		}
+		return fmt.Errorf("generation %d expired and was rolled back", id)
+	}
+	if err := state.PublishPreparedPointer(preparedPointer); err != nil {
+		return fmt.Errorf("publish enforcement pointer: %w", err)
+	}
+	if err := m.Store.FinalizeCommit(ctx, id); err != nil {
+		// The pointer is the linearization point. Never roll it back after a
+		// successful rename; recovery idempotently finalizes commit_prepared.
+		return fmt.Errorf("enforcement pointer published; generation finalization requires recovery: %w", err)
 	}
 	return nil
 }
@@ -309,10 +407,16 @@ func (m *Manager) Rollback(ctx context.Context, id uint64) error {
 		return err
 	}
 	defer release()
+	ctx = state.WithMutationLock(ctx)
 	return m.rollbackLocked(ctx, id)
 }
 
 func (m *Manager) rollbackLocked(ctx context.Context, id uint64) error {
+	// Gate even idempotent/no-install rollback decisions. A foreign reservation
+	// collision makes the resulting enforcement state unsafe to authorize.
+	if err := m.auditForeignMarkOwnership(ctx); err != nil {
+		return err
+	}
 	g, err := generationByID(ctx, m.Store, id)
 	if err != nil {
 		return err
@@ -321,15 +425,37 @@ func (m *Manager) rollbackLocked(ctx context.Context, id uint64) error {
 		return nil
 	}
 	if g.Status == "committed" {
-		latest, latestErr := m.Store.LastKnownGood(ctx)
-		if latestErr != nil {
-			return latestErr
-		}
-		if latest.ID != id {
-			return fmt.Errorf("generation %d is historical; active committed generation is %d", id, latest.ID)
-		}
-	} else if g.Status != "pending" && g.Status != "applied" {
+		return fmt.Errorf("generation %d is committed; rollback is restricted to pending safe-apply generations", id)
+	}
+	if g.Status != "pending" && g.Status != "applied" && g.Status != "commit_prepared" {
 		return fmt.Errorf("generation %d has unsupported rollback status %s", id, g.Status)
+	}
+	snapshot, err := state.LoadVerifiedGenerationSnapshot(m.Store.Dir, id)
+	if err != nil {
+		return fmt.Errorf("load verified rollback generation snapshot: %w", err)
+	}
+	if err := m.validateGenerationSnapshot(ctx, g, snapshot, g.Status == "commit_prepared"); err != nil {
+		return fmt.Errorf("validate rollback generation snapshot: %w", err)
+	}
+	currentPointer, pointerExists, err := state.ReadEnforcementPointer(m.Store.Dir)
+	if err != nil {
+		return err
+	}
+	newPointer := snapshot.Pointer()
+	if g.Status == "commit_prepared" && newPointer.Equal(currentPointer) {
+		// The atomic pointer rename won. A timer or operator racing afterward
+		// may only finalize; it must never move the pointer back.
+		if err := m.Store.FinalizeCommit(ctx, id); err != nil {
+			return fmt.Errorf("finalize already-published generation %d: %w", id, err)
+		}
+		return fmt.Errorf("generation %d commit pointer was already published", id)
+	}
+	if snapshot.Previous == nil {
+		if pointerExists {
+			return errors.New("pending first generation has an unexpected enforcement pointer")
+		}
+	} else if !pointerExists || !snapshot.Previous.Equal(currentPointer) {
+		return errors.New("pending generation predecessor pointer is ambiguous")
 	}
 	firstPendingWithoutEstablishedOwnership := g.PreviousID == nil && g.Status == "pending"
 	if firstPendingWithoutEstablishedOwnership {
@@ -343,38 +469,29 @@ func (m *Manager) rollbackLocked(ctx context.Context, id uint64) error {
 	}
 	var previous *state.Generation
 	var previousScript string
-	if g.PreviousID == nil && !firstPendingWithoutEstablishedOwnership {
-		fallbackChecksum := sha256.Sum256([]byte(nft.EmergencyDenyScript))
-		if err := m.Store.PublishActive(nft.EmergencyDenyScript, hex.EncodeToString(fallbackChecksum[:])); err != nil {
-			return fmt.Errorf("publish first-generation rollback fallback: %w", err)
-		}
-	} else if g.PreviousID != nil {
+	if g.PreviousID != nil {
 		previous, err = generationByID(ctx, m.Store, *g.PreviousID)
 		if err != nil {
 			return err
 		}
-		previousScript, err = m.Store.ReadScript(previous)
-		if err != nil {
-			return err
+		if snapshot.Previous == nil || previous.Status != "committed" {
+			return errors.New("rollback predecessor is not the exact committed generation")
 		}
-		// Publish the rollback target before changing the kernel. A crash at any
-		// later point will therefore restore the safer previous generation.
-		if err := m.Store.PublishActive(previousScript, previous.Checksum); err != nil {
-			return fmt.Errorf("publish rollback boot snapshot: %w", err)
+		previousSnapshot, snapshotErr := state.EnsurePublishedGenerationDurable(m.Store.Dir, *snapshot.Previous)
+		if snapshotErr != nil {
+			return fmt.Errorf("load durable rollback predecessor snapshot: %w", snapshotErr)
 		}
+		if err := m.validateGenerationSnapshot(ctx, previous, previousSnapshot, false); err != nil {
+			return fmt.Errorf("validate rollback predecessor snapshot: %w", err)
+		}
+		previousScript = previousSnapshot.Script
 	}
 	if previous != nil {
-		if err := m.Backend.Apply(ctx, previousScript); err != nil {
-			if recoveryErr := m.restoreCommittedAfterFailedRollback(ctx, g); recoveryErr != nil {
-				return errors.Join(err, fmt.Errorf("restore committed generation after failed rollback: %w", recoveryErr))
-			}
+		if err := m.installOwnedGeneration(ctx, previousScript); err != nil {
 			return err
 		}
 	} else if !firstPendingWithoutEstablishedOwnership {
 		if err := m.Backend.DestroyOwned(ctx); err != nil {
-			if recoveryErr := m.restoreCommittedAfterFailedRollback(ctx, g); recoveryErr != nil {
-				return errors.Join(err, fmt.Errorf("restore committed generation after failed rollback: %w", recoveryErr))
-			}
 			return err
 		}
 	}
@@ -386,39 +503,17 @@ func (m *Manager) rollbackLocked(ctx context.Context, id uint64) error {
 		}
 	}
 	if err := m.Store.MarkRolledBack(recoveryCtx, id); err != nil {
-		if recoveryErr := m.restoreCommittedAfterFailedRollback(recoveryCtx, g); recoveryErr != nil {
-			return errors.Join(err, fmt.Errorf("restore committed generation after rollback bookkeeping failure: %w", recoveryErr))
-		}
 		return err
 	}
 	if previous == nil {
-		// Clear only after SQLite records the rollback. Applied/committed first
-		// generations published emergency deny before kernel deletion; an
+		// Clear only after SQLite records the rollback. An applied first
+		// generation published emergency deny before kernel deletion; an
 		// unverified pending first generation never publishes or deletes tables.
 		if err := m.Store.ClearActive(); err != nil {
 			return fmt.Errorf("clear active boot snapshot: %w", err)
 		}
 	}
 	return m.Store.Audit(recoveryCtx, "system", "generation_rolled_back", fmt.Sprintf("generation=%d", id))
-}
-
-func (m *Manager) restoreCommittedAfterFailedRollback(ctx context.Context, g *state.Generation) error {
-	if g == nil || g.Status != "committed" {
-		return nil
-	}
-	recoveryCtx, cancel := mutationRecoveryContext(ctx)
-	defer cancel()
-	script, err := m.Store.ReadScript(g)
-	if err != nil {
-		return err
-	}
-	if err := m.Store.PublishActive(script, g.Checksum); err != nil {
-		return err
-	}
-	if err := m.Backend.Apply(recoveryCtx, script); err != nil {
-		return err
-	}
-	return m.restoreRuntimeOrDeny(recoveryCtx)
 }
 
 func (m *Manager) RollbackExpired(ctx context.Context) (bool, error) {
@@ -432,6 +527,10 @@ func (m *Manager) RollbackExpired(ctx context.Context) (bool, error) {
 		return false, err
 	}
 	defer release()
+	ctx = state.WithMutationLock(ctx)
+	if err := m.auditForeignMarkOwnership(ctx); err != nil {
+		return false, err
+	}
 	pending, err := m.Store.Pending(ctx)
 	if errors.Is(err, sql.ErrNoRows) {
 		return false, nil
@@ -439,17 +538,28 @@ func (m *Manager) RollbackExpired(ctx context.Context) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	now := time.Now
-	if m.Now != nil {
-		now = m.Now
+	if pending.Status != "commit_prepared" {
+		stale, staleErr := m.pendingIsStale(pending)
+		if staleErr != nil {
+			return false, staleErr
+		}
+		if !stale {
+			return false, nil
+		}
 	}
-	if pending.RollbackDeadline == nil || now().UTC().Before(*pending.RollbackDeadline) {
-		return false, nil
-	}
-	if err := m.rollbackLocked(ctx, pending.ID); err != nil {
+	pointer, pointerExists, err := state.ReadEnforcementPointer(m.Store.Dir)
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	result, recoveryErr := m.recoverPendingAtBoot(state.WithMutationLock(ctx), pending, pointer, pointerExists)
+	rolledBack := result.Action == "rolled_back_to_predecessor" || result.Action == "rolled_back_first_generation"
+	if recoveryErr != nil {
+		return rolledBack, recoveryErr
+	}
+	if result.Action == "finalized_prepared_commit" {
+		return false, nil
+	}
+	return rolledBack, nil
 }
 
 type Drift struct {
@@ -470,6 +580,7 @@ func (m *Manager) Reconcile(ctx context.Context, repair bool) (Drift, error) {
 		return Drift{}, err
 	}
 	defer release()
+	ctx = state.WithMutationLock(ctx)
 	pending, pendingErr := m.Store.Pending(ctx)
 	if pendingErr == nil && pending.Status == "pending" {
 		drift := Drift{Missing: true, Detail: fmt.Sprintf("generation %d was not fully applied before process exit", pending.ID)}
@@ -543,7 +654,7 @@ func (m *Manager) Reconcile(ctx context.Context, repair bool) (Drift, error) {
 		if err != nil {
 			return d, err
 		}
-		if err := m.Backend.Apply(ctx, script); err != nil {
+		if err := m.installOwnedGeneration(ctx, script); err != nil {
 			return d, err
 		}
 		recoveryCtx, cancel := mutationRecoveryContext(ctx)
@@ -574,60 +685,13 @@ func (m *Manager) requireNoPending(ctx context.Context) error {
 }
 
 func (m *Manager) acquireProcessLock(ctx context.Context) (func(), error) {
-	if err := ctx.Err(); err != nil {
-		return nil, fmt.Errorf("wait for controller lock: %w", err)
+	if state.MutationLockHeld(ctx) {
+		return func() {}, nil
 	}
-	path := filepath.Join(m.Store.Dir, ".controller.lock")
-	if info, err := os.Lstat(path); err == nil && (info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular()) {
-		return nil, errors.New("controller lock path is not a regular file")
-	} else if err != nil && !errors.Is(err, os.ErrNotExist) {
-		return nil, err
+	if m.MutationLockDir == "" {
+		return nil, errors.New("cross-process mutation lock directory is not configured")
 	}
-	file, err := os.OpenFile(path, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return nil, fmt.Errorf("open controller lock: %w", err)
-	}
-	info, err := file.Stat()
-	if err != nil || !info.Mode().IsRegular() {
-		file.Close()
-		return nil, errors.New("controller lock is not a regular file")
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
-		file.Close()
-		return nil, errors.New("controller lock has unsafe ownership")
-	}
-	if err := file.Chmod(0o600); err != nil {
-		file.Close()
-		return nil, err
-	}
-	retry := time.NewTicker(10 * time.Millisecond)
-	defer retry.Stop()
-	for {
-		err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB)
-		if err == nil {
-			if ctxErr := ctx.Err(); ctxErr != nil {
-				_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-				_ = file.Close()
-				return nil, fmt.Errorf("wait for controller lock: %w", ctxErr)
-			}
-			break
-		}
-		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
-			file.Close()
-			return nil, fmt.Errorf("lock controller state: %w", err)
-		}
-		select {
-		case <-ctx.Done():
-			file.Close()
-			return nil, fmt.Errorf("wait for controller lock: %w", ctx.Err())
-		case <-retry.C:
-		}
-	}
-	return func() {
-		_ = syscall.Flock(int(file.Fd()), syscall.LOCK_UN)
-		_ = file.Close()
-	}, nil
+	return state.AcquireMutationLock(ctx, m.MutationLockDir)
 }
 
 func (m *Manager) expectedGeneration(ctx context.Context) (*state.Generation, error) {
@@ -635,30 +699,5 @@ func (m *Manager) expectedGeneration(ctx context.Context) (*state.Generation, er
 }
 
 func generationByID(ctx context.Context, s *state.Store, id uint64) (*state.Generation, error) {
-	row := s.DB.QueryRowContext(ctx, "SELECT id,checksum,observed_hash,script_path,status,created_at,rollback_deadline,previous_id FROM generations WHERE id=?", id)
-	return scan(row)
-}
-func scan(row interface{ Scan(...any) error }) (*state.Generation, error) {
-	var g state.Generation
-	var created string
-	var deadline sql.NullString
-	var prev sql.NullInt64
-	if err := row.Scan(&g.ID, &g.Checksum, &g.ObservedHash, &g.ScriptPath, &g.Status, &created, &deadline, &prev); err != nil {
-		return nil, err
-	}
-	g.CreatedAt, _ = time.Parse(time.RFC3339Nano, created)
-	if deadline.Valid {
-		t, e := time.Parse(time.RFC3339Nano, deadline.String)
-		if e == nil {
-			g.RollbackDeadline = &t
-		}
-	}
-	if prev.Valid {
-		if prev.Int64 <= 0 {
-			return nil, errors.New("generation has an invalid previous generation reference")
-		}
-		v := uint64(prev.Int64)
-		g.PreviousID = &v
-	}
-	return &g, nil
+	return s.Generation(ctx, id)
 }

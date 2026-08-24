@@ -170,12 +170,15 @@ strict_vpn = true
 [[interfaces]]
 name = "uplink0"
 role = "uplink"
+provenance_id = 1
 [[interfaces]]
 name = "wg-real"
 role = "vpn"
+provenance_id = 2
 [[interfaces]]
 name = "ctr-host"
 role = "container"
+provenance_id = 3
 cidrs = ["10.204.0.0/24"]
 [[zones]]
 name = "container"
@@ -255,7 +258,8 @@ max_block_claims = 100000
 max_set_members = 65536
 [state]
 directory = "$lab_tmp/state"
-database = "$lab_tmp/state/state.db"
+database = "$lab_tmp/state/generation-state/state.db"
+provenance_ledger = "$lab_tmp/state/provenance-ledger.db"
 [integrations]
 docker_enabled = false
 threat_feed = false
@@ -269,7 +273,7 @@ case "$(uname -m)" in x86_64) arch=amd64 ;; aarch64|arm64) arch=arm64 ;; *) echo
 nftfw="$root_dir/dist/nftfw-linux-$arch"
 nftfwd="$root_dir/dist/nftfwd-linux-$arch"
 [[ -x "$nftfw" && -x "$nftfwd" ]] || { echo "BLOCKED: release binaries are not built"; exit 77; }
-local_cli=(env NFTFW_CONFIG="$lab_tmp/nftfw.toml" NFTFW_STATE_DB="$lab_tmp/state/state.db" NFTFW_CONTROL_SOCKET="$lab_tmp/missing.sock" NFTFW_LOCAL=1 "$nftfw")
+local_cli=(env NFTFW_CONFIG="$lab_tmp/nftfw.toml" NFTFW_STATE_DB="$lab_tmp/state/generation-state/state.db" NFTFW_CONTROL_SOCKET="$lab_tmp/missing.sock" NFTFW_LOCAL=1 "$nftfw")
 ip netns exec "$vpn_ns" "${local_cli[@]}" apply --unsafe >/dev/null
 
 wait_handshake() {
@@ -382,7 +386,7 @@ fi
 
 start_daemon() {
     rm -f "$lab_tmp/status.sock" "$lab_tmp/control.sock"
-    ip netns exec "$vpn_ns" env NFTFW_STATE_DB="$lab_tmp/state/state.db" "$nftfwd" --config "$lab_tmp/nftfw.toml" --status-socket "$lab_tmp/status.sock" --control-socket "$lab_tmp/control.sock" >"$lab_tmp/daemon.log" 2>&1 &
+    ip netns exec "$vpn_ns" env NFTFW_STATE_DB="$lab_tmp/state/generation-state/state.db" "$nftfwd" --config "$lab_tmp/nftfw.toml" --status-socket "$lab_tmp/status.sock" --control-socket "$lab_tmp/control.sock" >"$lab_tmp/daemon.log" 2>&1 &
     daemon_pid=$!
     for _ in $(seq 1 100); do [[ -S "$lab_tmp/control.sock" ]] && return 0; sleep 0.05; done
     return 1

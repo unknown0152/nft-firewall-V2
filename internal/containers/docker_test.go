@@ -2,25 +2,53 @@ package containers
 
 import (
 	"context"
+	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+
+	"github.com/unknown0152/nft-firewall-v2/internal/config"
 )
 
-func writeDockerFixture(t *testing.T, name string) string {
+const (
+	dockerIDOne = "1111111111111111111111111111111111111111111111111111111111111111"
+	dockerIDTwo = "2222222222222222222222222222222222222222222222222222222222222222"
+)
+
+func expectedMediaNetwork() []config.DockerNetwork {
+	return []config.DockerNetwork{{
+		Name: "media", Driver: "bridge", BridgeInterface: "br-media",
+		Subnets:  []string{"172.19.0.0/16", "fd00:19::/64"},
+		Gateways: []string{"172.19.0.1", "fd00:19::1"},
+	}}
+}
+
+func inspectDocument(id, name, driver, bridge, subnetGatewayJSON string) string {
+	return fmt.Sprintf(`[{"Id":%q,"Name":%q,"Driver":%q,"Options":{"com.docker.network.bridge.name":%q},"IPAM":{"Config":[%s]}}]`, id, name, driver, bridge, subnetGatewayJSON)
+}
+
+func writeDockerFixture(t *testing.T, list, inspect string, inspectExit int) string {
 	t.Helper()
 	path := filepath.Join(secureTestDir(t), "docker")
-	script := `#!/bin/sh
+	list = strings.ReplaceAll(list, "'", "")
+	inspect = strings.ReplaceAll(inspect, "'", "")
+	script := fmt.Sprintf(`#!/bin/sh
 if [ "$1" != --host ] || [ "$2" != unix:///var/run/docker.sock ]; then
   exit 99
 fi
 shift 2
-if [ "$1" = network ] && [ "$2" = ls ]; then
-  printf '%s\n' '` + name + `'
+if [ "$1" = network ] && [ "$2" = ls ] && [ "$3" = --no-trunc ]; then
+  printf '%%s\n' '%s'
   exit 0
 fi
-printf '%s\n' '[{"IPAM":{"Config":[{"Subnet":"172.19.0.0/16"},{"Subnet":"fd00:19::/64"}]}}]'
-`
+if [ "$1" = network ] && [ "$2" = inspect ] && [ "$3" = -- ]; then
+  if [ %d -ne 0 ]; then exit %d; fi
+  printf '%%s\n' '%s'
+  exit 0
+fi
+exit 98
+`, list, inspectExit, inspectExit, inspect)
 	if err := os.WriteFile(path, []byte(script), 0o700); err != nil {
 		t.Fatal(err)
 	}
@@ -54,20 +82,60 @@ func TestObserverRequiresDockerFirewallOwnershipDisabled(t *testing.T) {
 	}
 }
 
-func TestObserverReturnsValidatedDualStackNetworks(t *testing.T) {
-	o := Observer{DockerBinary: writeDockerFixture(t, "br-test")}
+func TestObserverReturnsExactDualStackStableTuple(t *testing.T) {
+	list := dockerIDOne + "\tmedia\tbridge"
+	inspect := inspectDocument(dockerIDOne, "media", "bridge", "br-media", `{"Subnet":"172.19.0.0/16","Gateway":"172.19.0.1"},{"Subnet":"fd00:19::/64","Gateway":"fd00:19::1"}`)
+	o := Observer{DockerBinary: writeDockerFixture(t, list, inspect, 0), Expected: expectedMediaNetwork()}
 	networks, err := o.Networks(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(networks) != 2 || networks[0].CIDR != "172.19.0.0/16" || networks[1].CIDR != "fd00:19::/64" {
+	if len(networks) != 2 || networks[0].ID != dockerIDOne || networks[0].Name != "media" || networks[0].BridgeInterface != "br-media" || networks[0].CIDR != "172.19.0.0/16" || networks[0].Gateway != "172.19.0.1" || networks[1].CIDR != "fd00:19::/64" {
 		t.Fatalf("unexpected networks: %#v", networks)
 	}
 }
 
-func TestObserverRejectsUnsafeNetworkName(t *testing.T) {
-	o := Observer{DockerBinary: writeDockerFixture(t, "--config=/tmp/evil")}
+func TestObserverAllowsChangedGeneratedIDForSameStableTuple(t *testing.T) {
+	list := dockerIDTwo + "\tmedia\tbridge"
+	inspect := inspectDocument(dockerIDTwo, "media", "bridge", "br-media", `{"Subnet":"172.19.0.0/16","Gateway":"172.19.0.1"},{"Subnet":"fd00:19::/64","Gateway":"fd00:19::1"}`)
+	o := Observer{DockerBinary: writeDockerFixture(t, list, inspect, 0), Expected: expectedMediaNetwork()}
+	networks, err := o.Networks(context.Background())
+	if err != nil || len(networks) != 2 || networks[0].ID != dockerIDTwo {
+		t.Fatalf("stable recreation rejected: networks=%#v err=%v", networks, err)
+	}
+}
+
+func TestObserverRejectsDriftAmbiguityAndInspectionRace(t *testing.T) {
+	validIPAM := `{"Subnet":"172.19.0.0/16","Gateway":"172.19.0.1"},{"Subnet":"fd00:19::/64","Gateway":"fd00:19::1"}`
+	tests := []struct {
+		name        string
+		list        string
+		inspect     string
+		inspectExit int
+	}{
+		{"unsafe name", dockerIDOne + "\t--config=/tmp/evil\tbridge", "[]", 0},
+		{"unknown bridge", dockerIDOne + "\tunknown\tbridge", inspectDocument(dockerIDOne, "unknown", "bridge", "br-unknown", validIPAM), 0},
+		{"ID changed during inspect", dockerIDOne + "\tmedia\tbridge", inspectDocument(dockerIDTwo, "media", "bridge", "br-media", validIPAM), 0},
+		{"name changed during inspect", dockerIDOne + "\tmedia\tbridge", inspectDocument(dockerIDOne, "other", "bridge", "br-media", validIPAM), 0},
+		{"driver drift", dockerIDOne + "\tmedia\tbridge", inspectDocument(dockerIDOne, "media", "overlay", "br-media", validIPAM), 0},
+		{"bridge option drift", dockerIDOne + "\tmedia\tbridge", inspectDocument(dockerIDOne, "media", "bridge", "br-other", validIPAM), 0},
+		{"subnet drift", dockerIDOne + "\tmedia\tbridge", inspectDocument(dockerIDOne, "media", "bridge", "br-media", `{"Subnet":"172.20.0.0/16","Gateway":"172.20.0.1"},{"Subnet":"fd00:19::/64","Gateway":"fd00:19::1"}`), 0},
+		{"gateway drift", dockerIDOne + "\tmedia\tbridge", inspectDocument(dockerIDOne, "media", "bridge", "br-media", `{"Subnet":"172.19.0.0/16","Gateway":"172.19.0.2"},{"Subnet":"fd00:19::/64","Gateway":"fd00:19::1"}`), 0},
+		{"inspect race", dockerIDOne + "\tmedia\tbridge", "", 1},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			o := Observer{DockerBinary: writeDockerFixture(t, test.list, test.inspect, test.inspectExit), Expected: expectedMediaNetwork()}
+			if _, err := o.Networks(context.Background()); err == nil {
+				t.Fatal("unsafe Docker observation accepted")
+			}
+		})
+	}
+}
+
+func TestObserverRejectsMissingAuthorization(t *testing.T) {
+	o := Observer{}
 	if _, err := o.Networks(context.Background()); err == nil {
-		t.Fatal("unsafe Docker network name accepted")
+		t.Fatal("Docker observation without configured tuples accepted")
 	}
 }

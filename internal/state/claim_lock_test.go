@@ -12,7 +12,7 @@ import (
 
 func TestClaimPublicationLockHonorsContextAndRejectsSymlink(t *testing.T) {
 	directory := secureTestDir(t)
-	lockPath := filepath.Join(directory, ".claim-publication.lock")
+	lockPath := filepath.Join(directory, "mutation.lock")
 	canceled, cancel := context.WithCancel(context.Background())
 	cancel()
 	if release, err := AcquireClaimPublicationLock(canceled, directory); release != nil || !errors.Is(err, context.Canceled) {
