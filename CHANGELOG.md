@@ -64,7 +64,7 @@ exists.
 - Fail closed on inner `SO_PEERCRED` errors and isolate status/control
   connection quotas.
 - Bound the durable SQLite audit log to 10,000 rows with schema migration 4.
-- Add the typed `nftfw.status.v1` contract, validated SHA-256 policy identity,
+- Add the typed `nftfw.status.v2` contract, validated SHA-256 policy identity,
   and fail-closed CLI/web consumers.
 - Persist runtime claim-set publication health so manual claim changes cannot
   leave a falsely healthy DB/kernel mismatch after an nftables error. Serialize

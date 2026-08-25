@@ -76,7 +76,7 @@ func TestDashboardStatusErrorDoesNotDiscloseSocketDetails(t *testing.T) {
 
 func TestDashboardUsesFailClosedStatusContract(t *testing.T) {
 	for _, required := range []string{
-		"data.schema==='nftfw.status.v1'",
+		"data.schema==='nftfw.status.v2'",
 		"data.active===true",
 		"data.policy_match===true",
 		"data.kill_switch_enforced===true",
@@ -99,13 +99,14 @@ func TestDashboardUsesFailClosedStatusContract(t *testing.T) {
 func TestDashboardProtectedRejectsMissingAndWrongTypedFields(t *testing.T) {
 	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
 	healthy := map[string]any{
-		"schema": "nftfw.status.v1", "status": "HEALTHY", "active": true,
+		"schema": "nftfw.status.v2", "status": "HEALTHY", "active": true,
 		"policy_match": true, "kill_switch_enforced": true, "policy_hash": hash, "policy_checksum": hash,
 	}
 	if !dashboardProtected(healthy) {
 		t.Fatal("valid protected contract was rejected")
 	}
 	mutations := []func(map[string]any){
+		func(value map[string]any) { value["schema"] = "nftfw.status.v1" },
 		func(value map[string]any) { delete(value, "policy_hash") },
 		func(value map[string]any) { value["policy_hash"] = 0 },
 		func(value map[string]any) { value["policy_hash"] = false },

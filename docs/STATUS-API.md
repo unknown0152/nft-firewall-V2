@@ -1,13 +1,13 @@
 # Status API contract
 
 `nftfw status --json`, the read-only status socket, and `/api/status` expose
-the versioned `nftfw.status.v1` schema. Security decisions must use the typed
+the versioned `nftfw.status.v2` schema. Security decisions must use the typed
 fields in this contract; string truthiness and missing-field defaults are not
 valid interpretations.
 
 | Field | Type | Meaning |
 | --- | --- | --- |
-| `schema` | string | Exactly `nftfw.status.v1` for this contract |
+| `schema` | string | Exactly `nftfw.status.v2` for this contract |
 | `version` | string | Build-injected NFT Firewall release version |
 | `status` | string | Overall `HEALTHY` or `DEGRADED`, including integrations and WireGuard |
 | `active` | boolean | An applied/committed generation exists and every owned table is structurally intact |
@@ -24,7 +24,7 @@ An external dashboard may display **Protected** only when all of these checks
 pass:
 
 ```text
-schema == "nftfw.status.v1"
+schema == "nftfw.status.v2"
 status == "HEALTHY"
 active == true
 policy_match == true
