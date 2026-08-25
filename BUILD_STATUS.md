@@ -2,7 +2,7 @@
 
 Release disposition: **RELEASE CANDIDATE - NOT DEPLOYABLE**
 
-Snapshot: 2026-08-24
+Snapshot: 2026-08-25
 
 Target version: `2.0.2`
 
@@ -18,7 +18,7 @@ Status values are `NOT STARTED`, `PASS`, and `BLOCKED`.
 | --- | --- | --- |
 | Source isolation and baseline | PASS | Work is confined to the isolated 2.0.2 RC worktree; immutable `v2.0.1` lifecycle/systemd/provenance defects remain expected-red baseline proofs |
 | Configuration/compiler/provenance | PASS | Pinned unit/race/static/security analysis and source contracts pass for strict provenance IDs, write-once connection marking, reply binding, and foreign-mask collision refusal |
-| Generation state and recovery | PASS | Source-only tests pass for immutable snapshots, exact schema history, crash-safe publication, ambiguity retention, rollback verification, and read-only recovery refusal; live boot remains R2 |
+| Generation state and recovery | PASS | Source-only tests pass for immutable snapshots, exact schema history, locked/no-overwrite offline schema 1-5 migration, byte-identical backup, crash-safe publication, ambiguity retention, rollback verification, and read-only recovery refusal; privileged migration and live boot remain R2 |
 | Docker stable identity | PASS | Exact ID/name/driver/bridge/subnet/gateway unit paths pass; no live Docker daemon or bridge lifecycle was accessed |
 | Package lifecycle/systemd graph | PASS | Static lifecycle, metadata, candidate-quarantine, staged unit, and dependency-graph contracts pass; no package was installed and no service was changed |
 | Unprivileged quality/security | PASS | Go 1.25.13 test/race/vet/module/fmt, staticcheck, govulncheck, gosec, nine bounded fuzz targets, ShellCheck, Stage R contracts, and current-tree secret scan pass |

@@ -24,7 +24,7 @@ part of Stage R.
 | `nftfw block add/remove` | Manual block claim operations |
 | `nftfw allow add/remove` | Expiring trusted access operations |
 | `nftfw wg status/refresh` | Handshake status or endpoint refresh |
-| `nftfw state backup/verify` | Consistent SQLite backup and integrity check |
+| `nftfw state backup/verify/migrate` | Consistent backup, read-only integrity check, and explicit offline schema 1-5 migration |
 
 The CLI uses `/run/nftfw/status.sock` and `/run/nftfw/control.sock`. For an
 explicit root recovery operation only, `NFTFW_LOCAL=1` bypasses an unavailable

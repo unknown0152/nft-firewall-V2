@@ -18,6 +18,10 @@ exists.
 - Add generation publication/recovery state for prepared commits, durable
   enforcement pointers, crash-boundary recovery, and read-only enforcement
   verification.
+- Add a locked, nonactivating offline database migration for exact schema 1
+  through 5. It creates a byte-identical protected backup, leaves the source
+  unchanged, refuses unsafe/active/ambiguous inputs and existing outputs, and
+  verifies the separate schema-6 destination.
 - Make package and source installation nonactivating: installation may reload
   systemd metadata but does not enable, start, stop, or restart NFTFW units.
 - Keep the base daemon and rollback timer/service independent of early restore

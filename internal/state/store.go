@@ -25,11 +25,12 @@ import (
 )
 
 type Store struct {
-	DB    *sql.DB
-	Dir   string // immutable snapshot/pointer/ledger root
-	DBDir string // mutable generation database and journal directory
-	Path  string
-	mu    sync.Mutex
+	DB                   *sql.DB
+	Dir                  string // immutable snapshot/pointer/ledger root
+	DBDir                string // mutable generation database and journal directory
+	Path                 string
+	allowLegacyMigration bool
+	mu                   sync.Mutex
 }
 
 const (
@@ -316,8 +317,11 @@ func (s *Store) migrate(ctx context.Context) error {
 	if err := tx.QueryRowContext(ctx, "SELECT COALESCE(MAX(version),0) FROM schema_migrations").Scan(&version); err != nil {
 		return err
 	}
-	if version != 0 && version != currentSchemaVersion {
+	if version != 0 && version != currentSchemaVersion && !s.allowLegacyMigration {
 		return fmt.Errorf("state schema version %d is not the exact required version %d; use the separate offline migration procedure", version, currentSchemaVersion)
+	}
+	if s.allowLegacyMigration && (version < 1 || version >= currentSchemaVersion) {
+		return fmt.Errorf("offline state migration requires schema 1..%d, found %d", currentSchemaVersion-1, version)
 	}
 	if version < 1 {
 		_, err = tx.ExecContext(ctx, `

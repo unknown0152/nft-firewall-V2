@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"database/sql"
 	"errors"
 	"os"
 	"path/filepath"
@@ -109,6 +110,80 @@ func TestStateBackupAndVerify(t *testing.T) {
 	}
 	if err := stateCommand([]string{"backup", "relative.db", "--database", database}); err == nil {
 		t.Fatal("relative backup destination accepted")
+	}
+}
+
+func TestStateOfflineMigrationCommand(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(root, "legacy.db")
+	backup := filepath.Join(root, "backups", "legacy.db")
+	destination := filepath.Join(root, "generation-state", "state.db")
+	db, err := sql.Open("sqlite", source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = db.Exec(`
+CREATE TABLE schema_migrations(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+CREATE TABLE generations (
+ id INTEGER PRIMARY KEY, checksum TEXT NOT NULL, script_path TEXT NOT NULL,
+ status TEXT NOT NULL CHECK(status IN ('pending','applied','committed','rolled_back')),
+ created_at TEXT NOT NULL, rollback_deadline TEXT,
+ previous_id INTEGER REFERENCES generations(id)
+);
+CREATE INDEX generations_status_idx ON generations(status);
+CREATE TABLE claims (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, address TEXT NOT NULL,
+ family TEXT NOT NULL CHECK(family IN ('ipv4','ipv6')), source TEXT NOT NULL,
+ reason TEXT NOT NULL, actor TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT
+);
+CREATE INDEX claims_address_idx ON claims(address, family);
+CREATE TABLE audit (
+ id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
+ actor TEXT NOT NULL, event TEXT NOT NULL, detail TEXT NOT NULL
+);
+INSERT INTO schema_migrations VALUES(1, '2026-01-01T00:00:00Z');
+`)
+	if err != nil {
+		db.Close()
+		t.Fatal(err)
+	}
+	if err := db.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(source, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtimeDir := t.TempDir()
+	if err := os.Chmod(runtimeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NFTFW_RUNTIME_DIR", runtimeDir)
+	if err := stateCommand([]string{
+		"migrate", destination,
+		"--database", source,
+		"--backup", backup,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := stateCommand([]string{"verify", "--database", destination}); err != nil {
+		t.Fatal(err)
+	}
+	sourceBytes, err := os.ReadFile(source)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupBytes, err := os.ReadFile(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(sourceBytes) != string(backupBytes) {
+		t.Fatal("state migrate backup is not byte-identical")
+	}
+	if err := stateCommand([]string{"migrate", filepath.Join(root, "other.db"), "--database", source}); err == nil {
+		t.Fatal("state migrate accepted a missing --backup")
 	}
 }
 

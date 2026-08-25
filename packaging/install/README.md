@@ -29,12 +29,12 @@ into `preinst`. A same-version package reinstall must prove that the protected
 installed binary reports that exact version and commit; a normal Debian
 `2.0.2~rcN` to `2.0.2` upgrade remains a version increase and is allowed.
 
-Pre-2.0.2 state requires the separately reviewed offline migration command and
-contract. Until that exists, both installation paths refuse an in-place legacy
-upgrade instead of moving or rewriting state. Every official 2.0.2 RC/final
-uses schema 6; an existing canonical database must prove the exact migration
-history `1,2,3,4,5,6` through an immutable read before the installed,
-nonmigrating backup/verify commands may run.
+Pre-2.0.2 state requires the reviewed offline `nftfw state migrate` contract
+and a separate package handoff. Both installation paths still refuse an
+in-place legacy package upgrade instead of moving or rewriting state. Every
+official 2.0.2 RC/final uses schema 6; an existing canonical database must
+prove the exact migration history `1,2,3,4,5,6` through an immutable read
+before the installed, nonmigrating backup/verify commands may run.
 
 Both paths safely create the inactive volatile lock parent `/run/nftfw` as
 `root:nftfw-web` mode `0750`. This allows immediate read/planning commands while

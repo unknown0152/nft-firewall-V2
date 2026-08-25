@@ -2,7 +2,7 @@
 
 Release disposition: **RELEASE CANDIDATE - NOT DEPLOYABLE**
 
-Evidence snapshot: 2026-08-24
+Evidence snapshot: 2026-08-25
 
 Approval scope: source-only Stage R
 
@@ -25,8 +25,9 @@ is named explicitly.
 | Race suite | PASS | `go test -race ./...` |
 | Vet | PASS | `go vet ./...` |
 | Staticcheck | PASS | staticcheck 2026.1 / v0.7.0: `staticcheck ./...` |
-| Vulnerability reachability | PASS | govulncheck v1.7.0; database updated 2026-08-21: `govulncheck ./...`; no vulnerabilities found |
+| Vulnerability reachability | PASS | govulncheck module v1.1.4; database updated 2026-08-21: `govulncheck ./...`; no vulnerabilities found |
 | Go security analysis | PASS | gosec module v2.28.0: `gosec -quiet -exclude-generated -exclude=G104,G204,G304,G302 ./...`; zero reported issues |
+| Offline migration contract | PASS | Exact schema 1-5 fixtures reach ordered schema 6 only through `state migrate`; source and byte-identical backup match; weakened/unknown/active/sidecar/current/future/ambiguous/overwrite cases refuse |
 | Stage R contracts | PASS | `bash ./tests/stage-r/run.sh`: source/package/systemd contracts, eight release guards, immutable v2.0.1 expected-red proofs, provenance source shape, twelve comparator tests, and nine scanner tests |
 | Staged systemd verification | PASS | `./tests/packaging/systemd_preflight.sh amd64`; temporary units and staged executables only |
 | Shell quality | PASS | `bash -n`/`dash -n` and ShellCheck 0.10.0 across every changed installer, package, acceptance, namespace, and Stage R shell script |

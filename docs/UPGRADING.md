@@ -14,11 +14,34 @@ The corrected package supports only an established 2.0.2-family state layout:
 /var/lib/nftfw/provenance-ledger.db
 ```
 
-An in-place upgrade from a version older than `2.0.2~`, an unknown installed
-version, or legacy `/var/lib/nftfw/state.db` is refused. That stop occurs before
-dpkg can invoke the legacy package's removal script. A separately implemented,
-reviewed, and tested offline migration is required; deleting or renaming state
-to evade the guard is prohibited.
+An in-place package upgrade from a version older than `2.0.2~`, an unknown
+installed version, or legacy `/var/lib/nftfw/state.db` is refused. That stop
+occurs before dpkg can invoke the legacy package's removal script. Do not
+delete or rename state to evade the guard.
+
+The release CLI provides a separate, nonactivating database migration for
+exact legacy schema 1 through 5. Run it only after stopping legacy writers and
+creating a clean, sidecar-free input with the prior release's backup
+procedure:
+
+```bash
+sudo NFTFW_RUNTIME_DIR=/run/nftfw ./nftfw-linux-amd64 state migrate \
+  /var/lib/nftfw/generation-state/state.db \
+  --database /var/lib/nftfw/state.db \
+  --backup /var/lib/nftfw/backups/legacy-state-before-v6.db
+sudo ./nftfw-linux-amd64 state verify \
+  --database /var/lib/nftfw/generation-state/state.db
+```
+
+The command takes the canonical mutation lock, refuses SQLite sidecars,
+unknown objects, weakened constraints, malformed/noncontiguous histories,
+current/future schemas, unsafe or enforcement-enabled state roots, oversized
+inputs, and existing outputs. It writes a byte-identical protected backup,
+migrates a separate destination, verifies exact schema 6, and leaves the
+legacy source unchanged. It never changes the provenance ledger, package
+state, systemd state, or firewall. Completing the older-package handoff remains
+a separately reviewed deployment operation; database migration alone does not
+bypass the package pre-install guard.
 
 For a future supported 2.0.2-to-2.0.2 upgrade, first record unit
 enabled/disabled and active/inactive state, then validate and back up the

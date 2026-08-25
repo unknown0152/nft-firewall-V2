@@ -456,6 +456,30 @@ class InstallerLifecycleContracts(unittest.TestCase):
             "installation-directory or account changes",
         )
 
+    def test_offline_legacy_migration_is_explicit_locked_and_non_overwriting(self) -> None:
+        command = read("cmd/nftfw/main.go")
+        migration = read("internal/state/offline_migration.go")
+        acceptance = read("tests/acceptance/database.sh")
+        self.assertIn('args[0] != "migrate"', command)
+        self.assertIn("state.MigrateOffline(", command)
+        self.assertIn("state.WithMutationLock(", command)
+        self.assertIn("--backup", command)
+        for contract in (
+            "MutationLockHeld(ctx)",
+            "schema 1..%d",
+            "validateLegacyObjects",
+            "copyRegularFileExclusive",
+            "legacy database changed while its protected backup was created",
+            "OpenReadOnly(ctx, work)",
+            "os.Link(work, destination)",
+            "legacy source changed during offline migration",
+        ):
+            self.assertIn(contract, migration)
+        self.assertNotIn("os.Rename(work, destination)", migration)
+        self.assertIn("state migrate", acceptance)
+        self.assertIn("1,2,3,4,5,6", acceptance)
+        self.assertIn("V1-TO-V6", acceptance)
+
     def test_upgrade_backups_are_unique_and_never_overwritten(self) -> None:
         package = read("packaging/deb/preinst")
         portable = read("scripts/install.sh")

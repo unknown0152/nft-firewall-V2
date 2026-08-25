@@ -43,9 +43,9 @@ NFTFW unit and does not create an enforcement pointer or apply firewall policy.
 A corrected 2.0.2-to-2.0.2 upgrade preserves enabled/disabled and
 active/inactive state and does not restart services automatically. An in-place
 upgrade from a pre-2.0.2 version or legacy `/var/lib/nftfw/state.db` is refused
-before the old package can stop services. It requires a separately reviewed
-offline migration procedure; do not delete or rename state to bypass that
-guard.
+before the old package can stop services. It requires the reviewed offline
+`nftfw state migrate` procedure and a separate package handoff; do not delete
+or rename state to bypass that guard.
 
 ## Source tree lifecycle
 

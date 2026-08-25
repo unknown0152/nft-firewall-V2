@@ -331,12 +331,13 @@ func displaySetChanges(changes map[string]string) string {
 }
 
 func stateCommand(args []string) error {
-	if len(args) < 1 || (args[0] != "backup" && args[0] != "verify") {
-		return errors.New("usage: nftfw state backup <destination> --database <path> | state verify --database <path>")
+	if len(args) < 1 || (args[0] != "backup" && args[0] != "verify" && args[0] != "migrate") {
+		return errors.New("usage: nftfw state backup <destination> --database <path> | state verify --database <path> | state migrate <destination> --database <legacy-path> --backup <backup-path>")
 	}
 	database := os.Getenv("NFTFW_STATE_DB")
 	databaseFlag := false
 	var destination string
+	var migrationBackup string
 	for i := 1; i < len(args); i++ {
 		if args[i] == "--database" {
 			if i+1 >= len(args) || databaseFlag {
@@ -347,7 +348,15 @@ func stateCommand(args []string) error {
 			i++
 			continue
 		}
-		if args[0] == "backup" && destination == "" {
+		if args[i] == "--backup" {
+			if args[0] != "migrate" || i+1 >= len(args) || migrationBackup != "" {
+				return errors.New("--backup requires one path for state migrate")
+			}
+			migrationBackup = args[i+1]
+			i++
+			continue
+		}
+		if (args[0] == "backup" || args[0] == "migrate") && destination == "" {
 			destination = args[i]
 			continue
 		}
@@ -369,7 +378,7 @@ func stateCommand(args []string) error {
 		return nil
 	}
 	if destination == "" || !filepath.IsAbs(destination) {
-		return errors.New("backup destination must be an absolute path")
+		return errors.New("state output destination must be an absolute path")
 	}
 	lockDirectory := os.Getenv("NFTFW_RUNTIME_DIR")
 	if lockDirectory == "" {
@@ -380,6 +389,22 @@ func stateCommand(args []string) error {
 		return err
 	}
 	defer release()
+	if args[0] == "migrate" {
+		if migrationBackup == "" || !filepath.IsAbs(migrationBackup) {
+			return errors.New("offline migration backup must be an absolute path")
+		}
+		result, err := state.MigrateOffline(
+			state.WithMutationLock(context.Background()),
+			database,
+			migrationBackup,
+			destination,
+		)
+		if err != nil {
+			return err
+		}
+		fmt.Printf("SQLite offline migration: PASS (schema %d -> 6)\n", result.SourceSchema)
+		return nil
+	}
 	store, err := state.OpenRecovery(context.Background(), database)
 	if err != nil {
 		return err

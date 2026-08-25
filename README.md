@@ -31,6 +31,8 @@ documented in `docs/STATUS-API.md`.
   independent systemd rollback timer.
 - SQLite generations, audit records, endpoint history, integration state, and
   provenance-aware block and temporary-access claims.
+- Explicit offline schema 1-5 migration with a byte-identical source backup,
+  no-overwrite publication, and read-only schema-6 verification.
 - Drift detection and scoped repair of owned tables.
 - Optional bounded HTTPS threat feeds, operator-supplied GeoIP CIDR sets, and
   Docker network observation.

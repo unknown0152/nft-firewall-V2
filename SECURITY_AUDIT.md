@@ -1,6 +1,6 @@
 # NFT Firewall V2 Security Audit
 
-Audit date: 2026-08-16, 2026-08-17, 2026-08-23, and 2026-08-24 UTC. Scope: production Go, configuration/compiler,
+Audit date: 2026-08-16, 2026-08-17, 2026-08-23, 2026-08-24, and 2026-08-25 UTC. Scope: production Go, configuration/compiler,
 nftables ownership, Unix APIs, persistence/rollback, systemd, integrations,
 web, installers, tests, dependencies, Git history, and release contents.
 
@@ -69,6 +69,7 @@ packet, package, boot, Docker, and provider behavior remains an R2 gate.
 | NFV2-037 | Package/systemd dependency edges could activate too early or imply readiness | HIGH | Keep install inert, separate early restore from nonactivating readiness, and ship final dependency edges only as administrator-selected examples | SOURCE-CLOSED; VM/reboot proof pending |
 | NFV2-038 | An outer RC filename alone did not prevent an extracted payload from running or installing | HIGH | Embed a commit-bound Stage R version/disposition/composite identity; quarantine CLI/daemon/web and refuse candidate package/source installation | SOURCE-CLOSED; package inspection pending |
 | NFV2-039 | Release approval and scan claims could become circular or stale | HIGH | Keep frozen reports pre-build; emit exact external build/comparison/secret evidence; bind R2, tag object, post-tag validation, and final approval by SHA-256 | SOURCE-CLOSED; external candidate evidence pending |
+| NFV2-040 | The R2 contract required v1-to-v6 state migration, but the frozen CLI only rejected legacy schemas and supplied no reviewed offline path | HIGH | Add an explicit globally locked migration that accepts only exact schema 1-5, refuses active/sidecar/unknown/weakened/ambiguous inputs, creates a byte-identical no-overwrite backup, leaves the source unchanged, migrates a separate bounded work copy, and publishes only a read-only-verified schema-6 destination | SOURCE-CLOSED; privileged package/database proof pending |
 
 ## Adversarial review areas
 
@@ -82,7 +83,7 @@ packet, package, boot, Docker, and provider behavior remains an R2 gate.
 | Unsafe temp/path use | Go uses secure temp APIs; protected state/config/cache paths reject symlinks and unsafe parents; package temp paths are fixed templates |
 | Socket permissions | Control mode/root peer authorization; status is deliberately dashboard-group readable; unsafe existing socket objects rejected |
 | Request/resource bounds | API, nft output, config, Docker output, feeds, Geo files, set counts, and audit fields bounded |
-| Database injection/races | Parameterized SQL, foreign keys, WAL, busy timeout, transactions, constraints, race/concurrent-open tests |
+| Database injection/races | Parameterized SQL, foreign keys, WAL, busy timeout, transactions, constraints, race/concurrent-open tests, and engine-level offline-migration constraint probes |
 | Rollback | Persistent deadline, exact guard validation, checksummed artifacts, independent timer, and current unprivileged crash/ambiguity/timeout regressions; live-host execution remains gated |
 | Web XSS/CSRF/file access | No mutable endpoint, no templated user HTML, DOM uses `textContent`, fixed routes/assets, strict CSP/headers |
 | HTTP resource limits | Loopback default, read/header/write/idle timeouts, 16 KiB headers, status-only upstream response limit |
