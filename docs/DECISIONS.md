@@ -1,6 +1,6 @@
 # Architecture Decisions
 
-The 2.0.2 source remains a non-deployable candidate until Stage R2 validates
+The 2.0.3 source remains a non-deployable candidate until Stage R2 validates
 these decisions in the required privileged environments. Even a passing R2
 result would not authorize server installation without separate explicit
 approval of the completed deployment plan.

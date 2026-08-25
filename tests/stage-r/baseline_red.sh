@@ -66,4 +66,4 @@ done
 echo "V2.0.1 PROVENANCE BASELINE: EXPECTED RED"
 
 python3 "$root_dir/tests/stage-r/provenance_source_contract.py" --source-root "$root_dir"
-echo "V2.0.2 PROVENANCE SOURCE SHAPE: PASS (NOT PACKET PROOF)"
+echo "V2.0.3 PROVENANCE SOURCE SHAPE: PASS (NOT PACKET PROOF)"

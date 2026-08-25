@@ -1,6 +1,6 @@
 # Security Policy and Guarantees
 
-The current 2.0.2 source is a **RELEASE CANDIDATE - NOT DEPLOYABLE**. The
+The current 2.0.3 source is a **RELEASE CANDIDATE - NOT DEPLOYABLE**. The
 items below are intended code invariants, not a claim that Stage R2 package,
 boot, packet, Docker, real-OVPN, or host acceptance has run.
 

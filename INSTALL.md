@@ -1,6 +1,6 @@
 # Installation
 
-> **2.0.2 STATUS: RELEASE CANDIDATE - NOT DEPLOYABLE.** Stage R2 package,
+> **2.0.3 STATUS: RELEASE CANDIDATE - NOT DEPLOYABLE.** Stage R2 package,
 > boot, network, Docker, and real-OVPN acceptance has not been executed. Do not
 > install this checkout or any untagged candidate output. The commands below
 > describe the future tagged release workflow and remain blocked until final
@@ -22,10 +22,10 @@ responsibilities.
 ## Final release archive (after acceptance only)
 
 ```bash
-unzip nft-firewall-v2-2.0.2.zip
+unzip nft-firewall-v2-2.0.3.zip
 cd nft-firewall-v2
 sha256sum -c SHA256SUMS
-sudo apt install ./packages/nft-firewall-v2_2.0.2_$(dpkg --print-architecture).deb
+sudo apt install ./packages/nft-firewall-v2_2.0.3_$(dpkg --print-architecture).deb
 ```
 
 Those final-looking filenames must not exist through the Stage R candidate
@@ -40,7 +40,7 @@ configuration, six unit files, and inert dependency examples. It may run
 `systemctl daemon-reload`; it does **not** enable, start, stop, or restart any
 NFTFW unit and does not create an enforcement pointer or apply firewall policy.
 
-A corrected 2.0.2-to-2.0.2 upgrade preserves enabled/disabled and
+A supported 2.0.2-to-2.0.3 upgrade preserves enabled/disabled and
 active/inactive state and does not restart services automatically. An in-place
 upgrade from a pre-2.0.2 version or legacy `/var/lib/nftfw/state.db` is refused
 before the old package can stop services. It requires the reviewed offline
@@ -104,10 +104,10 @@ returned generation before commit.
 | `/var/lib/nftfw/generation-state/state.db` | Replaceable generation/operational database | root-only directory |
 | `/var/lib/nftfw/provenance-ledger.db` | Monotonic interface-ID ledger and retired tombstones | root-only; separate from generation rollback |
 | `/var/lib/nftfw/generations/` | Immutable generation `.nft` and `.snapshot.json` artifacts | root-only directory |
-| `/var/lib/nftfw/active.snapshot.json` | Legacy evidence only; 2.0.2 does not publish this path | preserve if encountered; do not treat as active state |
+| `/var/lib/nftfw/active.snapshot.json` | Legacy evidence only; 2.0.3 does not publish this path | preserve if encountered; do not treat as active state |
 | `/var/lib/nftfw/enforcement-enabled` | Generation/checksum enforcement pointer | root-only directory |
 | `/run/nftfw/control.sock` | Mutating API | root peer only |
 | `/run/nftfw/status.sock` | Read-only API | dashboard group readable |
 
-No 2.0.2 installation or activation has been performed on the NUC under the
-source-only Stage R approval.
+The 2.0.3 source-only candidate does not itself authorize installation or
+activation on a host.

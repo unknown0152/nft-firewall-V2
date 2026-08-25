@@ -1,6 +1,6 @@
 # Recovery
 
-The current 2.0.2 source is a **RELEASE CANDIDATE - NOT DEPLOYABLE**. Recovery
+The current 2.0.3 source is a **RELEASE CANDIDATE - NOT DEPLOYABLE**. Recovery
 commands must not be exercised on the NUC until the disposable Stage R2 crash,
 boot, package, and rollback matrix has passed and the deployment plan is
 separately approved.
@@ -83,7 +83,7 @@ names, at least:
 /var/lib/nftfw/provenance-ledger.db
 /var/lib/nftfw/provenance-ledger.db-journal  # optional DELETE-mode rollback journal
 /var/lib/nftfw/generations/
-/var/lib/nftfw/active.snapshot.json  # legacy evidence only; never published by 2.0.2
+/var/lib/nftfw/active.snapshot.json  # legacy evidence only; never published by 2.0.3
 /var/lib/nftfw/enforcement-enabled
 ```
 
@@ -92,7 +92,7 @@ must never overwrite or rewind the ledger. Ledger restoration is merge-only
 and rejects changed mappings, removed tombstones, ID reuse, or regression. Use
 a unique recovery directory if prior failed files already exist, and preserve
 failed generation-database WAL/SHM files and the ledger's optional DELETE-mode
-`-journal` for diagnosis. Ledger `-wal` or `-shm` files are not canonical 2.0.2
+`-journal` for diagnosis. Ledger `-wal` or `-shm` files are not canonical 2.0.3
 state; if encountered, preserve them separately as unexpected forensic or
 defensive evidence rather than treating them as normal restore inputs. Never
 use `nft flush ruleset`; it can remove unrelated protections.

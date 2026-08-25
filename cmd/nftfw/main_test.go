@@ -301,7 +301,7 @@ func TestStageRCandidateOnlyAllowsVersionAndNothingElse(t *testing.T) {
 		}
 	}
 	version.BuildDisposition = "release"
-	version.Version = "2.0.2~stage.r.aaaaaaaaaaaa"
+	version.Version = "2.0.3~stage.r.aaaaaaaaaaaa"
 	if err := run([]string{"status"}); err == nil || !strings.Contains(err.Error(), "candidate-only build is quarantined") {
 		t.Fatalf("candidate version escaped CLI quarantine under forged disposition: %v", err)
 	}

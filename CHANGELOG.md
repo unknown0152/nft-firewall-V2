@@ -1,11 +1,19 @@
 # Changelog
 
-## 2.0.2 — Stage R release candidate (not deployable)
+## 2.0.3 - Dashboard status contract patch
 
-This entry describes source-only remediation whose pre-freeze Stage R matrix
-passes. It is not a final release announcement. Stage R2 privileged package, boot, network, Docker, and
-real-OVPN acceptance has **not been executed**; no 2.0.2 tag or final artifact
-exists.
+- Align the read-only dashboard and its fail-closed health projection with the
+  daemon's `nftfw.status.v2` schema.
+- Add regression coverage that rejects the obsolete v1 status schema and
+  accepts only a complete protected v2 snapshot.
+- Preserve the 2.0.2 policy compiler, privileged daemon, state schema,
+  nftables ownership, WireGuard enforcement, and systemd boot contracts
+  unchanged.
+
+## 2.0.2 - Provenance and boot-safety release
+
+This release introduced the production provenance, boot-readiness, package,
+Docker-ownership, and recovery architecture used by the first live deployment.
 
 - Reserve the high conntrack-mark byte for immutable ingress provenance while
   preserving the lower 24 bits, tag original-direction input/forward flows

@@ -1,6 +1,6 @@
 # Package installation layout
 
-> **2.0.2 is a RELEASE CANDIDATE - NOT DEPLOYABLE.** Stage R2 has not run.
+> **2.0.3 is a RELEASE CANDIDATE - NOT DEPLOYABLE.** Stage R2 has not run.
 > This layout description is not permission to install candidate artifacts or
 > modify a host. Even an accepted final release requires separate explicit
 > approval of the completed server deployment plan.
@@ -27,12 +27,12 @@ report the same full 40-hex commit identity.
 The Debian builder likewise binds the protected native candidate's full commit
 into `preinst`. A same-version package reinstall must prove that the protected
 installed binary reports that exact version and commit; a normal Debian
-`2.0.2~rcN` to `2.0.2` upgrade remains a version increase and is allowed.
+`2.0.3~rcN` to `2.0.3` upgrade remains a version increase and is allowed.
 
 Pre-2.0.2 state requires the reviewed offline `nftfw state migrate` contract
 and a separate package handoff. Both installation paths still refuse an
 in-place legacy package upgrade instead of moving or rewriting state. Every
-official 2.0.2 RC/final uses schema 6; an existing canonical database must
+official 2.0.3 RC/final uses schema 6; an existing canonical database must
 prove the exact migration history `1,2,3,4,5,6` through an immutable read
 before the installed, nonmigrating backup/verify commands may run.
 

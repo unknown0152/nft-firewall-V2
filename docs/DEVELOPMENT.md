@@ -37,9 +37,9 @@ paths, and socket purpose are reviewed in `SECURITY_AUDIT.md`.
 
 ```bash
 make build
-make release VERSION=2.0.2+ci COMMIT=$(git rev-parse HEAD) \
+make release VERSION=2.0.3+ci COMMIT=$(git rev-parse HEAD) \
   BUILD_DATE=$(git show -s --format=%cI HEAD) DISPOSITION=ci
-make deb VERSION=2.0.2+ci COMMIT=$(git rev-parse HEAD) DISPOSITION=ci
+make deb VERSION=2.0.3+ci COMMIT=$(git rev-parse HEAD) DISPOSITION=ci
 ./tests/packaging/systemd_preflight.sh amd64
 ```
 
@@ -51,18 +51,18 @@ and a controlled build date. amd64 and arm64 are produced.
 Source-only Stage R may exercise candidate packaging only from a clean tree:
 
 ```bash
-GOTOOLCHAIN=go1.25.13 ./scripts/package-release.sh 2.0.2 --allow-untagged
+GOTOOLCHAIN=go1.25.13 ./scripts/package-release.sh 2.0.3 --allow-untagged
 ```
 
 That mode derives the quarantine label
-`2.0.2-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>`. The output directory,
+`2.0.3-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>`. The output directory,
 both archive filenames, and both standalone package filenames contain that
 full label. Every standalone binary filename contains
 `RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>`. The external directory also
 contains the standalone `RELEASE-CANDIDATE-NOT-DEPLOYABLE.txt` warning, and
 the copied report metadata and console output repeat the disposition. Candidate
 binaries and the packages enclosed by the archives use the non-final artifact
-version `2.0.2~stage.r.<commit12>`. Quarantine is enforced at runtime too:
+version `2.0.3~stage.r.<commit12>`. Quarantine is enforced at runtime too:
 candidate `nftfw` permits only `version`, candidate `nftfwd` and `nftfw-web`
 refuse startup, and candidate Debian `preinst` refuses installation. These are
 test inputs, not installable or publishable release artifacts. Tagged final
@@ -80,7 +80,7 @@ the build.
 The script builds from an immutable export of the captured Git commit, verifies
 the complete artifact set in a temporary directory, and atomically publishes
 with no-replace semantics into the pre-created protected default parent as
-`../releases/nft-firewall-v2-2.0.2-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>/`.
+`../releases/nft-firewall-v2-2.0.3-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>/`.
 That directory contains two quarantined archives, six visibly quarantined
 standalone binaries, two visibly quarantined standalone Debian packages,
 `FINAL_ACCEPTANCE_REPORT.md`, `SOURCE_SECURITY_AUDIT.md`,
@@ -91,7 +91,7 @@ the enclosing `SHA256SUMS`. The extracted-tree record is emitted only after
 both ZIP and tar extractions pass and their deterministic scan evidence is
 byte-identical. The archives contain their
 own warning and integrity inventory; any generic internal binary/package names
-remain enclosed `2.0.2~stage.r.<commit12>` test inputs and must not be extracted
+remain enclosed `2.0.3~stage.r.<commit12>` test inputs and must not be extracted
 for installation during Stage R. The script serializes release builds and
 refuses to replace an existing artifact-label directory.
 
@@ -104,17 +104,17 @@ allowed). The builder never creates or relaxes these trust roots.
 ```bash
 install -d -m 0700 /absolute/parent-a /absolute/parent-b /absolute/evidence
 NFTFW_RELEASE_PARENT=/absolute/parent-a GOTOOLCHAIN=go1.25.13 \
-  ./scripts/package-release.sh 2.0.2 --allow-untagged
+  ./scripts/package-release.sh 2.0.3 --allow-untagged
 NFTFW_RELEASE_PARENT=/absolute/parent-b GOTOOLCHAIN=go1.25.13 \
-  ./scripts/package-release.sh 2.0.2 --allow-untagged
+  ./scripts/package-release.sh 2.0.3 --allow-untagged
 ```
 
 Then generate the external comparison record:
 
 ```bash
 python3 ./scripts/compare-candidate-builds.py \
-  --left /absolute/parent-a/nft-firewall-v2-2.0.2-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12> \
-  --right /absolute/parent-b/nft-firewall-v2-2.0.2-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12> \
+  --left /absolute/parent-a/nft-firewall-v2-2.0.3-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12> \
+  --right /absolute/parent-b/nft-firewall-v2-2.0.3-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12> \
   --output /absolute/evidence/STAGE_R_CANDIDATE_COMPARISON.json
 ```
 
@@ -139,7 +139,7 @@ the named package, boot, network/leak, Docker, OVPN, reproducibility,
 inspection, and secret-scan results. A tag is never moved and the frozen source
 is never amended merely to insert later results.
 
-The post-R2 tagged build uses the canonical `2.0.2` archive, binary, and
+The post-R2 tagged build uses the canonical `2.0.3` archive, binary, and
 package filenames inside a protected non-public parent. Its notice and build
 evidence state that external final approval is still required. Approval may
 therefore authorize the already checksummed canonical path set without

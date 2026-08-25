@@ -58,8 +58,8 @@ def make_candidate(root: Path, payload: bytes = b"candidate payload\n") -> None:
     evidence = {
         "schema": "nftfw.build-evidence.v1",
         "status": "STAGE_R_CANDIDATE_BUILD_PASS",
-        "target_version": "2.0.2",
-        "artifact_version": "2.0.2~stage.r.deadbeefcafe",
+        "target_version": "2.0.3",
+        "artifact_version": "2.0.3~stage.r.deadbeefcafe",
         "git_commit": "deadbeefcafe" + "0" * 28,
         "git_tag": "unreleased",
         "git_tag_object": "unreleased",
@@ -211,7 +211,7 @@ class CandidateComparisonTests(unittest.TestCase):
             (
                 "artifact version",
                 lambda evidence: evidence.__setitem__(
-                    "artifact_version", "2.0.2~stage.r.000000000000"
+                    "artifact_version", "2.0.3~stage.r.000000000000"
                 ),
                 "artifact version is not commit-bound",
             ),

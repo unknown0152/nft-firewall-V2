@@ -238,7 +238,7 @@ class InstallerLifecycleContracts(unittest.TestCase):
         self.assertIn(
             'dpkg --compare-versions "$old_version" gt "$package_version"',
             preinst,
-            "a 2.0.2 package must not open state from a future/newer package",
+            "a 2.0.3 package must not open state from a future/newer package",
         )
         self.assertIn(
             '-e "s/@VERSION@/$version/g" -e "s/@COMMIT@/$candidate_commit/g"',
@@ -278,7 +278,7 @@ class InstallerLifecycleContracts(unittest.TestCase):
             ),
             portable.index("case \"$installed_version\" in"),
             "the source installer must reach the newer-version refusal before its "
-            "2.0.2 compatibility-family gate",
+            "2.0.2/2.0.3 compatibility-family gate",
         )
         self.assertIn(
             '"$installed_commit" != "$candidate_commit"',
@@ -293,7 +293,7 @@ class InstallerLifecycleContracts(unittest.TestCase):
 
     def test_deb_preinst_version_substitution_preserves_only_the_guard_value(self) -> None:
         source = read("packaging/deb/preinst")
-        staged = source.replace("@VERSION@", "2.0.2~rc1").replace(
+        staged = source.replace("@VERSION@", "2.0.3~rc1").replace(
             "@COMMIT@", "a" * 40
         ).replace("@BUILD_DISPOSITION@", "release")
         self.assertNotIn("@VERSION@", staged)
@@ -305,7 +305,7 @@ class InstallerLifecycleContracts(unittest.TestCase):
             script.write(staged)
             script.flush()
             result = subprocess.run(
-                ["dash", script.name, "abort-upgrade", "2.0.2~rc0"],
+                ["dash", script.name, "abort-upgrade", "2.0.3~rc0"],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -316,7 +316,7 @@ class InstallerLifecycleContracts(unittest.TestCase):
     def test_deb_preinst_intrinsically_refuses_non_release_payloads(self) -> None:
         staged = (
             read("packaging/deb/preinst")
-            .replace("@VERSION@", "2.0.2~stage.r.aaaaaaaaaaaa")
+            .replace("@VERSION@", "2.0.3~stage.r.aaaaaaaaaaaa")
             .replace("@COMMIT@", "a" * 40)
             .replace("@BUILD_DISPOSITION@", "stage-r-candidate-only")
         )
@@ -326,7 +326,7 @@ class InstallerLifecycleContracts(unittest.TestCase):
             script.write(staged)
             script.flush()
             result = subprocess.run(
-                ["dash", script.name, "install", "2.0.2~stage.r.old"],
+                ["dash", script.name, "install", "2.0.3~stage.r.old"],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -340,7 +340,7 @@ class InstallerLifecycleContracts(unittest.TestCase):
             script.write(staged)
             script.flush()
             recovery = subprocess.run(
-                ["dash", script.name, "abort-upgrade", "2.0.2~stage.r.old"],
+                ["dash", script.name, "abort-upgrade", "2.0.3~stage.r.old"],
                 check=False,
                 capture_output=True,
                 text=True,
@@ -355,8 +355,8 @@ class InstallerLifecycleContracts(unittest.TestCase):
                 check=False,
             ).returncode == 0
 
-        self.assertTrue(compare("2.0.2~rc1", "lt", "2.0.2"))
-        self.assertTrue(compare("2.0.2+ci", "gt", "2.0.2"))
+        self.assertTrue(compare("2.0.3~rc1", "lt", "2.0.3"))
+        self.assertTrue(compare("2.0.3+ci", "gt", "2.0.3"))
         self.assertTrue(compare("2.0.3", "gt", "2.0.2"))
 
     def test_portable_binary_identity_parser_rejects_ambiguous_builds(self) -> None:
@@ -382,30 +382,30 @@ class InstallerLifecycleContracts(unittest.TestCase):
 
         commit = "a" * 40
         accepted = identify(
-            '{"version":"2.0.2~rc1","commit":"'
+            '{"version":"2.0.3~rc1","commit":"'
             + commit
             + '","build_date":"2026-08-24T00:00:00Z",'
             '"build_disposition":"release",'
-            '"artifact_identity":"2.0.2~rc1|'
+            '"artifact_identity":"2.0.3~rc1|'
             + commit
             + '|2026-08-24T00:00:00Z|release"}'
         )
         self.assertEqual(accepted.returncode, 0, accepted.stderr)
-        self.assertEqual(accepted.stdout, f"2.0.2~rc1 {commit} release\n")
+        self.assertEqual(accepted.stdout, f"2.0.3~rc1 {commit} release\n")
         self.assertNotEqual(
             identify(
-                '{"version":"2.0.2","commit":"unknown",'
+                '{"version":"2.0.3","commit":"unknown",'
                 '"build_date":"unknown","build_disposition":"release",'
-                '"artifact_identity":"2.0.2|unknown|unknown|release"}'
+                '"artifact_identity":"2.0.3|unknown|unknown|release"}'
             ).returncode,
             0,
         )
         self.assertNotEqual(
             identify(
-                '{"version":"2.0.2","commit":"'
+                '{"version":"2.0.3","commit":"'
                 + commit
                 + '","build_date":"now","build_disposition":"release",'
-                '"artifact_identity":"2.0.2|'
+                '"artifact_identity":"2.0.3|'
                 + commit
                 + '|now|release"}'
             ).returncode,
@@ -413,11 +413,11 @@ class InstallerLifecycleContracts(unittest.TestCase):
         )
         self.assertEqual(
             identify(
-                '{"version":"2.0.2","commit":"'
+                '{"version":"2.0.3","commit":"'
                 + commit
                 + '","build_date":"2026-08-24T00:00:00Z",'
                 '"build_disposition":"stage-r-candidate-only",'
-                '"artifact_identity":"2.0.2|'
+                '"artifact_identity":"2.0.3|'
                 + commit
                 + '|2026-08-24T00:00:00Z|stage-r-candidate-only"}'
             ).returncode,
@@ -645,7 +645,7 @@ class SystemdGraphContracts(unittest.TestCase):
         self.assertIn(
             "-/var/lib/nftfw/active.snapshot.json",
             rollback_ro,
-            "2.0.2 never publishes the legacy active snapshot, so its absence must not "
+            "2.0.3 never publishes the legacy active snapshot, so its absence must not "
             "fail the static service sandbox",
         )
         self.assertIn(
@@ -702,7 +702,7 @@ class SystemdGraphContracts(unittest.TestCase):
             one(unit, "Service", "ExecStart"),
             "/usr/lib/nftfw/nftfwd --restore-active --recover-commit-publication "
             "--resolve-stale-pending --state-dir /var/lib/nftfw",
-            "early restore must use the complete 2.0.2 recovery operation",
+            "early restore must use the complete 2.0.3 recovery operation",
         )
         self.assertFalse(
             values(unit, "Service", "ExecStop"),
@@ -870,7 +870,7 @@ class NftfwdCLIContracts(unittest.TestCase):
         source = read("cmd/nftfwd/main.go")
         if '"/var/lib/nftfw/state.db"' in source:
             self.fail(
-                "2.0.2 static recovery must not silently fall back to the legacy database"
+                "2.0.3 static recovery must not silently fall back to the legacy database"
             )
         canonical_database = (
             r'filepath\.Join\([^\n]*"generation-state"[^\n]*"state\.db"'
@@ -948,22 +948,22 @@ class NftfwdCLIContracts(unittest.TestCase):
 
 
 class ReleaseCandidateMetadataContracts(unittest.TestCase):
-    def test_build_defaults_and_ci_identify_2_0_2(self) -> None:
+    def test_build_defaults_and_ci_identify_2_0_3(self) -> None:
         makefile = read("Makefile")
         if not (
             re.search(r"(?m)^TARGET_VERSION := .*RELEASE_VERSION", makefile)
             and "VERSION ?= $(TARGET_VERSION)" in makefile
         ):
             self.fail("Makefile must source its default VERSION from RELEASE_VERSION")
-        if read("RELEASE_VERSION").strip() != "2.0.2":
-            self.fail("tracked RELEASE_VERSION must identify the 2.0.2 source line")
+        if read("RELEASE_VERSION").strip() != "2.0.3":
+            self.fail("tracked RELEASE_VERSION must identify the 2.0.3 source line")
         build_deb = read("scripts/build-deb.sh")
         if 'version=${1:-}' not in build_deb or "Usage: build-deb.sh <version>" not in build_deb:
             self.fail("build-deb.sh must require an explicit version argument")
         if re.search(r"version=\$\{1:-2\.0\.1\}", build_deb):
             self.fail("build-deb.sh retains the obsolete 2.0.1 default")
-        if "make deb VERSION=2.0.2+ci" not in read(".github/workflows/ci.yml"):
-            self.fail("CI package build must use the clearly non-final 2.0.2+ci version")
+        if "make deb VERSION=2.0.3+ci" not in read(".github/workflows/ci.yml"):
+            self.fail("CI package build must use the clearly non-final 2.0.3+ci version")
         if "nft-firewall-v2_2.0.1_" in read("INSTALL.md"):
             self.fail("INSTALL.md still names a 2.0.1 package as the current install input")
 
@@ -1031,7 +1031,7 @@ class ReleaseCandidateMetadataContracts(unittest.TestCase):
         self.assertIn('"$binary" version --json', installer)
         self.assertIn('"$candidate_disposition" != release', installer)
         self.assertIn('"$candidate_version" == *~stage.r.*', installer)
-        self.assertIn('"$candidate_version" == 2.0.2', installer)
+        self.assertIn('"$candidate_version" == 2.0.3', installer)
         self.assertLess(
             installer.index('"$candidate_disposition" != release'),
             installer.index("validation_dir=\"\""),
@@ -1044,7 +1044,7 @@ class ReleaseCandidateMetadataContracts(unittest.TestCase):
         base = [
             "make",
             "release-metadata-check",
-            "VERSION=2.0.2~stage.r.aaaaaaaaaaaa",
+            "VERSION=2.0.3~stage.r.aaaaaaaaaaaa",
             "BUILD_DATE=2026-08-24T00:00:00Z",
         ]
         accepted = subprocess.run(
@@ -1086,7 +1086,7 @@ class ReleaseCandidateMetadataContracts(unittest.TestCase):
             [
                 "make",
                 "release-metadata-check",
-                "VERSION=2.0.2",
+                "VERSION=2.0.3",
                 "BUILD_DATE=2026-08-24T00:00:00Z",
                 "COMMIT=" + "a" * 40,
                 "DISPOSITION=stage-r-candidate-only",
@@ -1102,7 +1102,7 @@ class ReleaseCandidateMetadataContracts(unittest.TestCase):
             [
                 "make",
                 "release-metadata-check",
-                "VERSION=2.0.2+ci",
+                "VERSION=2.0.3+ci",
                 "BUILD_DATE=2026-08-24T00:00:00Z",
                 "COMMIT=" + "a" * 40,
                 "DISPOSITION=ci",
@@ -1154,8 +1154,8 @@ class ReleaseCandidateMetadataContracts(unittest.TestCase):
         first_heading = re.search(r"(?m)^## ([^\n]+)$", changelog)
         self.assertIsNotNone(first_heading, "CHANGELOG.md has no release heading")
         self.assertTrue(
-            first_heading.group(1).startswith("2.0.2"),
-            f"first changelog release must be 2.0.2, found {first_heading.group(1)!r}",
+            first_heading.group(1).startswith("2.0.3"),
+            f"first changelog release must be 2.0.3, found {first_heading.group(1)!r}",
         )
 
     def test_untagged_builder_marks_private_rc_as_not_deployable(self) -> None:

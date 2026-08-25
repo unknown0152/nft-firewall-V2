@@ -1,6 +1,6 @@
 # Architecture
 
-This describes the 2.0.2 candidate design. The candidate is not deployable and
+This describes the 2.0.3 candidate design. The candidate is not deployable and
 its privileged runtime behavior remains unproved until Stage R2.
 
 ## Process and privilege model

@@ -1,6 +1,6 @@
 # V1 Feature Parity and V2 Decisions
 
-> **2.0.2 remains a RELEASE CANDIDATE - NOT DEPLOYABLE.** This comparison is
+> **2.0.3 remains a RELEASE CANDIDATE - NOT DEPLOYABLE.** This comparison is
 > design documentation, not Stage R2 evidence or permission to install, apply,
 > or deploy. Deployment additionally requires separate approval of the
 > completed server plan.

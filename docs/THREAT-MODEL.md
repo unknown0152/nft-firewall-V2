@@ -1,6 +1,6 @@
 # Threat Model
 
-This is the intended 2.0.2 candidate boundary. The candidate is not deployable;
+This is the intended 2.0.3 candidate boundary. The candidate is not deployable;
 Stage R2 packet, package, boot, Docker, and provider evidence is not executed.
 Passing those gates would still not authorize server installation without
 separate explicit approval of the completed deployment plan.

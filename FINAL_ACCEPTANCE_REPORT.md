@@ -24,8 +24,8 @@ separate immutable records bound to exact hashes.
 
 **NOT ACCEPTED FOR RELEASE OR DEPLOYMENT.**
 
-The current 2.0.2 work is an untagged source-only Stage R candidate. No final
-package, archive, checksum set, provenance statement, or `v2.0.2` tag has been
+The current 2.0.3 work is an untagged source-only Stage R candidate. No final
+package, archive, checksum set, provenance statement, or `v2.0.3` tag has been
 created. Candidate-mode output, if later built under the existing Stage R
 scope, must say `RELEASE CANDIDATE - NOT DEPLOYABLE` and is test input only.
 
@@ -44,7 +44,7 @@ mutation, package installation, service activation, reboot, Docker-daemon
 access, real OVPN use, host-network test, or NUC deployment was performed for
 this source revision.
 
-| Gate | 2.0.2 status |
+| Gate | 2.0.3 status |
 | --- | --- |
 | Source-only Stage R contracts | See the frozen `TEST_RESULTS.md`; exact tests are identified by command rather than a brittle count |
 | Full pinned Go 1.25.13 quality/security matrix | See the frozen `TEST_RESULTS.md` |
@@ -68,7 +68,7 @@ its commit. Promotion requires separate immutable records in this order:
    environments.
 4. An external `nftfw.r2-attestation.v1` record authorizes only tagged
    validation and keeps deployment unauthorized.
-5. The immutable annotated `v2.0.2` tag points to that commit.
+5. The immutable annotated `v2.0.3` tag points to that commit.
 6. Post-tag final packages are built and the required package lifecycle,
    boot, leak, reproducibility, inspection, and secret-scan gates pass again.
 7. A `nftfw.post-tag-validation.v1` manifest binds every named PASS gate to the
@@ -101,9 +101,9 @@ replacing the source.
 Candidate mode uses the visibly quarantined label below rather than a
 final-looking output directory, archive, binary, or package name. In a copied
 candidate report, `@RELEASE_ARTIFACT_LABEL@` expands to
-`2.0.2-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>`; `<commit12>` below is the
+`2.0.3-RELEASE-CANDIDATE-NOT-DEPLOYABLE-<commit12>`; `<commit12>` below is the
 first 12 hexadecimal characters of `@GIT_COMMIT@`. Its non-final embedded and
-Debian artifact version is `2.0.2~stage.r.<commit12>`.
+Debian artifact version is `2.0.3~stage.r.<commit12>`.
 
 ```text
 nft-firewall-v2-@RELEASE_ARTIFACT_LABEL@/

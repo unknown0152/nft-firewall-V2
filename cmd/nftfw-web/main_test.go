@@ -23,7 +23,7 @@ func TestStageRCandidateOnlyRefusesWebStartup(t *testing.T) {
 		t.Fatal("candidate-only nftfw-web startup was accepted")
 	}
 	version.BuildDisposition = "development"
-	version.Version = "2.0.2~stage.r.aaaaaaaaaaaa"
+	version.Version = "2.0.3~stage.r.aaaaaaaaaaaa"
 	if err := candidateStartupGuard(); err == nil {
 		t.Fatal("candidate-version nftfw-web startup was accepted under a forged disposition")
 	}

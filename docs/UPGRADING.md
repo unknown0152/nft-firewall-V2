@@ -1,13 +1,14 @@
 # Upgrading
 
-The current 2.0.2 source is a **RELEASE CANDIDATE - NOT DEPLOYABLE**. No
+The current 2.0.3 source is a **RELEASE CANDIDATE - NOT DEPLOYABLE**. No
 upgrade may be attempted until Stage R2 and final tagged-package acceptance
 are complete. Passing those release gates still does not authorize a server
 upgrade; the completed deployment plan requires separate explicit approval.
 
 ## Supported package path
 
-The corrected package supports only an established 2.0.2-family state layout:
+The corrected package supports the established 2.0.2-family schema-6 state
+layout used by 2.0.3:
 
 ```text
 /var/lib/nftfw/generation-state/state.db
@@ -43,7 +44,7 @@ state, systemd state, or firewall. Completing the older-package handoff remains
 a separately reviewed deployment operation; database migration alone does not
 bypass the package pre-install guard.
 
-For a future supported 2.0.2-to-2.0.2 upgrade, first record unit
+For the supported 2.0.2-to-2.0.3 upgrade, first record unit
 enabled/disabled and active/inactive state, then validate and back up the
 generation database with the currently installed binary:
 

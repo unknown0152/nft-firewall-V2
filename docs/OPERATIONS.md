@@ -1,6 +1,6 @@
 # Operations
 
-The current 2.0.2 source is a non-deployable Stage R candidate. These commands
+The current 2.0.3 source is a non-deployable Stage R candidate. These commands
 describe future operation after final acceptance; none was run on the NUC as
 part of Stage R.
 

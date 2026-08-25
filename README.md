@@ -1,6 +1,6 @@
 # NFT Firewall V2
 
-> **Current 2.0.2 status: RELEASE CANDIDATE - NOT DEPLOYABLE.** Only
+> **Current 2.0.3 status: RELEASE CANDIDATE - NOT DEPLOYABLE.** Only
 > source-only Stage R work is approved. R2 privileged package, boot, network,
 > Docker, and real-OVPN evidence has not been executed for this source
 > revision; a prior commit's boot hard stop is not transferable evidence. Do
@@ -49,10 +49,10 @@ checksums and exact bytes were covered by final external approval; do not
 rebuild an extracted source tree and silently substitute different bytes.
 
 ```bash
-unzip nft-firewall-v2-2.0.2.zip
+unzip nft-firewall-v2-2.0.3.zip
 cd nft-firewall-v2
 sha256sum -c SHA256SUMS
-sudo apt install ./packages/nft-firewall-v2_2.0.2_$(dpkg --print-architecture).deb
+sudo apt install ./packages/nft-firewall-v2_2.0.3_$(dpkg --print-architecture).deb
 sudoedit /etc/nftfw/nftfw.toml
 sudo nftfw config validate
 sudo nftfw doctor
@@ -93,7 +93,7 @@ privileged R2 gate remain outstanding.
 ```bash
 make check
 make static vuln security
-make release VERSION=2.0.2+ci DISPOSITION=ci
+make release VERSION=2.0.3+ci DISPOSITION=ci
 sudo ./tests/namespaces/run.sh
 ```
 

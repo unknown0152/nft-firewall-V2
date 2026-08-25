@@ -57,15 +57,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: make deb VERSION=2.0.2+ci COMMIT="$GITHUB_SHA" DISPOSITION=ci
+      - run: make deb VERSION=2.0.3+ci COMMIT="$GITHUB_SHA" DISPOSITION=ci
       - run: ./tests/packaging/systemd_preflight.sh amd64
       - run: sha256sum -c dist/SHA256SUMS
-      - run: dpkg-deb --info dist/nft-firewall-v2_2.0.2+ci_amd64.deb
-      - run: dpkg-deb --info dist/nft-firewall-v2_2.0.2+ci_arm64.deb
+      - run: dpkg-deb --info dist/nft-firewall-v2_2.0.3+ci_amd64.deb
+      - run: dpkg-deb --info dist/nft-firewall-v2_2.0.3+ci_arm64.deb
       - name: Confirm CI packages remain non-release build artifacts
         run: |
-          test "$(dpkg-deb -f dist/nft-firewall-v2_2.0.2+ci_amd64.deb X-NFTFW-Build-Disposition)" = ci
-          test "$(dpkg-deb -f dist/nft-firewall-v2_2.0.2+ci_arm64.deb X-NFTFW-Build-Disposition)" = ci
+          test "$(dpkg-deb -f dist/nft-firewall-v2_2.0.3+ci_amd64.deb X-NFTFW-Build-Disposition)" = ci
+          test "$(dpkg-deb -f dist/nft-firewall-v2_2.0.3+ci_arm64.deb X-NFTFW-Build-Disposition)" = ci
       - name: Verify static current-architecture executables
         run: |
           file dist/nftfw-linux-amd64 dist/nftfwd-linux-amd64 dist/nftfw-web-linux-amd64

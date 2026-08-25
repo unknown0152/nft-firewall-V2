@@ -4,12 +4,12 @@ Audit date: 2026-08-16, 2026-08-17, 2026-08-23, 2026-08-24, and 2026-08-25 UTC. 
 nftables ownership, Unix APIs, persistence/rollback, systemd, integrations,
 web, installers, tests, dependencies, Git history, and release contents.
 
-Current source disposition: **2.0.2 RELEASE CANDIDATE - NOT DEPLOYABLE**.
+Current source disposition: **2.0.3 RELEASE CANDIDATE - NOT DEPLOYABLE**.
 Source-only pre-freeze Stage R gates pass, while post-freeze candidate
 construction/comparison and all R2 privileged package, boot, network, Docker,
 and real-OVPN acceptance remain separate. The findings below through NFV2-030
 record the tagged 2.0.1 audit history; their evidence is not
-silently promoted across the 2.0.2 provenance, persistence, Docker-identity,
+silently promoted across the 2.0.3 provenance, persistence, Docker-identity,
 and systemd/package changes. Current results and missing gates are listed in
 `TEST_RESULTS.md`. This document is not approval to install or mutate a host.
 
@@ -51,9 +51,9 @@ and systemd/package changes. Current results and missing gates are listed in
 Verification labels in this table describe regression coverage. Any
 namespace, real-provider, Docker, host, reboot, or other privileged evidence
 is historical evidence unless `TEST_RESULTS.md` explicitly records a current
-2.0.2 rerun against the same candidate commit.
+2.0.3 rerun against the same candidate commit.
 
-## 2.0.2 source repairs
+## 2.0.3 source baseline
 
 These repairs passed the current pinned source-only matrix. Their privileged
 packet, package, boot, Docker, and provider behavior remains an R2 gate.
@@ -79,8 +79,8 @@ packet, package, boot, Docker, and provider behavior remains an R2 gate.
 | Shell/argument injection | Go invokes fixed binaries with argument arrays; interfaces/names/addresses validated; no Go shell string execution |
 | nft ownership | Global flush rejected; only fixed family/table tuples may be deleted; unrelated-table tests pass |
 | Hidden allows | Compiler review found only loopback, protocol bootstrap, endpoint bootstrap, reply-only, trusted lease, stateful input/forward, and declared policies |
-| Conntrack bypass | 2.0.2 source regressions require write-once ingress provenance and remove broad established accepts; direct TCP/UDP alternate-ingress and leak packet proof remains an unexecuted R2 gate |
-| IPv6 bypass | Three explicit modes and disabled-mode hooks retain unit coverage; 2.0.2 namespace/real-VPN capture remains an unexecuted R2 gate |
+| Conntrack bypass | 2.0.3 source regressions require write-once ingress provenance and remove broad established accepts; direct TCP/UDP alternate-ingress and leak packet proof remains an unexecuted R2 gate |
+| IPv6 bypass | Three explicit modes and disabled-mode hooks retain unit coverage; 2.0.3 namespace/real-VPN capture remains an unexecuted R2 gate |
 | Unsafe temp/path use | Go uses secure temp APIs; protected state/config/cache paths reject symlinks and unsafe parents; package temp paths are fixed templates |
 | Socket permissions | Control mode/root peer authorization; status is deliberately dashboard-group readable; unsafe existing socket objects rejected |
 | Request/resource bounds | API, nft output, config, Docker output, feeds, Geo files, set counts, and audit fields bounded |
@@ -104,7 +104,7 @@ packet, package, boot, Docker, and provider behavior remains an R2 gate.
    repeatedly fight reconciliation. V2 detects/repairs its own objects only.
 5. The local dashboard has no application authentication. Its loopback bind,
    service sandbox, and status-only socket are required controls.
-6. No 2.0.2 full-machine reboot or live-host acceptance has been executed.
+6. No 2.0.3 full-machine reboot or live-host acceptance has been executed.
    Historical service/boot evidence is not promoted to this candidate.
 7. Release checksums and provenance are not cryptographically signed. A
    release operator must add a signature using an independently controlled
@@ -115,12 +115,12 @@ unresolved high/critical implementation findings.
 
 ## Final scan evidence
 
-The 2.0.2 pre-freeze source passed Go 1.25.13 unit/race/vet/module/fmt,
+The 2.0.3 pre-freeze source passed Go 1.25.13 unit/race/vet/module/fmt,
 staticcheck v0.7.0, govulncheck v1.7.0, gosec v2.28.0, nine bounded fuzz
 targets, complete changed-shell analysis, Stage R source/guard/comparator
 contracts, and the deterministic current-tree secret scan with zero findings.
 Exact frozen-commit history scans, extracted archive scans, package/archive
 inspection, and the two-build comparison are post-freeze external gates. No
-2.0.2 privileged R2 or extracted final-release evidence exists.
+2.0.3 privileged R2 or extracted final-release evidence exists.
 Historical privileged evidence is retained in its original tag reports and is
 not promoted to this candidate.

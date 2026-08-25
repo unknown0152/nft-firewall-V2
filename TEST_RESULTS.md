@@ -1,4 +1,4 @@
-# NFT Firewall V2 2.0.2 RC Test Results
+# NFT Firewall V2 2.0.3 RC Test Results
 
 Release disposition: **RELEASE CANDIDATE - NOT DEPLOYABLE**
 
@@ -82,7 +82,7 @@ following:
 - real-provider OVPN validation; or
 - installation, service changes, firewall mutation, or validation on the NUC.
 
-Historical 2.0.1 and 2.0.0 results do not apply to the changed 2.0.2
+Historical 2.0.1 and 2.0.0 results do not apply to the changed 2.0.3
 provenance, persistence, Docker identity, package lifecycle, or boot graph.
 Stage R2 requires a separately approved completed plan and approved disposable
 environments. Deployment to the server remains a later, separate approval even

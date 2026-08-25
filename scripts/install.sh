@@ -120,8 +120,8 @@ if [[ -n "$candidate_extra" || "$candidate_disposition" != release || \
     echo "Development, CI, and Stage R candidate artifacts are intrinsically non-installable." >&2
     exit 1
 fi
-[[ "$candidate_version" == 2.0.2 ]] || {
-    echo "Refusing source installer candidate version ${candidate_version:-unknown}; expected exact release 2.0.2." >&2
+[[ "$candidate_version" == 2.0.3 ]] || {
+    echo "Refusing source installer candidate version ${candidate_version:-unknown}; expected exact release 2.0.3." >&2
     exit 1
 }
 dpkg --validate-version "$candidate_version" >/dev/null 2>&1 || {
@@ -202,7 +202,7 @@ if [[ -e "$BIN_DIR/nftfw" || -L "$BIN_DIR/nftfw" ]]; then
         exit 1
     fi
     case "$installed_version" in
-        2.0.2|2.0.2-*|2.0.2+*|2.0.2~*) ;;
+        2.0.2|2.0.2-*|2.0.2+*|2.0.2~*|2.0.3|2.0.3-*|2.0.3+*|2.0.3~*) ;;
         *)
             echo "Refusing an incompatible NFT Firewall V2 version identity: $installed_version" >&2
             exit 1

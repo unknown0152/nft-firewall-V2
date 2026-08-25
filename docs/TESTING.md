@@ -1,9 +1,9 @@
 # Testing
 
-Current disposition: **2.0.2 RELEASE CANDIDATE - NOT DEPLOYABLE**. The
+Current disposition: **2.0.3 RELEASE CANDIDATE - NOT DEPLOYABLE**. The
 source-only commands and results that actually ran are recorded in
 `TEST_RESULTS.md`. Every privileged section below belongs to separately
-approved Stage R2 and is currently **NOT EXECUTED** for 2.0.2. R2 approval or
+approved Stage R2 and is currently **NOT EXECUTED** for 2.0.3. R2 approval or
 a later R2 pass is not deployment approval; actual server installation still
 requires separate explicit approval of the completed deployment plan.
 
@@ -50,7 +50,7 @@ go test ./internal/config -run '^$' -fuzz FuzzDecode -fuzztime 5s
 
 ## Namespace lab
 
-**Stage R2 only — NOT EXECUTED for 2.0.2.**
+**Stage R2 only - NOT EXECUTED for 2.0.3.**
 
 ```bash
 sudo ./tests/namespaces/run.sh
@@ -82,7 +82,7 @@ Missing prerequisites exit 77 and print `BLOCKED`; they do not produce PASS.
 
 ## Real WireGuard acceptance
 
-**Stage R2 only — NOT EXECUTED for 2.0.2.**
+**Stage R2 only - NOT EXECUTED for 2.0.3.**
 
 Place a root-owned mode `0600` profile at the path below. The harness parses
 only the fields it needs and never prints or archives the private key.
@@ -103,7 +103,7 @@ recovery, and Docker recovery. Synthetic traffic only is captured.
 
 ## Other privileged suites
 
-**Stage R2 only — NOT EXECUTED for 2.0.2.**
+**Stage R2 only - NOT EXECUTED for 2.0.3.**
 
 ```bash
 sudo ./tests/acceptance/database.sh
