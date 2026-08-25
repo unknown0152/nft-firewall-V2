@@ -37,6 +37,9 @@ exists.
   scans, protected build parents, deterministic double builds, R2 evidence,
   annotated tag object, post-tag validation, and final approval through
   external checksummed records without rewriting the frozen source report.
+- Pin Git archive permission normalization so the protected build is
+  independent of ambient `tar.umask` defaults and all exported regular files
+  match their required `0644`/`0755` modes.
 
 ## 2.0.1 — Security and release hardening
 

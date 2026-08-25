@@ -15,6 +15,13 @@ def read(relative: str) -> str:
 
 
 class ReleaseGuardContracts(unittest.TestCase):
+    def test_git_archive_modes_are_hermetic(self) -> None:
+        source = read("scripts/package-release.sh")
+        self.assertIn(
+            'git -c tar.umask=0022 archive --format=tar --output="$source_export" "$commit"',
+            source,
+        )
+
     def setUp(self) -> None:
         self.script = read("scripts/package-release.sh")
         self.report = read("FINAL_ACCEPTANCE_REPORT.md")

@@ -374,7 +374,7 @@ then
     exit 1
 fi
 
-git archive --format=tar --output="$source_export" "$commit"
+git -c tar.umask=0022 archive --format=tar --output="$source_export" "$commit"
 tar -xf "$source_export" -C "$build_source"
 tar -xf "$source_export" -C "$release_root/source"
 if ! python3 - "$tracked_entries" "$build_source" "$release_root/source" <<'PY'
