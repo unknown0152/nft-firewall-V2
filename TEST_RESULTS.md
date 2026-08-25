@@ -6,11 +6,12 @@ Evidence snapshot: 2026-08-25
 
 Approval scope: source-only Stage R
 
-This tracked record covers the reviewed source immediately before its freeze.
+This tracked record covers the reviewed source immediately before its renewed
+freeze after a prior commit hard-stopped in the R2 systemd boot transaction.
 It does not authorize installation, privileged testing, publication, or
 deployment. Candidate build, extracted-archive, and cross-parent comparison
 results are necessarily generated later and live in external evidence bound to
-the frozen commit and artifact hashes.
+the corrected frozen commit and artifact hashes.
 
 ## Source-only gates executed
 
@@ -25,10 +26,10 @@ is named explicitly.
 | Race suite | PASS | `go test -race ./...` |
 | Vet | PASS | `go vet ./...` |
 | Staticcheck | PASS | staticcheck 2026.1 / v0.7.0: `staticcheck ./...` |
-| Vulnerability reachability | PASS | govulncheck module v1.1.4; database updated 2026-08-21: `govulncheck ./...`; no vulnerabilities found |
+| Vulnerability reachability | PASS | govulncheck module v1.1.4; database updated 2026-08-25: `govulncheck ./...`; no vulnerabilities found |
 | Go security analysis | PASS | gosec module v2.28.0: `gosec -quiet -exclude-generated -exclude=G104,G204,G304,G302 ./...`; zero reported issues |
 | Offline migration contract | PASS | Exact schema 1-5 fixtures reach ordered schema 6 only through `state migrate`; source and byte-identical backup match; weakened/unknown/active/sidecar/current/future/ambiguous/overwrite cases refuse |
-| Stage R contracts | PASS | `bash ./tests/stage-r/run.sh`: source/package/systemd contracts, eight release guards, immutable v2.0.1 expected-red proofs, provenance source shape, twelve comparator tests, and nine scanner tests |
+| Stage R contracts | PASS | `bash ./tests/stage-r/run.sh`: source/package/systemd contracts including the independently scheduled early/readiness boot graph, eight release guards, immutable v2.0.1 expected-red proofs, provenance source shape, twelve comparator tests, and nine scanner tests |
 | Staged systemd verification | PASS | `./tests/packaging/systemd_preflight.sh amd64`; temporary units and staged executables only |
 | Shell quality | PASS | `bash -n`/`dash -n` and ShellCheck 0.10.0 across every changed installer, package, acceptance, namespace, and Stage R shell script |
 | Current filesystem secret scan | PASS | `python3 scripts/secret-scan.py tree --root . --output -`; deterministic rules `nftfw.secret-rules/2026-08-24.1`, zero findings |
@@ -66,9 +67,12 @@ source report.
 
 ## Privileged evidence boundary
 
-**R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED.**
+**R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED FOR
+THIS SOURCE REVISION.**
 
-No current 2.0.2 run performed any of the following:
+A prior commit reached an R2 systemd boot hard stop. Its results do not transfer
+to this corrected source revision. This revision performed none of the
+following:
 
 - nftables or network-namespace mutation;
 - tunnel-loss packet capture or zero-physical-leak validation;

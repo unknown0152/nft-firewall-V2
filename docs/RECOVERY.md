@@ -107,6 +107,14 @@ snapshot before `network-pre.target`, and remains active. The nonmutating
 network consumers start. Runtime trusted leases are excluded so expired access
 cannot replay.
 
+`network-pre.target` pulls early and readiness independently. Readiness orders
+after early but has no `Wants=`, `Requires=`, or `Requisite=` edge to it, so
+the common boot transaction can run early first while a manual readiness start
+cannot activate snapshot restoration. The verifier, required by
+`network-pre.target`, is the fail-closed success dependency. Final consumer
+drop-ins retain `Requisite=` plus `After=` on readiness so a routine consumer
+restart cannot activate either readiness or early restore.
+
 If a required pointer or snapshot is missing, corrupt, symlinked, oversized,
 or has an invalid checksum, recovery fails before an nftables mutation and
 readiness remains blocked. It does not select the emergency-deny policy merely

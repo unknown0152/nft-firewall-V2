@@ -35,12 +35,14 @@ external two-parent comparison remain post-freeze Stage R gates.
 
 ## Privileged evidence boundary
 
-**R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED.**
+**R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED FOR
+THIS SOURCE REVISION.**
 
-No namespace firewall mutation, package installation, service activation,
-reboot, Docker-daemon access, real OVPN use, host-network test, or NUC
-deployment was performed for 2.0.2. Older release evidence is historical and
-is not a substitute for rerunning changed code.
+A prior source commit reached an R2 systemd boot hard stop; that evidence is
+historical and cannot satisfy the corrected revision. No namespace firewall
+mutation, package installation, service activation, reboot, Docker-daemon
+access, real OVPN use, host-network test, or NUC deployment was performed for
+this source revision.
 
 | Gate | 2.0.2 status |
 | --- | --- |

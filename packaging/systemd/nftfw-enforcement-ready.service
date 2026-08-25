@@ -2,7 +2,6 @@
 Description=Verify restored NFTFW enforcement before network consumers
 Documentation=file:/usr/share/doc/nft-firewall-v2/RECOVERY.md
 DefaultDependencies=no
-Requisite=nftfw-early.service
 After=local-fs.target nftfw-early.service
 Before=network-pre.target
 

@@ -2,8 +2,9 @@
 
 > **Current 2.0.2 status: RELEASE CANDIDATE - NOT DEPLOYABLE.** Only
 > source-only Stage R work is approved. R2 privileged package, boot, network,
-> Docker, and real-OVPN evidence has not been executed. Do not install or
-> deploy this checkout or untagged candidate output.
+> Docker, and real-OVPN evidence has not been executed for this source
+> revision; a prior commit's boot hard stop is not transferable evidence. Do
+> not install or deploy this checkout or untagged candidate output.
 
 NFT Firewall V2 is a declarative Linux firewall controller for nftables,
 WireGuard, systemd, and SQLite. An operator describes zones, services,

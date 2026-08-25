@@ -100,11 +100,16 @@ Decision: persist pending state before apply, require an active independent
 timer, and publish commits through prepared database state, an immutable
 checksum-protected snapshot, a generation/checksum enforcement pointer, and a
 final database transition. Early recovery is idempotent across each boundary;
-a nonmutating readiness unit gates final network consumers.
+`network-pre.target` independently pulls the early restorer and requires a
+nonmutating readiness verifier. Readiness orders after early without a
+`Requisite=` or activating dependency. Final network consumers retain
+nonactivating `Requisite=`/`After=` edges to the already-active verifier.
 
 Security implications: CLI/daemon death and database corruption do not imply
 allow-all. Missing or corrupt immutable recovery evidence stops before any
-nftables mutation and blocks readiness. Emergency default deny is reserved for
+nftables mutation and makes the verifier fail, which blocks
+`network-pre.target` and consumers. Manually starting readiness or a consumer
+cannot activate snapshot restoration. Emergency default deny is reserved for
 a later failure to reconstruct mutable runtime security state after a
 generation installation has succeeded.
 

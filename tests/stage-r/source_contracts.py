@@ -732,19 +732,19 @@ class SystemdGraphContracts(unittest.TestCase):
             "early restore must precede networking, the daemon, and readiness",
         )
 
-    def test_ready_unit_is_nonactivating_and_read_only(self) -> None:
+    def test_ready_unit_is_independently_scheduled_and_read_only(self) -> None:
         relative = "packaging/systemd/nftfw-enforcement-ready.service"
         unit = parse_unit(relative)
-        self.assertEqual(
-            words(unit, "Unit", "Requisite"),
-            {"nftfw-early.service"},
-            "readiness must require early to be already active without activating it",
+        self.assertFalse(
+            values(unit, "Unit", "Requisite"),
+            "readiness must not reject the boot transaction before the independently "
+            "scheduled early restore can become active",
         )
         for key in self.ACTIVATING_KEYS:
             self.assertNotIn(
                 "nftfw-early.service",
                 words(unit, "Unit", key),
-                f"readiness must use Requisite, not activating {key}=, for early restore",
+                f"readiness may order after early but must not activate it with {key}=",
             )
         self.assertEqual(one(unit, "Unit", "DefaultDependencies"), "no")
         self.assertEqual(

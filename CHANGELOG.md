@@ -25,8 +25,10 @@ exists.
 - Make package and source installation nonactivating: installation may reload
   systemd metadata but does not enable, start, stop, or restart NFTFW units.
 - Keep the base daemon and rollback timer/service independent of early restore
-  before first commit. Add the remain-active early unit, nonactivating
-  readiness verifier, and inert final `Requisite=`/`After=` templates.
+  before first commit. Independently pull the remain-active early restore and
+  nonmutating readiness verifier into `network-pre.target`, order readiness
+  after early without a readiness `Requisite=`, and retain inert final
+  `Requisite=`/`After=` templates for consumers, the daemon, and rollback.
 - Add unprivileged Stage R contracts and immutable v2.0.1 expected-red proofs
   for provenance, package lifecycle, and dependency-graph defects.
 - Quarantine untagged candidate output with an explicit
