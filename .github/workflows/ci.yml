@@ -59,7 +59,7 @@ jobs:
           cache: true
       - run: make deb VERSION=2.0.3+ci COMMIT="$GITHUB_SHA" DISPOSITION=ci
       - run: ./tests/packaging/systemd_preflight.sh amd64
-      - run: sha256sum -c dist/SHA256SUMS
+      - run: cd dist && sha256sum -c SHA256SUMS
       - run: dpkg-deb --info dist/nft-firewall-v2_2.0.3+ci_amd64.deb
       - run: dpkg-deb --info dist/nft-firewall-v2_2.0.3+ci_arm64.deb
       - name: Confirm CI packages remain non-release build artifacts
