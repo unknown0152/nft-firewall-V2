@@ -67,9 +67,9 @@ candidate `nftfw` permits only `version`, candidate `nftfwd` and `nftfw-web`
 refuse startup, and candidate Debian `preinst` refuses installation. These are
 test inputs, not installable or publishable release artifacts. Tagged final
 validation packaging requires an annotated tag and an external, protected R2
-attestation bound to the exact version and commit. The frozen tracked report
-remains `STAGE_R_CANDIDATE_ONLY`; later evidence must not rewrite the commit it
-attests to.
+attestation bound to the exact version and commit. The frozen report at the
+release tag remains `STAGE_R_CANDIDATE_ONLY`; later publication documentation
+must not rewrite the commit it attests to.
 
 The release script refuses any Go toolchain other than the pinned Go 1.25.13
 and records that toolchain in the manifest and unsigned in-toto provenance

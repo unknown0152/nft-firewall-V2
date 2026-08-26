@@ -1,10 +1,13 @@
 # Installation
 
-> **2.0.3 STATUS: RELEASE CANDIDATE - NOT DEPLOYABLE.** Stage R2 package,
-> boot, network, Docker, and real-OVPN acceptance has not been executed. Do not
-> install this checkout or any untagged candidate output. The commands below
-> describe the future tagged release workflow and remain blocked until final
-> acceptance is recorded.
+NFT Firewall V2 `2.0.3` is an accepted release. Use the exact annotated
+`v2.0.3` tag at commit
+`e2b3fa0a20fa6e36325792397564966b21045120`, or a package whose bytes and
+checksums came from that validated release build.
+
+Installation is deliberately separate from activation. Before installing,
+complete the read-only preflight and host-specific checklist in
+`docs/HOST-HANDOFF.md`.
 
 ## Requirements
 
@@ -19,23 +22,27 @@ The installer does not install or start a VPN profile. WireGuard creation,
 private keys, routing, and provider configuration remain separate operator
 responsibilities.
 
-## Final release archive (after acceptance only)
+## GitHub release package
 
 ```bash
-unzip nft-firewall-v2-2.0.3.zip
-cd nft-firewall-v2
-sha256sum -c SHA256SUMS
-sudo apt install ./packages/nft-firewall-v2_2.0.3_$(dpkg --print-architecture).deb
+sha256sum -c --ignore-missing NFTFW-2.0.3-SHA256SUMS
+sudo apt install \
+  "./nft-firewall-v2_2.0.3_$(dpkg --print-architecture).deb"
 ```
 
-Those final-looking filenames must not exist through the Stage R candidate
-path. Untagged output carries `RELEASE-CANDIDATE-NOT-DEPLOYABLE` in its
-directory/archive name and contains a warning file with the same disposition.
+Download the checksum file and package for the target architecture from the
+GitHub `v2.0.3` release. A checksum proves file integrity but not publisher
+identity; independently verify the tag and expected commit when the download
+path is not already trusted.
+
+Do not install artifacts labeled `RELEASE-CANDIDATE-NOT-DEPLOYABLE`,
+development, or CI. Those build dispositions are intentionally rejected by
+the binaries and Debian pre-install guard.
 
 ## Debian package lifecycle
 
-After final acceptance, use the package matching the target architecture. A
-fresh install creates service identities, protected directories, the example
+Use the package matching the target architecture. A fresh install creates
+service identities, protected directories, the example
 configuration, six unit files, and inert dependency examples. It may run
 `systemctl daemon-reload`; it does **not** enable, start, stop, or restart any
 NFTFW unit and does not create an enforcement pointer or apply firewall policy.
@@ -50,7 +57,7 @@ or rename state to bypass that guard.
 ## Source tree lifecycle
 
 The source installer must not be run directly from an ordinary user-owned Git
-checkout or extraction. After final acceptance, first verify the final archive
+checkout or extraction. First verify the final archive
 against the separately obtained release checksum, then extract it into a new
 root-owned protected staging directory (for example, a mode `0700` directory
 beneath `/root`). Verify the archive's internal `SHA256SUMS` there. Populate
@@ -71,8 +78,7 @@ staged systemd units before host writes; preserves an existing configuration;
 backs up compatible generation state with the installed nonmigrating binary
 under the canonical lock; copies binaries/units/examples; and performs
 `systemctl daemon-reload`. It leaves a fresh installation inactive and does not
-apply a firewall policy. This future workflow remains blocked for the current
-Stage R candidate because Stage R2 has not run.
+apply a firewall policy.
 
 ## Deliberate activation and first apply
 
@@ -81,7 +87,7 @@ installing final consumer drop-ins, starting units, and performing first safe
 apply are deployment-plan steps. They require the separately approved guarded
 handoff and rollback procedure; they are not generic post-install commands.
 
-Before any approved first apply, at minimum validate the real configuration
+Before the first apply, at minimum validate the real configuration
 and topology without assuming the example values:
 
 ```bash
@@ -91,8 +97,8 @@ sudo nftfw doctor
 sudo nftfw plan
 ```
 
-Do not use `--unsafe` remotely. A later approved safe apply must use an
-independent recovery path and a second management session, then verify the
+Do not use `--unsafe` remotely. The first safe apply must use an independent
+recovery path and a second management session, then verify the
 returned generation before commit.
 
 ## Installed state paths
@@ -109,5 +115,7 @@ returned generation before commit.
 | `/run/nftfw/control.sock` | Mutating API | root peer only |
 | `/run/nftfw/status.sock` | Read-only API | dashboard group readable |
 
-The 2.0.3 source-only candidate does not itself authorize installation or
-activation on a host.
+The release is validated, but a release cannot determine a target host's
+correct topology or management policy. Installation and activation still
+require a reviewed host handoff, independent recovery access, and explicit
+operator action.

@@ -1,8 +1,9 @@
 # Security Policy and Guarantees
 
-The current 2.0.3 source is a **RELEASE CANDIDATE - NOT DEPLOYABLE**. The
-items below are intended code invariants, not a claim that Stage R2 package,
-boot, packet, Docker, real-OVPN, or host acceptance has run.
+NFT Firewall V2 `2.0.3` is an accepted release. The guarantees below passed
+the source, privileged R2, and post-tag validation described in
+`TEST_RESULTS.md`. They apply to the exact validated source and declared
+operating assumptions, not to an unaudited host configuration.
 
 Report vulnerabilities privately to the repository owner. Do not include live
 keys, tokens, public address inventories, production packet captures, or an
@@ -73,6 +74,7 @@ separate mutable runtime security state fails.
 See `docs/THREAT-MODEL.md` for the full model and `SECURITY_AUDIT.md` for the
 release review.
 
-No installation or deployment is authorized by Stage R or by a later R2 pass.
-The missing evidence in `TEST_RESULTS.md` must be completed, and the completed
-server deployment plan must then receive separate explicit approval.
+Release validation does not determine a target host's interfaces, management
+policy, VPN routing, Docker topology, or public exposure. Complete
+`docs/HOST-HANDOFF.md`, preserve an independent recovery path, and use a
+safe apply before activating the release on each host.

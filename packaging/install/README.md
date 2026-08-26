@@ -1,9 +1,8 @@
 # Package installation layout
 
-> **2.0.3 is a RELEASE CANDIDATE - NOT DEPLOYABLE.** Stage R2 has not run.
-> This layout description is not permission to install candidate artifacts or
-> modify a host. Even an accepted final release requires separate explicit
-> approval of the completed server deployment plan.
+NFT Firewall V2 `2.0.3` is an accepted release. This layout description does
+not replace target-host preflight, policy review, recovery preparation, or
+the deliberate activation steps in `docs/HOST-HANDOFF.md`.
 
 Stage R candidate quarantine is intrinsic as well as documentary: its Debian
 `preinst` refuses every non-release build disposition, candidate `nftfw`

@@ -1,9 +1,8 @@
 # Architecture Decisions
 
-The 2.0.3 source remains a non-deployable candidate until Stage R2 validates
-these decisions in the required privileged environments. Even a passing R2
-result would not authorize server installation without separate explicit
-approval of the completed deployment plan.
+The 2.0.3 release gates validated these decisions in the required source and
+privileged environments. A new host still requires the topology audit,
+recovery preparation, and guarded activation described in `HOST-HANDOFF.md`.
 
 Each decision records a maintenance constraint, not merely the implementation
 selected for v2.0.0.

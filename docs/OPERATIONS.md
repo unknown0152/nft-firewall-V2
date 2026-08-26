@@ -1,8 +1,8 @@
 # Operations
 
-The current 2.0.3 source is a non-deployable Stage R candidate. These commands
-describe future operation after final acceptance; none was run on the NUC as
-part of Stage R.
+These commands describe normal operation of the accepted 2.0.3 release.
+Complete the host-specific handoff in `HOST-HANDOFF.md` before first
+activation.
 
 ## Command reference
 

@@ -1,9 +1,9 @@
 # Threat Model
 
-This is the intended 2.0.3 candidate boundary. The candidate is not deployable;
-Stage R2 packet, package, boot, Docker, and provider evidence is not executed.
-Passing those gates would still not authorize server installation without
-separate explicit approval of the completed deployment plan.
+This is the accepted 2.0.3 release boundary. Stage R2 packet, package, boot,
+Docker, and real-provider evidence passed. A new host still needs its own
+topology review and guarded handoff because those choices are not release
+properties.
 
 ## Assets and goals
 
@@ -36,7 +36,7 @@ updates, and recovery that does not erase unrelated firewall state.
 | Stale state | Expiry validation, integration timestamps, cache maximum age, reconciliation | Retained failed-feed claims can over-block until operator repair |
 | Database corruption | Separate monotonic provenance ledger, generation pointer/snapshot checks, transactional migration, online generation backup, and a conditional independently verified restore that still blocks readiness | Unusable immutable evidence stops before nft mutation; audit events written only to a destroyed DB require external journal/backup recovery; ledger recovery is merge-only |
 | IPv6 bypass | Explicit modes; early disabled hooks; dual-stack policy and leak tests | Third-party higher-priority rules remain an operator integration concern |
-| Conntrack bypass | Write-once original-ingress provenance, exact masked reply accepts, no blanket forward/output established accept, and unconditional physical-forward deny | Kernel conntrack/nft implementation is trusted; R2 active-flow/retag packet proof remains required |
+| Conntrack bypass | Write-once original-ingress provenance, exact masked reply accepts, no blanket forward/output established accept, and unconditional physical-forward deny | Kernel conntrack/nft implementation is trusted; privileged active-flow/retag packet proof passed for the release test topologies |
 | Docker privilege exposure | Socket hidden by packaged unit unless an explicit drop-in grants it; local host pinned; dashboard isolation; hardened daemon config | An operator-enabled Docker socket remains effectively host-root trust |
 | Unsafe rollback | Generation checksums, eligibility checks, prior generation, independent fallback | Disabling both systemd and daemon rollback removes this protection |
 | Secret disclosure | Keys never stored in SQLite/audit/status; config mode checks; release secret scan | Operators can still expose secrets through external logging or shell history |

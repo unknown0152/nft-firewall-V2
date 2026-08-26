@@ -1,9 +1,8 @@
 # V1 Feature Parity and V2 Decisions
 
-> **2.0.3 remains a RELEASE CANDIDATE - NOT DEPLOYABLE.** This comparison is
-> design documentation, not Stage R2 evidence or permission to install, apply,
-> or deploy. Deployment additionally requires separate approval of the
-> completed server plan.
+> This comparison records design decisions for the accepted 2.0.3 release.
+> It is not a substitute for the target-host audit and guarded handoff in
+> `HOST-HANDOFF.md`.
 
 The reference checkout is
 `unknown0152/nft-firewall-public@b607738bf917fd5a198be5a24ae92c8ba523a076`

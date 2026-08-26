@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import subprocess
 import unittest
 from pathlib import Path
 
@@ -12,6 +13,17 @@ ROOT = Path(__file__).resolve().parents[2]
 
 def read(relative: str) -> str:
     return (ROOT / relative).read_text(encoding="utf-8")
+
+
+def read_from_release_tag(relative: str) -> str:
+    result = subprocess.run(
+        ["git", "show", f"v2.0.3:{relative}"],
+        cwd=ROOT,
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout
 
 
 class ReleaseGuardContracts(unittest.TestCase):
@@ -24,7 +36,14 @@ class ReleaseGuardContracts(unittest.TestCase):
 
     def setUp(self) -> None:
         self.script = read("scripts/package-release.sh")
-        self.report = read("FINAL_ACCEPTANCE_REPORT.md")
+        self.report = read_from_release_tag("FINAL_ACCEPTANCE_REPORT.md")
+
+    def test_publication_report_records_final_approval(self) -> None:
+        publication_report = read("FINAL_ACCEPTANCE_REPORT.md")
+        self.assertIn(
+            "Release approval status: **FINAL_RELEASE_APPROVED**",
+            publication_report,
+        )
 
     def test_later_tagged_build_requires_external_exact_r2_attestation(self) -> None:
         self.assertIn(

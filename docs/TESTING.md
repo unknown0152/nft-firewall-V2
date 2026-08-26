@@ -1,11 +1,9 @@
 # Testing
 
-Current disposition: **2.0.3 RELEASE CANDIDATE - NOT DEPLOYABLE**. The
-source-only commands and results that actually ran are recorded in
-`TEST_RESULTS.md`. Every privileged section below belongs to separately
-approved Stage R2 and is currently **NOT EXECUTED** for 2.0.3. R2 approval or
-a later R2 pass is not deployment approval; actual server installation still
-requires separate explicit approval of the completed deployment plan.
+Current disposition: **2.0.3 FINAL RELEASE APPROVED**. The source, artifact,
+privileged R2, and post-tag results are consolidated in `TEST_RESULTS.md`.
+Privileged commands below passed in the approved release environments; rerun
+them only in a disposable lab with independent recovery.
 
 Test outcomes use only `PASS`, `FAIL`, `BLOCKED`, `NOT APPLICABLE`, or
 `NOT EXECUTED`. A namespace simulation and an external provider tunnel are
@@ -50,7 +48,7 @@ go test ./internal/config -run '^$' -fuzz FuzzDecode -fuzztime 5s
 
 ## Namespace lab
 
-**Stage R2 only - NOT EXECUTED for 2.0.3.**
+**Privileged and destructive to the test topology. PASS for the 2.0.3 release.**
 
 ```bash
 sudo ./tests/namespaces/run.sh
@@ -82,7 +80,7 @@ Missing prerequisites exit 77 and print `BLOCKED`; they do not produce PASS.
 
 ## Real WireGuard acceptance
 
-**Stage R2 only - NOT EXECUTED for 2.0.3.**
+**Privileged and provider-connected. PASS for the 2.0.3 release.**
 
 Place a root-owned mode `0600` profile at the path below. The harness parses
 only the fields it needs and never prints or archives the private key.
@@ -103,7 +101,7 @@ recovery, and Docker recovery. Synthetic traffic only is captured.
 
 ## Other privileged suites
 
-**Stage R2 only - NOT EXECUTED for 2.0.3.**
+**Privileged. PASS for the 2.0.3 release in approved test environments.**
 
 ```bash
 sudo ./tests/acceptance/database.sh
@@ -131,7 +129,7 @@ the operator's real provider DNS record.
 
 ## Evidence
 
-Sanitized raw results, when later produced in approved disposable R2
-environments, remain outside Git and release archives because provider and
-topology diagnostics are not public release material. The consolidated,
-non-secret result belongs in `TEST_RESULTS.md`; no absent raw log is a pass.
+Sanitized raw results remain outside Git and release archives because provider
+and topology diagnostics are not public release material. The consolidated,
+non-secret result is recorded in `TEST_RESULTS.md`; no absent raw log should be
+treated as evidence for a new run.

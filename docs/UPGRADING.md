@@ -1,9 +1,9 @@
 # Upgrading
 
-The current 2.0.3 source is a **RELEASE CANDIDATE - NOT DEPLOYABLE**. No
-upgrade may be attempted until Stage R2 and final tagged-package acceptance
-are complete. Passing those release gates still does not authorize a server
-upgrade; the completed deployment plan requires separate explicit approval.
+NFT Firewall V2 `2.0.3` is an accepted release. Upgrades remain deliberate
+host operations: preserve independent recovery access, record service state,
+back up compatible databases and configuration, and review the exact package
+handoff before replacing installed files.
 
 ## Supported package path
 
@@ -81,7 +81,7 @@ remains inactive. An active daemon continues running its previous process image
 until an administrator performs the separately reviewed migration/readiness
 checks and explicitly restarts it.
 
-After a future approved upgrade, verify without claiming the new executable is
+After an approved upgrade, verify without claiming the new executable is
 active merely because files were replaced:
 
 ```bash

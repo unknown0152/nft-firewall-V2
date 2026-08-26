@@ -1,33 +1,38 @@
 # NFT Firewall V2 Build Status
 
-Release disposition: **RELEASE CANDIDATE - NOT DEPLOYABLE**
+Release disposition: **FINAL RELEASE APPROVED**
 
-Snapshot: 2026-08-25
+Release validation completed: 2026-08-25
 
 Target version: `2.0.3`
 
-This is the reopened, pre-freeze Stage R status after a prior source commit
-hard-stopped in the R2 systemd boot transaction. It authorizes neither
-installation nor deployment. No 2.0.3 release tag or final release has been
-created. Candidate construction and the two-build comparison occur only after
-the corrected source commit is frozen and are recorded in external evidence,
-because a tracked report cannot attest to its own later enclosing build.
+Validated source commit:
+`e2b3fa0a20fa6e36325792397564966b21045120`
 
-Status values are `NOT STARTED`, `PASS`, and `BLOCKED`.
+Annotated tag: `v2.0.3`
+
+Tag object: `9038ff5f6ecd32d707cb8f6fffcd9e6dc9f3b20d`
 
 | Phase | Status | Evidence boundary |
 | --- | --- | --- |
-| Source isolation and baseline | PASS | Work is confined to the isolated 2.0.3 RC worktree; immutable `v2.0.1` lifecycle/systemd/provenance defects remain expected-red baseline proofs |
-| Configuration/compiler/provenance | PASS | Pinned unit/race/static/security analysis and source contracts pass for strict provenance IDs, write-once connection marking, reply binding, and foreign-mask collision refusal |
-| Generation state and recovery | PASS | Source-only tests pass for immutable snapshots, exact schema history, locked/no-overwrite offline schema 1-5 migration, byte-identical backup, crash-safe publication, ambiguity retention, rollback verification, and read-only recovery refusal; privileged migration and live boot remain R2 |
-| Docker stable identity | PASS | Exact ID/name/driver/bridge/subnet/gateway unit paths pass; no live Docker daemon or bridge lifecycle was accessed |
-| Package lifecycle/systemd graph | PASS | Static lifecycle, metadata, candidate-quarantine, staged unit, and dependency-graph contracts pass; readiness is independently required by `network-pre.target`, ordered after early without a readiness `Requisite=`, and no package was installed or service changed |
-| Unprivileged quality/security | PASS | Go 1.25.13 test/race/vet/module/fmt, staticcheck, govulncheck, gosec, nine bounded fuzz targets, ShellCheck, Stage R contracts, and current-tree secret scan pass |
-| Candidate package/archive build | NOT STARTED | Must be generated twice from the frozen commit into separate protected parents; results belong only in external build/comparison evidence |
-| Stage R2 privileged acceptance | NOT STARTED | **R2 NOT EXECUTED FOR THIS SOURCE REVISION**: the prior commit's boot hard stop and other evidence do not transfer |
-| Final release | BLOCKED | Requires separately approved R2/deployment plan, exact R2 attestation, immutable annotated tag, post-tag validation manifest, and external final approval bound to exact hashes |
+| Source isolation and baseline | PASS | Exact clean source commit and reachable history inspected |
+| Configuration/compiler/provenance | PASS | Pinned unit, race, vet, static, security, fuzz, and source-contract gates |
+| Generation state and recovery | PASS | Immutable generations, schema migration, crash recovery, safe apply, timeout rollback, and boot verification |
+| Docker stable identity | PASS | Exact configured tuple plus live bridge recreation and recovery |
+| Package lifecycle/systemd graph | PASS | Fresh install, 2.0.2 upgrade, removal behavior, inert package lifecycle, early restore, readiness, and reboot |
+| Network enforcement | PASS | Namespace and real-provider WireGuard tests, active-flow tunnel loss, provenance, IPv4/IPv6 policy, and zero physical leak |
+| Reproducible release build | PASS | Independent protected-parent builds and byte-for-byte comparison |
+| Package/archive inspection | PASS | amd64/arm64 binaries and Debian packages, ZIP/tar tree equality, modes, metadata, and checksums |
+| Secret scanning | PASS | Source tree, reachable history, and independently extracted release trees |
+| Dashboard contract | PASS | Fail-closed `nftfw.status.v2` consumer behavior |
+| Post-tag validation | PASS | Exact annotated tag and final payload validation |
+| Final release | PASS | External approval status `FINAL_RELEASE_APPROVED` |
 
-The source is ready to freeze as an untagged Stage R candidate. Candidate-mode
-output is intrinsically non-installable and non-startable, uses the Debian
-version `2.0.3~stage.r.<commit12>`, and remains test input only. A successful
-candidate build does not promote this status to final release or deployment.
+The tracked source reports at the immutable `v2.0.3` tag intentionally record
+the earlier pre-promotion Stage R boundary. Promotion evidence was generated
+after that commit and was not used to rewrite or move the tag. The current
+default branch adds public release and host-handoff documentation only; it
+does not change the validated runtime source boundary.
+
+Release integrity is provided by exact Git identities, SHA-256 manifests, and
+reproducibility evidence. Publisher signatures are not currently provided.

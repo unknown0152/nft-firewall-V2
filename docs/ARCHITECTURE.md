@@ -1,7 +1,8 @@
 # Architecture
 
-This describes the 2.0.3 candidate design. The candidate is not deployable and
-its privileged runtime behavior remains unproved until Stage R2.
+This describes the accepted 2.0.3 design. Its source invariants, privileged
+runtime behavior, package lifecycle, reboot recovery, Docker integration, and
+real-provider tunnel behavior passed the release gates in `TEST_RESULTS.md`.
 
 ## Process and privilege model
 

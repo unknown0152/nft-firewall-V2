@@ -1,9 +1,9 @@
 # Recovery
 
-The current 2.0.3 source is a **RELEASE CANDIDATE - NOT DEPLOYABLE**. Recovery
-commands must not be exercised on the NUC until the disposable Stage R2 crash,
-boot, package, and rollback matrix has passed and the deployment plan is
-separately approved.
+The 2.0.3 crash, boot, package, and rollback matrix passed. Recovery still
+depends on host-specific backups, console or independent LAN access, and the
+actual deployed generation. Prepare and test the recovery procedure in
+`HOST-HANDOFF.md` before first activation.
 
 ## Uncommitted apply
 
@@ -74,9 +74,8 @@ failure alone never authorizes a restore: an actually expired pending
 generation is still required. A missing pointer never authorizes deletion of
 product-named tables.
 
-Do not copy a backup over live state from this candidate's documentation. A
-final offline recovery procedure must first pass R2 and preserve, under unique
-names, at least:
+Do not copy a backup over live state without a reviewed offline recovery
+procedure. Preserve, under unique names, at least:
 
 ```text
 /var/lib/nftfw/generation-state/state.db{,-wal,-shm}
