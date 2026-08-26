@@ -35,15 +35,24 @@ jobs:
 
       - uses: actions/setup-go@924ae3a1cded613372ab5595356fb5720e22ba16 # v6.5.0
         with:
-          go-version-file: go.mod
+          go-version: '1.25.13'
           cache: true
 
-      - name: Verify immutable release source
+      - name: Verify release commit
         run: |
           test "$(git rev-parse HEAD)" = "$RELEASE_COMMIT"
+
+      - name: Verify annotated release tag
+        run: |
           test "$(git cat-file -t refs/tags/v2.0.3)" = tag
-          test "$(git rev-list -n1 refs/tags/v2.0.3)" = "$RELEASE_COMMIT"
-          test "$(go version)" = "go version go1.25.13 linux/amd64"
+          test "$(git rev-parse 'refs/tags/v2.0.3^{commit}')" = "$RELEASE_COMMIT"
+
+      - name: Verify pinned Go toolchain
+        run: |
+          test "$(go env GOVERSION)" = go1.25.13
+
+      - name: Verify clean release tree
+        run: |
           test -z "$(git status --porcelain)"
 
       - name: Build exact release artifacts
