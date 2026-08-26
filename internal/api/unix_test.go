@@ -155,6 +155,8 @@ func TestOperationSpecificRequestSchema(t *testing.T) {
 	for _, req := range []Request{
 		{Op: "status", Address: "203.0.113.1"},
 		{Op: "commit"},
+		{Op: "generation"},
+		{Op: "generation", Generation: 1, Address: "203.0.113.1"},
 		{Op: "allow-add", Address: "203.0.113.1", Source: "manual"},
 		{Op: "allow-add", Address: "203.0.113.1"},
 		{Op: "allow-add", Address: "203.0.113.1", ExpiresSec: 365*24*60*60 + 1},
@@ -179,6 +181,12 @@ func TestOperationSpecificRequestSchema(t *testing.T) {
 	}
 	if err := validateRequest(Request{Op: "claims", Limit: 1000, Offset: 100}, true); err != nil {
 		t.Fatal(err)
+	}
+	if err := validateRequest(Request{Op: "generation", Generation: 7}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := validateRequest(Request{Op: "generation", Generation: 7}, false); err == nil {
+		t.Fatal("generation query was accepted on the read-only status socket")
 	}
 	if err := validateRequest(Request{Op: "apply", Safe: true}, true); err != nil {
 		t.Fatal(err)

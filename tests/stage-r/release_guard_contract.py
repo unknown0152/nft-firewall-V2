@@ -36,13 +36,17 @@ class ReleaseGuardContracts(unittest.TestCase):
 
     def setUp(self) -> None:
         self.script = read("scripts/package-release.sh")
-        self.report = read_from_release_tag("FINAL_ACCEPTANCE_REPORT.md")
+        self.report = read("FINAL_ACCEPTANCE_REPORT.md")
 
-    def test_publication_report_records_final_approval(self) -> None:
-        publication_report = read("FINAL_ACCEPTANCE_REPORT.md")
+    def test_frozen_source_reports_remain_candidate_only(self) -> None:
+        historical_report = read_from_release_tag("FINAL_ACCEPTANCE_REPORT.md")
         self.assertIn(
-            "Release approval status: **FINAL_RELEASE_APPROVED**",
-            publication_report,
+            "Release approval status: STAGE_R_CANDIDATE_ONLY",
+            historical_report,
+        )
+        self.assertIn(
+            "Release approval status: STAGE_R_CANDIDATE_ONLY",
+            self.report,
         )
 
     def test_later_tagged_build_requires_external_exact_r2_attestation(self) -> None:

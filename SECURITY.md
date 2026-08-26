@@ -1,6 +1,8 @@
 # Security Policy and Guarantees
 
-NFT Firewall V2 `2.0.3` is an accepted release. The guarantees below passed
+NFT Firewall V2 2.1.0 preserves the accepted 2.0.3 enforcement core and adds
+the source-reviewed managed setup, importer, routing, and rollback boundary.
+The guarantees below passed
 the source, privileged R2, and post-tag validation described in
 `TEST_RESULTS.md`. They apply to the exact validated source and declared
 operating assumptions, not to an unaudited host configuration.

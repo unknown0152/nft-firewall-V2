@@ -2,18 +2,23 @@ package app
 
 import (
 	"context"
+	"encoding/base64"
 	"errors"
 	"fmt"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
+	"github.com/unknown0152/nft-firewall-v2/internal/health"
+	"github.com/unknown0152/nft-firewall-v2/internal/intent"
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
+	"github.com/unknown0152/nft-firewall-v2/internal/reconcile"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
 	"github.com/unknown0152/nft-firewall-v2/internal/threatintel"
 	"github.com/unknown0152/nft-firewall-v2/internal/wireguard"
@@ -31,11 +36,74 @@ func (r staticEndpointLookup) LookupIP(context.Context, string, string) ([]net.I
 	return r.addresses, nil
 }
 
+type staticWGCommandRunner struct{ key string }
+
+func (r staticWGCommandRunner) Run(_ context.Context, args ...string) (string, error) {
+	switch {
+	case len(args) == 3 && args[0] == "show" && args[2] == "peers":
+		return r.key + "\n", nil
+	case len(args) == 3 && args[0] == "show" && args[2] == "endpoints":
+		return r.key + "\t198.51.100.8:51820\n", nil
+	case len(args) == 3 && args[0] == "show" && args[2] == "latest-handshakes":
+		return fmt.Sprintf("%s\t%d\n", r.key, time.Now().Unix()), nil
+	case len(args) == 7 && args[0] == "set":
+		return "", nil
+	default:
+		return "", errors.New("unexpected WireGuard command")
+	}
+}
+
 type countingOwnedRunner struct{ calls int }
 
-func (r *countingOwnedRunner) Run(context.Context, ...string) (string, string, error) {
+func (r *countingOwnedRunner) Run(_ context.Context, args ...string) (string, string, error) {
 	r.calls++
+	if len(args) == 3 && args[0] == "-j" && args[1] == "list" && args[2] == "ruleset" {
+		return `{"nftables":[{"metainfo":{"json_schema_version":1}}]}`, "", nil
+	}
 	return `{"nftables":[]}`, "", nil
+}
+
+type statefulOwnedRunner struct {
+	mu      sync.Mutex
+	applied bool
+}
+
+func (r *statefulOwnedRunner) Run(_ context.Context, args ...string) (string, string, error) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	joined := strings.Join(args, " ")
+	if joined == "-j list ruleset" {
+		return `{"nftables":[{"metainfo":{"json_schema_version":1}}]}`, "", nil
+	}
+	if len(args) >= 2 && args[0] == "--check" && args[1] == "--file" {
+		return "", "", nil
+	}
+	if len(args) >= 2 && args[0] == "--file" {
+		script, err := os.ReadFile(args[len(args)-1])
+		if err != nil {
+			return "", "", err
+		}
+		r.applied = !strings.Contains(string(script), "delete table") ||
+			strings.Contains(string(script), "add table")
+		return "", "", nil
+	}
+	if joined == "-j list tables" {
+		if !r.applied {
+			return `{"nftables":[]}`, "", nil
+		}
+		return `{"nftables":[
+{"table":{"family":"inet","name":"nftfw_filter"}},
+{"table":{"family":"ip","name":"nftfw_nat"}},
+{"table":{"family":"ip6","name":"nftfw_filter6"}}
+]}`, "", nil
+	}
+	if len(args) == 5 && strings.Join(args[:3], " ") == "-j list table" {
+		return fmt.Sprintf(
+			`{"nftables":[{"table":{"family":%q,"name":%q}}]}`,
+			args[3], args[4],
+		), "", nil
+	}
+	return "", "", nil
 }
 
 type collidingOwnedRunner struct{}
@@ -457,5 +525,248 @@ notifications = false
 		t.Fatal("pristine state accepted a pre-existing product-named table")
 	} else if !strings.Contains(err.Error(), "first-use nft table collision") {
 		t.Fatalf("unexpected first-use collision error: %v", err)
+	}
+}
+
+func TestRuntimeReloadsProtectedManagedConfiguration(t *testing.T) {
+	root := secureRuntimeTestDir(t)
+	configPath := filepath.Join(root, "nftfw.toml")
+	intentPath := filepath.Join(root, "intent.toml")
+	value := intent.Intent{
+		Schema: intent.Schema, Managed: true, Uplink: "eth0",
+		VPNInterface: intent.VPNInterface,
+		LANNetworks:  []string{"192.168.1.0/24"}, ManagementTCP: []int{22},
+		VPNAddresses: []string{"10.8.0.2/32"}, EndpointHost: "vpn.example.test",
+		EndpointPort: 51820, BootstrapIPv4: []string{"198.51.100.8/32"},
+		PublicTCP: []int{443}, MTU: 1420, ResolverMode: "none", DisableIPv6: true,
+	}
+	intentData, err := value.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, err := value.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	configData, err := intent.RenderConfig(generated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(intentPath, intentData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runtime := &Runtime{ConfigPath: configPath, Config: config.Defaults()}
+	current, err := runtime.currentConfiguration()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if current == runtime || current.ManagedIntent == nil ||
+		len(current.ManagedIntent.PublicTCP) != 1 || current.ManagedIntent.PublicTCP[0] != 443 ||
+		len(current.Config.Policies) != 3 {
+		t.Fatalf("protected managed configuration was not reloaded: %#v", current)
+	}
+	if len(runtime.Config.Policies) != 0 || runtime.ManagedIntent != nil {
+		t.Fatal("configuration reload mutated the shared runtime")
+	}
+	if err := os.WriteFile(configPath, []byte("[invalid]\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.currentConfiguration(); err == nil ||
+		!strings.Contains(err.Error(), "reload protected configuration") {
+		t.Fatalf("invalid replacement configuration was accepted: %v", err)
+	}
+}
+
+func TestRuntimeArtifactStatusAndReadControlUseReloadedPolicy(t *testing.T) {
+	ctx := context.Background()
+	root := secureRuntimeTestDir(t)
+	configPath := filepath.Join(root, "nftfw.toml")
+	intentPath := filepath.Join(root, "intent.toml")
+	databasePath := filepath.Join(root, "generation-state", "state.db")
+	ledgerPath := filepath.Join(root, "provenance-ledger.db")
+	value := intent.Intent{
+		Schema: intent.Schema, Managed: true, Uplink: "eth0",
+		VPNInterface: intent.VPNInterface,
+		LANNetworks:  []string{"192.168.1.0/24"}, ManagementTCP: []int{22},
+		VPNAddresses: []string{"10.8.0.2/32"}, EndpointHost: "vpn.example.test",
+		EndpointPort: 51820, BootstrapIPv4: []string{"198.51.100.8/32"},
+		MTU: 1420, ResolverMode: "none", DisableIPv6: true,
+	}
+	writeManaged := func() {
+		t.Helper()
+		intentData, err := value.Render()
+		if err != nil {
+			t.Fatal(err)
+		}
+		generated, err := value.Config()
+		if err != nil {
+			t.Fatal(err)
+		}
+		generated.State.Directory = root
+		generated.State.Database = databasePath
+		generated.State.ProvenanceLedger = ledgerPath
+		configData, err := intent.RenderConfig(generated)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(configPath, configData, 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(intentPath, intentData, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeManaged()
+	runner := &statefulOwnedRunner{}
+	runtime, err := Open(ctx, configPath, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	runtime.EndpointResolver = &wireguard.Resolver{
+		Resolver:  staticEndpointLookup{addresses: []net.IP{net.ParseIP("198.51.100.8")}},
+		CachePath: filepath.Join(root, "wg-endpoints.json"),
+		Max:       64,
+	}
+	keyBytes := make([]byte, 32)
+	for index := range keyBytes {
+		keyBytes[index] = 9
+	}
+	runtime.WGController = &wireguard.Controller{Runner: staticWGCommandRunner{
+		key: base64.StdEncoding.EncodeToString(keyBytes),
+	}}
+	first, err := runtime.Artifact(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := value.AddExposure("tcp", 443); err != nil {
+		t.Fatal(err)
+	}
+	writeManaged()
+	second, err := runtime.Artifact(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Checksum == second.Checksum {
+		t.Fatalf("artifact did not use reloaded policy: first=%s second=%s", first.Checksum, second.Checksum)
+	}
+	statusValue, err := runtime.Status(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot, ok := statusValue.(health.Snapshot)
+	if !ok || !snapshot.Managed || len(snapshot.PublicTCP) != 1 ||
+		snapshot.PublicTCP[0] != 443 {
+		t.Fatalf("status did not use reloaded managed intent: %#v", statusValue)
+	}
+	runtime.SecurityEvent(ctx, "test_event", "test detail")
+	for _, request := range []api.Request{
+		{Op: "claims", Limit: 10},
+		{Op: "audit"},
+		{Op: "plan"},
+	} {
+		if _, err := runtime.Control(ctx, request); err != nil {
+			t.Fatalf("%s failed: %v", request.Op, err)
+		}
+	}
+	if _, err := runtime.Control(ctx, api.Request{Op: "generation", Generation: 999}); err == nil {
+		t.Fatal("missing generation was returned")
+	}
+	if _, err := runtime.Control(ctx, api.Request{Op: "unknown"}); err == nil {
+		t.Fatal("unknown control operation accepted")
+	}
+
+	runtime.Manager.SafeGuard = func(context.Context) error { return nil }
+	runtime.Manager.SafeGuardLocked = func(context.Context) error { return nil }
+	runtime.Manager.HealthCheck = nil
+	appliedValue, err := runtime.Control(ctx, api.Request{Op: "apply", Safe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	applied, ok := appliedValue.(reconcile.Result)
+	if !ok || applied.Generation == 0 || applied.Deadline == nil {
+		t.Fatalf("unexpected safe apply result: %#v", appliedValue)
+	}
+	generationValue, err := runtime.Control(ctx, api.Request{
+		Op: "generation", Generation: applied.Generation,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	generation, ok := generationValue.(*state.Generation)
+	if !ok || generation.Status != "applied" {
+		t.Fatalf("applied generation query failed: %#v", generationValue)
+	}
+	if _, err := runtime.Control(ctx, api.Request{
+		Op: "commit", Generation: applied.Generation,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := runtime.Control(ctx, api.Request{Op: "reconcile"}); err != nil {
+		t.Fatal(err)
+	}
+
+	pendingValue, err := runtime.Control(ctx, api.Request{Op: "apply", Safe: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pending := pendingValue.(reconcile.Result)
+	if _, err := runtime.Control(ctx, api.Request{
+		Op: "rollback", Generation: pending.Generation,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	rolled, err := runtime.Store.Generation(ctx, pending.Generation)
+	if err != nil || rolled.Status != "rolled_back" {
+		t.Fatalf("pending generation was not rolled back: %#v %v", rolled, err)
+	}
+	if rolledBack, err := runtime.RollbackExpired(ctx); err != nil || rolledBack {
+		t.Fatalf("no-pending expiry check changed state: %t %v", rolledBack, err)
+	}
+}
+
+func TestContainerNetworkProjection(t *testing.T) {
+	runtime := &Runtime{Config: config.Config{
+		Interfaces: []config.Interface{
+			{Name: "br-media", Role: "container", CIDRs: []string{"172.19.0.0/16", "fd00:19::/64"}},
+			{Name: "eth0", Role: "uplink"},
+		},
+		Runtime: config.RuntimeConfig{MaxSetMembers: 4},
+	}}
+	v4, v6, err := runtime.containerNets(context.Background())
+	if err != nil || len(v4) != 1 || v4[0] != "172.19.0.0/16" ||
+		len(v6) != 1 || v6[0] != "fd00:19::/64" {
+		t.Fatalf("unexpected container networks: %v %v %v", v4, v6, err)
+	}
+	runtime.Config.Interfaces[0].CIDRs = []string{"0.0.0.0/0"}
+	if _, _, err := runtime.containerNets(context.Background()); err == nil {
+		t.Fatal("container /0 accepted")
+	}
+	runtime.containerNetFetcher = func(context.Context) ([]string, []string, error) {
+		return []string{"172.20.0.0/16"}, nil, nil
+	}
+	v4, v6, err = runtime.containerNets(context.Background())
+	if err != nil || len(v4) != 1 || v4[0] != "172.20.0.0/16" || len(v6) != 0 {
+		t.Fatalf("injected container projection failed: %v %v %v", v4, v6, err)
+	}
+}
+
+func TestOpenStoreOnlyWrapper(t *testing.T) {
+	store, err := OpenStoreOnly(
+		context.Background(),
+		filepath.Join(secureRuntimeTestDir(t), "state.db"),
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.QuickCheck(context.Background()); err != nil {
+		store.Close()
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
 	}
 }

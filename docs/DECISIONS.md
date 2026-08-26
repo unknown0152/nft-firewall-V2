@@ -1,6 +1,6 @@
 # Architecture Decisions
 
-The 2.0.3 release gates validated these decisions in the required source and
+The 2.1.0 design preserves the 2.0.3 decisions validated in source and
 privileged environments. A new host still requires the topology audit,
 recovery preparation, and guarded activation described in `HOST-HANDOFF.md`.
 

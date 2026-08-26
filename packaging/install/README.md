@@ -1,6 +1,7 @@
 # Package installation layout
 
-NFT Firewall V2 `2.0.3` is an accepted release. This layout description does
+NFT Firewall V2 2.1.0 preserves this protected, nonactivating layout. This
+description does
 not replace target-host preflight, policy review, recovery preparation, or
 the deliberate activation steps in `docs/HOST-HANDOFF.md`.
 

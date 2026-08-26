@@ -56,6 +56,32 @@ func TestActiveSnapshotLifecycle(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(dir, activeSnapshotName)); !os.IsNotExist(err) {
 		t.Fatalf("legacy mutable snapshot was published: %v", err)
 	}
+	pointer, exists, err := ReadEnforcementPointer(dir)
+	if err != nil || !exists {
+		t.Fatalf("published pointer unavailable: %#v %t %v", pointer, exists, err)
+	}
+	durable, err := EnsurePublishedGenerationDurable(dir, *pointer)
+	if err != nil || durable.Generation != 1 || durable.Script != script {
+		t.Fatalf("published generation durability failed: %#v %v", durable, err)
+	}
+	wrong := *pointer
+	wrong.Generation = 2
+	if _, err := EnsurePublishedGenerationDurable(dir, wrong); err == nil {
+		t.Fatal("changed expected pointer was accepted")
+	}
+	prepared, err := PrepareEnforcementPointer(dir, *pointer)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := CancelPreparedPointer(prepared); err != nil {
+		t.Fatal(err)
+	}
+	if err := CancelPreparedPointer(prepared); err != nil {
+		t.Fatal(err)
+	}
+	if err := PublishPreparedPointer(nil); err == nil {
+		t.Fatal("nil prepared pointer accepted")
+	}
 	if err := store.ClearActive(); err != nil {
 		t.Fatal(err)
 	}

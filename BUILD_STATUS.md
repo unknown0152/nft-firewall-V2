@@ -1,38 +1,34 @@
-# NFT Firewall V2 Build Status
+# NFT Firewall V2 2.1.0 Build Status
 
-Release disposition: **FINAL RELEASE APPROVED**
+Source disposition: **STAGE E-R SOURCE VALIDATED**
 
-Release validation completed: 2026-08-25
+Validation date: 2026-08-26
 
-Target version: `2.0.3`
+Target version: `2.1.0`
 
-Validated source commit:
-`e2b3fa0a20fa6e36325792397564966b21045120`
+Approved source base:
+`da9c611f378d3988c4011dbec7cbba210ab274c5`
 
-Annotated tag: `v2.0.3`
-
-Tag object: `9038ff5f6ecd32d707cb8f6fffcd9e6dc9f3b20d`
+The frozen source commit, independent candidate parents, and comparison digest
+are created after this source report and are therefore recorded only in the
+external candidate evidence. This file must not claim evidence created after
+its own commit.
 
 | Phase | Status | Evidence boundary |
 | --- | --- | --- |
-| Source isolation and baseline | PASS | Exact clean source commit and reachable history inspected |
-| Configuration/compiler/provenance | PASS | Pinned unit, race, vet, static, security, fuzz, and source-contract gates |
-| Generation state and recovery | PASS | Immutable generations, schema migration, crash recovery, safe apply, timeout rollback, and boot verification |
-| Docker stable identity | PASS | Exact configured tuple plus live bridge recreation and recovery |
-| Package lifecycle/systemd graph | PASS | Fresh install, 2.0.2 upgrade, removal behavior, inert package lifecycle, early restore, readiness, and reboot |
-| Network enforcement | PASS | Namespace and real-provider WireGuard tests, active-flow tunnel loss, provenance, IPv4/IPv6 policy, and zero physical leak |
-| Reproducible release build | PASS | Independent protected-parent builds and byte-for-byte comparison |
-| Package/archive inspection | PASS | amd64/arm64 binaries and Debian packages, ZIP/tar tree equality, modes, metadata, and checksums |
-| Secret scanning | PASS | Source tree, reachable history, and independently extracted release trees |
-| Dashboard contract | PASS | Fail-closed `nftfw.status.v2` consumer behavior |
-| Post-tag validation | PASS | Exact annotated tag and final payload validation |
-| Final release | PASS | External approval status `FINAL_RELEASE_APPROVED` |
+| Go 1.27 migration and release identity | PASS | Exact `go1.27.0` source/toolchain contract |
+| Managed one-file setup/import/routing | PASS | Unit, race, source-contract, and failure-path tests |
+| Managed policy mutation/recovery | PASS | Protected reload, exact generation query, checksummed file journal, and independent watchdog tests |
+| Configuration/compiler/provenance | PASS | Unit, fuzz, vet, staticcheck, gosec, and source contracts |
+| Coverage | PASS | Overall statement coverage at least 75%; setup/import/intent/routing packages at least 90% |
+| Dependencies | PASS | `go mod verify`, tidy diff, and govulncheck with no reachable vulnerabilities |
+| Package/systemd source | PASS | Nonactivating lifecycle contracts, staged unit verification, and sandbox review |
+| Shell and secret handling | PASS | ShellCheck and deterministic source/history scan contracts |
+| Benchmarks | PASS | Source benchmark matrix collected; reference operations remain inside Amendment E budgets |
+| Quarantined candidate builds | NOT EXECUTED | Must be built twice from the later frozen clean commit |
+| Candidate comparison | NOT EXECUTED | Requires both independent protected-parent candidates |
+| Privileged R2 | NOT EXECUTED | Requires separate E-R2 approval |
+| Release tag/publication/deployment | NOT AUTHORIZED | Explicitly outside Stage E-R |
 
-The tracked source reports at the immutable `v2.0.3` tag intentionally record
-the earlier pre-promotion Stage R boundary. Promotion evidence was generated
-after that commit and was not used to rewrite or move the tag. The current
-default branch adds public release and host-handoff documentation only; it
-does not change the validated runtime source boundary.
-
-Release integrity is provided by exact Git identities, SHA-256 manifests, and
-reproducibility evidence. Publisher signatures are not currently provided.
+No package was installed and no live firewall, VPN, route, resolver, systemd,
+Docker, Cosmos, or host service state was changed by this source validation.

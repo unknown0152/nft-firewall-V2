@@ -1,9 +1,12 @@
 # Upgrading
 
-NFT Firewall V2 `2.0.3` is an accepted release. Upgrades remain deliberate
-host operations: preserve independent recovery access, record service state,
-back up compatible databases and configuration, and review the exact package
-handoff before replacing installed files.
+NFT Firewall V2 2.1.0 preserves the 2.0.3 advanced configuration, schema-6
+state, generation, snapshot, enforcement, provenance, API, nftables ownership,
+and nonactivating package contracts.
+
+Installing 2.1.0 does not convert an existing host to managed mode, import a
+VPN, transfer route ownership, restart services, interrupt the tunnel, or
+apply a firewall. Those are separate adoption operations.
 
 ## Supported package path
 
@@ -44,7 +47,7 @@ state, systemd state, or firewall. Completing the older-package handoff remains
 a separately reviewed deployment operation; database migration alone does not
 bypass the package pre-install guard.
 
-For the supported 2.0.2-to-2.0.3 upgrade, first record unit
+For a supported 2.0.2/2.0.3-to-2.1.0 upgrade, first record unit
 enabled/disabled and active/inactive state, then validate and back up the
 generation database with the currently installed binary:
 
@@ -88,11 +91,23 @@ active merely because files were replaced:
 sudo nftfw version
 sudo nftfw config validate
 sudo nftfw doctor
-systemctl is-enabled nftfw-early nftfw-enforcement-ready nftfwd nftfw-rollback.timer nftfw-web
-systemctl is-active nftfw-early nftfw-enforcement-ready nftfwd nftfw-rollback.timer nftfw-web
+systemctl is-enabled nftfw-early nftfw-enforcement-ready nftfwd \
+  nftfw-rollback.timer nftfw-setup-rollback.timer \
+  nftfw-managed-rollback.timer nftfw-vpn nftfw-web
+systemctl is-active nftfw-early nftfw-enforcement-ready nftfwd \
+  nftfw-rollback.timer nftfw-setup-rollback.timer \
+  nftfw-managed-rollback.timer nftfw-vpn nftfw-web
 ```
 
 Any restart, migration, early restore, or policy reconciliation is a separate
 deployment action with rollback and readiness checks. Keep the prior package,
 configuration, generation backup, provenance-ledger evidence, and release
 checksums until post-upgrade validation completes.
+
+## Managed-mode adoption
+
+The clean-server `nftfw setup --vpn` command refuses an existing 2.0.3 host.
+Adoption requires a topology-specific dry run and a separately approved live
+plan because it transfers WireGuard, DNS, policy-route, sysctl, and boot
+ownership. Do not delete the existing database, ledger, enforcement pointer,
+or nftables tables to imitate a clean host.

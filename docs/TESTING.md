@@ -1,9 +1,9 @@
 # Testing
 
-Current disposition: **2.0.3 FINAL RELEASE APPROVED**. The source, artifact,
-privileged R2, and post-tag results are consolidated in `TEST_RESULTS.md`.
-Privileged commands below passed in the approved release environments; rerun
-them only in a disposable lab with independent recovery.
+Current disposition: **2.1.0 STAGE E-R SOURCE VALIDATED**. Source-only results
+are consolidated in `TEST_RESULTS.md`. The privileged commands below have not
+been executed for 2.1.0 and require a separately approved disposable lab with
+independent recovery.
 
 Test outcomes use only `PASS`, `FAIL`, `BLOCKED`, `NOT APPLICABLE`, or
 `NOT EXECUTED`. A namespace simulation and an external provider tunnel are
@@ -48,7 +48,7 @@ go test ./internal/config -run '^$' -fuzz FuzzDecode -fuzztime 5s
 
 ## Namespace lab
 
-**Privileged and destructive to the test topology. PASS for the 2.0.3 release.**
+**Privileged and destructive to the test topology. NOT EXECUTED for 2.1.0.**
 
 ```bash
 sudo ./tests/namespaces/run.sh
@@ -80,7 +80,7 @@ Missing prerequisites exit 77 and print `BLOCKED`; they do not produce PASS.
 
 ## Real WireGuard acceptance
 
-**Privileged and provider-connected. PASS for the 2.0.3 release.**
+**Privileged and provider-connected. NOT EXECUTED for 2.1.0.**
 
 Place a root-owned mode `0600` profile at the path below. The harness parses
 only the fields it needs and never prints or archives the private key.
@@ -101,7 +101,7 @@ recovery, and Docker recovery. Synthetic traffic only is captured.
 
 ## Other privileged suites
 
-**Privileged. PASS for the 2.0.3 release in approved test environments.**
+**Privileged. NOT EXECUTED for 2.1.0.**
 
 ```bash
 sudo ./tests/acceptance/database.sh

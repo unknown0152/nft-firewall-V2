@@ -1,8 +1,11 @@
 # Architecture
 
-This describes the accepted 2.0.3 design. Its source invariants, privileged
-runtime behavior, package lifecycle, reboot recovery, Docker integration, and
-real-provider tunnel behavior passed the release gates in `TEST_RESULTS.md`.
+This describes the 2.1.0 design, which preserves the accepted 2.0.3
+enforcement core and adds managed setup, import, routing, and intent. Its
+source invariants and unprivileged package contracts passed Stage E-R. Its
+privileged runtime, package lifecycle, reboot recovery, Docker integration,
+and real-provider tunnel behavior still require the separately approved
+2.1.0 R2 matrix described in `TEST_RESULTS.md`.
 
 ## Process and privilege model
 
@@ -126,6 +129,18 @@ healthy database still requires an expired pending generation, so an unrelated
 configuration error cannot repeatedly clobber runtime sets. Missing, corrupt,
 symlinked, oversized, or checksum-invalid recovery evidence fails before
 mutation; it does not trigger emergency deny.
+
+Managed `expose` and `lan` changes add a separate file-publication
+transaction. The CLI writes checksummed old-file backups and a durable journal
+before replacing `intent.toml` and `nftfw.toml`. Artifact and status paths
+reload those protected files instead of trusting stale daemon configuration.
+The journal records the safe-applied generation before commit.
+`nftfw-managed-rollback.timer` then distinguishes committed from
+pending/applied/prepared/rolled-back state through the root-only control
+socket. It either verifies and keeps the new files or rolls back the exact
+generation and restores the exact old bytes. This timer does not replace the
+daemon-independent pending-generation timer; the two recover different
+durable resources.
 
 ## WireGuard
 

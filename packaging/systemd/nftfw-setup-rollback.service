@@ -1,0 +1,32 @@
+[Unit]
+Description=Rollback an expired NFT Firewall V2 managed setup
+Documentation=file:/usr/share/doc/nft-firewall-v2/RECOVERY.md
+After=local-fs.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/nftfw/nftfw setup rollback --expired
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=no
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+ReadWritePaths=/etc/nftfw -/etc/wireguard /etc/sysctl.d /etc/systemd/system /var/lib/nftfw /run/nftfw -/run/resolvconf -/run/systemd/resolve
+CapabilityBoundingSet=CAP_CHOWN CAP_NET_ADMIN
+AmbientCapabilities=CAP_CHOWN CAP_NET_ADMIN

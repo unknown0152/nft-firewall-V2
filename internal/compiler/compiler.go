@@ -642,6 +642,9 @@ func destinationRequiresVPN(raw string) bool {
 }
 
 func serviceExpr(s config.Service, family string) string {
+	if s.Protocol == "any" {
+		return ""
+	}
 	if s.Protocol == "icmp" {
 		if family == "ip6" {
 			return "meta l4proto ipv6-icmp"

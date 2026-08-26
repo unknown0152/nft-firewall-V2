@@ -33,7 +33,7 @@ REQUIRED_CHECKS = (
     "both_extracted_archives_secret_scan",
     "extracted_archive_secret_evidence_byte_identical",
 )
-PINNED_GO = "go1.25.13"
+PINNED_GO = "go1.27.0"
 DIRECTORY_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_CLOEXEC | os.O_NOFOLLOW
 FILE_FLAGS = os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK
 

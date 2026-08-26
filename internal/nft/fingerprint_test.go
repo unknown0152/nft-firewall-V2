@@ -28,6 +28,17 @@ func TestCanonicalFingerprintIgnoresOnlyVolatileState(t *testing.T) {
 	}
 }
 
+func BenchmarkCanonicalOwnedJSON(b *testing.B) {
+	table := Table{Family: "inet", Name: "nftfw_filter"}
+	data := []byte(`{"nftables":[{"metainfo":{"version":"1"}},{"table":{"family":"inet","name":"nftfw_filter","handle":1}},{"set":{"family":"inet","table":"nftfw_filter","name":"blocked_v4","handle":2,"type":"ipv4_addr","elem":["203.0.113.1"]}},{"chain":{"family":"inet","table":"nftfw_filter","name":"input","handle":3,"type":"filter","hook":"input","prio":0,"policy":"drop"}},{"rule":{"family":"inet","table":"nftfw_filter","chain":"input","handle":4,"comment":"nftfw:block-v4","expr":[{"counter":{"packets":1,"bytes":64}},{"drop":null}]}}]}`)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := canonicalOwnedJSON(data, table); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestCanonicalFingerprintRejectsForeignObjects(t *testing.T) {
 	_, err := canonicalOwnedJSON([]byte(`{"nftables":[{"table":{"family":"inet","name":"other"}}]}`), Table{Family: "inet", Name: "nftfw_filter"})
 	if err == nil {

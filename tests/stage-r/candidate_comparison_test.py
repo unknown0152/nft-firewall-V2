@@ -58,8 +58,8 @@ def make_candidate(root: Path, payload: bytes = b"candidate payload\n") -> None:
     evidence = {
         "schema": "nftfw.build-evidence.v1",
         "status": "STAGE_R_CANDIDATE_BUILD_PASS",
-        "target_version": "2.0.3",
-        "artifact_version": "2.0.3~stage.r.deadbeefcafe",
+        "target_version": "2.1.0",
+        "artifact_version": "2.1.0~stage.r.deadbeefcafe",
         "git_commit": "deadbeefcafe" + "0" * 28,
         "git_tag": "unreleased",
         "git_tag_object": "unreleased",
@@ -70,7 +70,7 @@ def make_candidate(root: Path, payload: bytes = b"candidate payload\n") -> None:
         "deployment_authorized": False,
         "publication_authorized": False,
         "source_reports_scope": "FROZEN_PRE_BUILD_SOURCE_SNAPSHOT_ONLY",
-        "toolchain": {"go": "go1.25.13"},
+        "toolchain": {"go": "go1.27.0"},
         "privileged_r2_evidence": "NOT_EXECUTED",
         "r2_attestation_sha256": "NOT_APPLICABLE",
         "checks": dict(REQUIRED_CHECKS),
@@ -133,7 +133,7 @@ class CandidateComparisonTests(unittest.TestCase):
             self.assertFalse(evidence["publication_authorized"])
             self.assertEqual(evidence["privileged_r2_evidence"], "NOT_EXECUTED")
             self.assertEqual(evidence["r2_attestation_sha256"], "NOT_APPLICABLE")
-            self.assertEqual(evidence["toolchain"], {"go": "go1.25.13"})
+            self.assertEqual(evidence["toolchain"], {"go": "go1.27.0"})
             self.assertEqual(stat.S_IMODE(output.stat().st_mode), 0o644)
 
     def test_difference_fails_without_writing_evidence(self) -> None:
@@ -211,7 +211,7 @@ class CandidateComparisonTests(unittest.TestCase):
             (
                 "artifact version",
                 lambda evidence: evidence.__setitem__(
-                    "artifact_version", "2.0.3~stage.r.000000000000"
+                    "artifact_version", "2.1.0~stage.r.000000000000"
                 ),
                 "artifact version is not commit-bound",
             ),
@@ -257,7 +257,7 @@ class CandidateComparisonTests(unittest.TestCase):
             ),
             (
                 "toolchain",
-                lambda evidence: evidence.__setitem__("toolchain", {"go": "go1.27.0"}),
+                lambda evidence: evidence.__setitem__("toolchain", {"go": "go1.25.13"}),
                 "toolchain is not pinned",
             ),
         )

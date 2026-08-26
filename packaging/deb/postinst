@@ -30,4 +30,4 @@ fi
 
 echo "NFT Firewall V2 installed without enabling, starting, or restarting any unit."
 echo "The package did not create or apply a candidate policy or enforcement pointer."
-echo "Edit /etc/nftfw/nftfw.toml, then run: nftfw config validate && nftfw plan"
+echo "Clean Debian 13 setup: sudo nftfw setup --vpn /path/to/working-vpn.conf"

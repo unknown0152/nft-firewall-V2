@@ -169,6 +169,11 @@ systemd_units=(
     nftfw-enforcement-ready.service
     nftfw-rollback.service
     nftfw-rollback.timer
+    nftfw-setup-rollback.service
+    nftfw-setup-rollback.timer
+    nftfw-managed-rollback.service
+    nftfw-managed-rollback.timer
+    nftfw-vpn.service
     nftfw-web.service
     nftfwd.service
 )
@@ -182,12 +187,15 @@ for example in nftfwd-docker-access.conf.example nftfwd-final-early.conf.example
         "$stage/usr/share/doc/nft-firewall-v2/examples/$example"
 done
 install -m 0640 "$root_dir/configs/nftfw.example.toml" "$stage/etc/nftfw/nftfw.toml"
-for document in README.md START-HERE.md INSTALL.md SECURITY.md CHANGELOG.md; do
+for document in README.md QUICKSTART.md START-HERE.md INSTALL.md SECURITY.md \
+    SUPPORTED-PLATFORMS.md VPN-PROFILES.md CHANGELOG.md; do
     install -m 0644 "$root_dir/$document" "$stage/usr/share/doc/nft-firewall-v2/$document"
 done
 install -m 0644 "$root_dir/LICENSE" "$stage/usr/share/doc/nft-firewall-v2/LICENSE"
 install -m 0644 "$root_dir/packaging/deb/copyright" "$stage/usr/share/doc/nft-firewall-v2/copyright"
-for document in ARCHITECTURE.md CONFIGURATION.md OPERATIONS.md RECOVERY.md STATUS-API.md THREAT-MODEL.md UPGRADING.md UNINSTALL.md; do
+for document in ARCHITECTURE.md CLI.md CONFIGURATION.md DOCKER.md OPERATIONS.md \
+    RECOVERY.md STATUS-API.md THREAT-MODEL.md TROUBLESHOOTING.md UPGRADING.md \
+    UNINSTALL.md; do
     install -m 0644 "$root_dir/docs/$document" "$stage/usr/share/doc/nft-firewall-v2/$document"
 done
 

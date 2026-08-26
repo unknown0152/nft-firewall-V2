@@ -98,3 +98,13 @@ func TestEndpointResolverRejectsUnusableAnswersAndFutureCache(t *testing.T) {
 		t.Fatalf("future-dated endpoint cache accepted: got=%v err=%v", got, err)
 	}
 }
+
+func TestFamilySetsCanonicalizeAndSort(t *testing.T) {
+	v4, v6 := FamilySets([]string{
+		"2001:db8::2", "192.0.2.2", "invalid", "192.0.2.1", "2001:db8::1",
+	})
+	if !reflect.DeepEqual(v4, []string{"192.0.2.1/32", "192.0.2.2/32"}) ||
+		!reflect.DeepEqual(v6, []string{"2001:db8::1/128", "2001:db8::2/128"}) {
+		t.Fatalf("unexpected family sets: %v %v", v4, v6)
+	}
+}

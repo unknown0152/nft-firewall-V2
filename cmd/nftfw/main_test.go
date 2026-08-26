@@ -3,13 +3,20 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/json"
 	"errors"
+	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/unknown0152/nft-firewall-v2/internal/api"
+	"github.com/unknown0152/nft-firewall-v2/internal/app"
+	"github.com/unknown0152/nft-firewall-v2/internal/compiler"
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
@@ -18,6 +25,67 @@ import (
 
 type doctorChecksRunner struct {
 	sequence *[]string
+}
+
+type requestRecorder struct {
+	mu       sync.Mutex
+	requests []api.Request
+}
+
+func (r *requestRecorder) append(request api.Request) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.requests = append(r.requests, request)
+}
+
+func (r *requestRecorder) operations() []string {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	result := make([]string, len(r.requests))
+	for index, request := range r.requests {
+		result[index] = request.Op
+	}
+	return result
+}
+
+func startTestAPISocket(t *testing.T, path string, status any, recorder *requestRecorder) {
+	t.Helper()
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	done := make(chan struct{})
+	t.Cleanup(func() {
+		close(done)
+		_ = listener.Close()
+		_ = os.Remove(path)
+	})
+	go func() {
+		for {
+			connection, acceptErr := listener.Accept()
+			if acceptErr != nil {
+				select {
+				case <-done:
+					return
+				default:
+					return
+				}
+			}
+			go func(conn net.Conn) {
+				defer conn.Close()
+				var request api.Request
+				if json.NewDecoder(conn).Decode(&request) != nil {
+					return
+				}
+				recorder.append(request)
+				data := any(map[string]any{"operation": request.Op})
+				if request.Op == "status" {
+					data = status
+				}
+				_ = json.NewEncoder(conn).Encode(api.Response{OK: true, Data: data})
+			}(connection)
+		}
+	}()
 }
 
 func (r doctorChecksRunner) Run(_ context.Context, args ...string) (string, string, error) {
@@ -304,5 +372,207 @@ func TestStageRCandidateOnlyAllowsVersionAndNothingElse(t *testing.T) {
 	version.Version = "2.0.3~stage.r.aaaaaaaaaaaa"
 	if err := run([]string{"status"}); err == nil || !strings.Contains(err.Error(), "candidate-only build is quarantined") {
 		t.Fatalf("candidate version escaped CLI quarantine under forged disposition: %v", err)
+	}
+}
+
+func TestPlanDiffAndDisplayHelpers(t *testing.T) {
+	policies := diffPolicies(
+		map[string]string{"keep": "allow", "remove": "drop", "change": "allow"},
+		map[string]string{"keep": "allow", "add": "allow", "change": "drop"},
+	)
+	if strings.Join(policies, ",") != "+ allow add,- drop remove,~ change allow -> drop" {
+		t.Fatalf("unexpected policy diff: %v", policies)
+	}
+	names := diffNames([]string{"keep", "remove"}, []string{"keep", "add"})
+	if strings.Join(names, ",") != "+ add,- remove" {
+		t.Fatalf("unexpected name diff: %v", names)
+	}
+	sets := summarizeSetChanges(
+		map[string][]string{"blocked_v4": {"one"}},
+		map[string][]string{"blocked_v4": {"one", "two"}},
+	)
+	if sets["blocked_v4"] != "1 -> 2" || sets["docker_nets"] != "0 -> 0" {
+		t.Fatalf("unexpected set summary: %v", sets)
+	}
+	if displayChanges(nil) != "= no semantic changes" ||
+		!strings.Contains(displaySetChanges(sets), "blocked_v4: 1 -> 2") {
+		t.Fatal("diff display helpers changed")
+	}
+}
+
+func TestGeneralCLIHelpers(t *testing.T) {
+	if id, err := parseID([]string{"commit", "7"}, 1); err != nil || id != 7 {
+		t.Fatalf("generation parse failed: %d %v", id, err)
+	}
+	for _, args := range [][]string{{"commit"}, {"commit", "0"}, {"commit", "bad"}} {
+		if _, err := parseID(args, 1); err == nil {
+			t.Fatalf("invalid generation accepted: %v", args)
+		}
+	}
+	if !has([]string{"--json"}, "--json") || has(nil, "--json") ||
+		!contains([]string{"eth0"}, "eth0") || contains([]string{"eth0"}, "wg0") {
+		t.Fatal("membership helpers changed")
+	}
+	if err := printJSONOr(map[string]any{"ok": true}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := printJSONOr("plain", false); err != nil {
+		t.Fatal(err)
+	}
+	if err := printJSONOr(make(chan int), true); err == nil {
+		t.Fatal("unencodable JSON output accepted")
+	}
+}
+
+func TestSecurePathHelpers(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureExistingDirectory(root); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(root, 0o722); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureExistingDirectory(root); err == nil {
+		t.Fatal("writable directory accepted")
+	}
+	if err := secureSecretFile("relative"); err == nil {
+		t.Fatal("relative secret path accepted")
+	}
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := secureSecretFile(secret); err == nil {
+		t.Fatal("world-readable secret accepted")
+	}
+}
+
+func TestSimpleRunBranches(t *testing.T) {
+	if err := run([]string{"version"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"version", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	exampleSource := filepath.Join("..", "..", "configs", "nftfw.example.toml")
+	exampleData, err := os.ReadFile(exampleSource)
+	if err != nil {
+		t.Fatal(err)
+	}
+	exampleDir := t.TempDir()
+	if err := os.Chmod(exampleDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	exampleConfig := filepath.Join(exampleDir, "nftfw.toml")
+	if err := os.WriteFile(exampleConfig, exampleData, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := run([]string{"config", "validate", exampleConfig}); err != nil {
+		t.Fatal(err)
+	}
+	for _, args := range [][]string{
+		nil,
+		{"unknown"},
+		{"config"},
+		{"plan", "--bad"},
+		{"apply", "--safe", "--unsafe"},
+		{"reconcile", "extra"},
+		{"doctor", "extra"},
+		{"audit", "extra"},
+		{"blocks", "bad"},
+		{"block", "bad", "value"},
+		{"explain", "--protocol", "bad"},
+	} {
+		if err := run(args); err == nil {
+			t.Fatalf("invalid run branch accepted: %v", args)
+		}
+	}
+}
+
+func TestRunRemoteCommandContracts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statusSocket := filepath.Join(root, "status.sock")
+	controlSocket := filepath.Join(root, "control.sock")
+	digest := strings.Repeat("a", sha256HexLength)
+	snapshot := health.Snapshot{
+		Schema: health.StatusSchema, Status: "HEALTHY", Active: true,
+		PolicyMatch: true, KillSwitchEnforced: true,
+		PolicyHash: digest, PolicyChecksum: digest,
+	}
+	recorder := &requestRecorder{}
+	startTestAPISocket(t, statusSocket, snapshot, recorder)
+	startTestAPISocket(t, controlSocket, snapshot, recorder)
+	t.Setenv("NFTFW_STATUS_SOCKET", statusSocket)
+	t.Setenv("NFTFW_CONTROL_SOCKET", controlSocket)
+
+	commands := [][]string{
+		{"status"},
+		{"status", "--json"},
+		{"health"},
+		{"health", "--json"},
+		{"audit"},
+		{"apply", "--safe"},
+		{"apply", "--unsafe"},
+		{"commit", "7"},
+		{"rollback", "7"},
+		{"reconcile"},
+		{"blocks", "list", "--limit", "5", "--offset", "1"},
+		{"block", "add", "192.0.2.10/32", "--ttl", "1h", "scanner"},
+		{"block", "remove", "11"},
+		{"allow", "add", "192.0.2.20/32", "temporary"},
+		{"allow", "remove", "12"},
+		{"wg", "refresh"},
+	}
+	for _, command := range commands {
+		if err := run(command); err != nil {
+			t.Fatalf("%v failed: %v", command, err)
+		}
+	}
+	want := []string{
+		"status", "status", "status", "status", "audit", "apply", "apply",
+		"commit", "rollback", "reconcile", "claims", "block-add",
+		"block-remove", "allow-add", "allow-remove", "wg-refresh",
+	}
+	if got := recorder.operations(); !reflect.DeepEqual(got, want) {
+		t.Fatalf("unexpected API operations: %v", got)
+	}
+}
+
+func TestExecutableAndControlFallbackBoundaries(t *testing.T) {
+	_ = secureCurrentExecutable()
+	t.Setenv("NFTFW_LOCAL", "")
+	if err := controlOrLocal(
+		filepath.Join(t.TempDir(), "missing.sock"),
+		filepath.Join(t.TempDir(), "missing.toml"),
+		api.Request{Op: "reconcile"},
+		func(*app.Runtime) (any, error) { return nil, nil },
+	); err == nil || !strings.Contains(err.Error(), "control socket unavailable") {
+		t.Fatalf("missing daemon fallback was accepted: %v", err)
+	}
+}
+
+func BenchmarkSemanticSummaryAndDiff(b *testing.B) {
+	currentScript := `add table inet nftfw_filter
+add rule inet nftfw_filter input comment "nftfw:policy:lan-ssh:allow"
+add element inet nftfw_filter blocked_v4 { 192.0.2.1/32 }
+`
+	proposedScript := `add table inet nftfw_filter
+add rule inet nftfw_filter input comment "nftfw:policy:lan-ssh:allow"
+add rule inet nftfw_filter input comment "nftfw:policy:vpn-web:allow"
+add element inet nftfw_filter blocked_v4 { 192.0.2.1/32, 192.0.2.2/32 }
+`
+	b.ReportAllocs()
+	for b.Loop() {
+		current := compiler.SummarizeScript(currentScript)
+		proposed := compiler.SummarizeScript(proposedScript)
+		_ = diffPolicies(current.Policies, proposed.Policies)
+		_ = diffNames(current.NAT, proposed.NAT)
+		_ = summarizeSetChanges(current.Sets, proposed.Sets)
 	}
 }

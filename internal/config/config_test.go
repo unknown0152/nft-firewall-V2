@@ -1,6 +1,7 @@
 package config
 
 import (
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -76,6 +77,16 @@ func TestLoadValidatesTopology(t *testing.T) {
 	}
 }
 
+func BenchmarkDecodeManagedScale(b *testing.B) {
+	data := []byte(validTOML)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := Decode(data); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
 func TestValidateRequiresExactCanonicalStatePaths(t *testing.T) {
 	c, err := Load(writeConfig(t, validTOML))
 	if err != nil {
@@ -132,6 +143,25 @@ func TestValidateRejectsUnsafeTCPMSS(t *testing.T) {
 	c.WireGuard.TCPMSS = 535
 	if err := Validate(c); err == nil {
 		t.Fatal("undersized TCP MSS accepted")
+	}
+}
+
+func TestValidateAcceptsAnyProtocolWithoutPorts(t *testing.T) {
+	c, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.Services = append(c.Services, Service{Name: "all-outbound", Protocol: "any"})
+	c.Policies = append(c.Policies, Policy{
+		Name: "host-all-outbound", From: "host", To: "any",
+		Service: "all-outbound", Action: "allow",
+	})
+	if err := Validate(c); err != nil {
+		t.Fatal(err)
+	}
+	c.Services[len(c.Services)-1].Ports = []int{443}
+	if err := Validate(c); err == nil {
+		t.Fatal("any service with ports was accepted")
 	}
 }
 
@@ -408,6 +438,102 @@ func TestWireGuardBootstrapRequiresNonzeroMarkAndUnicast(t *testing.T) {
 		if err := Validate(c); err == nil {
 			t.Fatalf("unsafe bootstrap address %s accepted", address)
 		}
+	}
+}
+
+func TestValidateBoundaryMatrix(t *testing.T) {
+	tests := []struct {
+		name string
+		edit func(*Config)
+	}{
+		{"ipv6 mode", func(c *Config) { c.System.IPv6Mode = "automatic" }},
+		{"block claim minimum", func(c *Config) { c.Runtime.MaxBlockClaims = 0 }},
+		{"set member maximum", func(c *Config) { c.Runtime.MaxSetMembers = 1000001 }},
+		{"trusted service count", func(c *Config) {
+			c.Runtime.TrustedServices = make([]string, 33)
+		}},
+		{"relative state root", func(c *Config) {
+			c.State.Directory = "relative"
+			c.State.Database = "relative/generation-state/state.db"
+			c.State.ProvenanceLedger = "relative/provenance-ledger.db"
+		}},
+		{"notifications", func(c *Config) { c.Integrations.Notifications = true }},
+		{"docker toggle mismatch", func(c *Config) { c.Integrations.DockerEnabled = true }},
+		{"threat toggle mismatch", func(c *Config) { c.Integrations.ThreatFeed = true }},
+		{"geo toggle mismatch", func(c *Config) { c.Integrations.GeoIP = true }},
+		{"no interfaces", func(c *Config) { c.Interfaces = nil }},
+		{"invalid interface name", func(c *Config) { c.Interfaces[0].Name = "bad/name" }},
+		{"invalid interface role", func(c *Config) { c.Interfaces[0].Role = "internet" }},
+		{"duplicate interface", func(c *Config) {
+			c.Interfaces[1].Name = c.Interfaces[0].Name
+		}},
+		{"no uplink", func(c *Config) { c.Interfaces[0].Role = "lan" }},
+		{"duplicate zone", func(c *Config) {
+			c.Zones = append(c.Zones, c.Zones[0])
+		}},
+		{"zone unknown interface", func(c *Config) {
+			c.Zones[0].Interfaces = []string{"missing0"}
+		}},
+		{"invalid service name", func(c *Config) { c.Services[0].Name = "bad/name" }},
+		{"duplicate service", func(c *Config) {
+			c.Services = append(c.Services, c.Services[0])
+		}},
+		{"invalid service protocol", func(c *Config) { c.Services[0].Protocol = "sctp" }},
+		{"duplicate service port", func(c *Config) { c.Services[0].Ports = []int{22, 22} }},
+		{"missing service ports", func(c *Config) { c.Services[0].Ports = nil }},
+		{"invalid policy action", func(c *Config) { c.Policies[0].Action = "log" }},
+		{"unknown policy source", func(c *Config) { c.Policies[0].From = "missing" }},
+		{"unknown policy destination", func(c *Config) { c.Policies[0].To = "missing" }},
+		{"unknown policy service", func(c *Config) { c.Policies[0].Service = "missing" }},
+		{"missing WireGuard interface", func(c *Config) { c.WireGuard.Interface = "" }},
+		{"WireGuard equals uplink", func(c *Config) { c.WireGuard.Interface = "eth0" }},
+		{"WireGuard role mismatch", func(c *Config) { c.Interfaces[1].Role = "lan" }},
+		{"WireGuard port", func(c *Config) { c.WireGuard.EndpointPort = 0 }},
+		{"WireGuard mark format", func(c *Config) { c.WireGuard.Fwmark = "xyz" }},
+		{"WireGuard mark overflow", func(c *Config) { c.WireGuard.Fwmark = "0x100000000" }},
+		{"WireGuard keep recent", func(c *Config) { c.WireGuard.KeepRecent = 17 }},
+		{"WireGuard hostname", func(c *Config) { c.WireGuard.EndpointHost = "-bad.example" }},
+		{"WireGuard bootstrap hostname", func(c *Config) {
+			c.WireGuard.BootstrapHosts = []string{"bad..example"}
+		}},
+		{"WireGuard config path", func(c *Config) {
+			c.WireGuard.ConfigPath = "/etc/wireguard/other.conf"
+		}},
+		{"WireGuard handshake minimum", func(c *Config) {
+			c.WireGuard.HandshakeSecond = 29
+		}},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			c, err := Load(writeConfig(t, validTOML))
+			if err != nil {
+				t.Fatal(err)
+			}
+			test.edit(&c)
+			if err := Validate(c); err == nil {
+				t.Fatal("invalid configuration was accepted")
+			}
+		})
+	}
+}
+
+func TestHostnameAndHostPrefixHelpers(t *testing.T) {
+	for _, hostname := range []string{"vpn.example", "a-b.example.test", "localhost"} {
+		if !validHostname(hostname) {
+			t.Fatalf("valid hostname rejected: %s", hostname)
+		}
+	}
+	for _, hostname := range []string{"", "-vpn.example", "vpn-.example", "vpn..example", strings.Repeat("a", 254)} {
+		if validHostname(hostname) {
+			t.Fatalf("invalid hostname accepted: %q", hostname)
+		}
+	}
+	_, host4, _ := net.ParseCIDR("192.0.2.1/32")
+	_, network4, _ := net.ParseCIDR("192.0.2.0/24")
+	_, host6, _ := net.ParseCIDR("2001:db8::1/128")
+	if bitsHost(host4) != 1 || bitsHost(network4) != 0 ||
+		bitsHost(host6) != 1 || bitsHost(&net.IPNet{}) != 0 {
+		t.Fatal("host-prefix classification changed")
 	}
 }
 

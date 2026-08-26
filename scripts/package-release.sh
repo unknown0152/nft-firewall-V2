@@ -64,7 +64,7 @@ if [[ "$tracked_release_version" != "$version" ]] || \
     echo "Requested version $version does not match tracked RELEASE_VERSION" >&2
     exit 1
 fi
-required_go_version=go1.25.13
+required_go_version=go1.27.0
 go_version=$(go env GOVERSION)
 if [[ "$go_version" != "$required_go_version" ]]; then
     echo "Release packaging requires $required_go_version (found $go_version); run with GOTOOLCHAIN=$required_go_version" >&2

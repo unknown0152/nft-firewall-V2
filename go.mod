@@ -1,8 +1,6 @@
 module github.com/unknown0152/nft-firewall-v2
 
-go 1.25.0
-
-toolchain go1.25.13
+go 1.27.0
 
 require (
 	github.com/BurntSushi/toml v1.4.0

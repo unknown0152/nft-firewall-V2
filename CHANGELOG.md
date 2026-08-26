@@ -1,5 +1,35 @@
 # Changelog
 
+## 2.1.0 - One-file managed setup
+
+- Require exact Go 1.27.0 for builds, validation, and release identity.
+- Add `nftfw setup --vpn PATH` for a supported clean Debian 13 server,
+  including strict secret-safe profile import, host discovery, deterministic
+  managed intent and advanced policy generation, WireGuard interface
+  lifecycle, DNS, policy routing, IPv6 disablement, safe apply, validation,
+  commit, boot integration, and automatic rollback.
+- Default to VPN-only IPv4 egress, preserved private-LAN SSH management, and
+  zero public inbound exposure.
+- Add managed tunnel, exposure, LAN allowance, effective-config, setup status,
+  and setup rollback commands with human and JSON output.
+- Make managed exposure/LAN mutations reload the exact protected on-disk
+  intent and generated policy inside the daemon before compilation. Add a
+  checksummed root-only file-publication journal, exact generation-status
+  recovery, and an independent managed-change rollback timer so CLI death
+  cannot leave new files paired with an old committed policy.
+- Add `nftfw-vpn.service` and an independent managed-setup rollback
+  service/timer plus a separate managed-change rollback service/timer while
+  preserving the nonactivating package lifecycle.
+- Extend the additive status-v2 and read-only dashboard views with managed
+  mode, public exposure, and LAN policy.
+- Preserve 2.0.3 advanced TOML, schema-6 state, generations, snapshots,
+  provenance, systemd, and package-upgrade behavior.
+- Refuse unsupported profiles, competing firewall owners, non-clean Docker,
+  prior NFTFW state, and conflicting route/rule/interface ownership before
+  setup mutation.
+- Add setup, importer, routing, discovery, intent, rollback, benchmark,
+  packaging, and reproducible-candidate validation.
+
 ## 2.0.3 - Dashboard status contract patch
 
 - Align the read-only dashboard and its fail-closed health projection with the

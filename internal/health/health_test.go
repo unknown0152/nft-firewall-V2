@@ -3,16 +3,21 @@ package health
 import (
 	"context"
 	"crypto/sha256"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
 	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
+	"github.com/unknown0152/nft-firewall-v2/internal/wireguard"
 )
 
 func saveHealthGeneration(t *testing.T, store *state.Store, id uint64, checksum, script string) {
@@ -127,6 +132,31 @@ func (healthyRulesetRunner) Run(_ context.Context, args ...string) (string, stri
 	return "", "unexpected command: " + joined, nil
 }
 
+type healthyAuditRulesetRunner struct{}
+
+func (healthyAuditRulesetRunner) Run(ctx context.Context, args ...string) (string, string, error) {
+	if strings.Join(args, " ") == "-j list ruleset" {
+		return `{"nftables":[{"metainfo":{"json_schema_version":1}}]}`, "", nil
+	}
+	return (healthyRulesetRunner{}).Run(ctx, args...)
+}
+
+type healthyWGRunner struct {
+	key       string
+	timestamp int64
+}
+
+func (r healthyWGRunner) Run(_ context.Context, args ...string) (string, error) {
+	switch strings.Join(args, " ") {
+	case "show wg0 latest-handshakes":
+		return r.key + "\t" + fmt.Sprint(r.timestamp) + "\n", nil
+	case "show wg0 endpoints":
+		return r.key + "\t198.51.100.8:51820\n", nil
+	default:
+		return "", errors.New("unexpected WireGuard command")
+	}
+}
+
 func TestSnapshotStatusContractDistinguishesPolicyFromOverallHealth(t *testing.T) {
 	ctx := context.Background()
 	directory := t.TempDir()
@@ -198,5 +228,102 @@ func TestSnapshotStatusContractDistinguishesPolicyFromOverallHealth(t *testing.T
 	}
 	if snapshot.Status != "DEGRADED" || !snapshot.Active || !snapshot.PolicyMatch || !snapshot.KillSwitchEnforced {
 		t.Fatalf("integration health incorrectly changed verified kernel-policy state: %#v", snapshot)
+	}
+}
+
+func TestSnapshotProjectsCompleteHealthyManagedState(t *testing.T) {
+	ctx := context.Background()
+	store, _, _ := newHealthyProvider(t)
+	ledger, err := provenance.Open(ctx, filepath.Join(store.Dir, "provenance-ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	if err := ledger.Reserve(ctx, []provenance.Assignment{
+		{Name: "eth0", ID: 1}, {Name: "wg0", ID: 2},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.AddClaim(ctx, state.Claim{
+		Address: "192.0.2.10/32", Family: "ipv4", Source: "manual",
+		Reason: "scanner", Actor: "operator",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	expiry := time.Now().UTC().Add(time.Hour)
+	if _, err := store.AddClaim(ctx, state.Claim{
+		Address: "192.0.2.20/32", Family: "ipv4", Source: "allow",
+		Reason: "temporary", Actor: "operator", ExpiresAt: &expiry,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	publication, err := store.ClaimPublicationState(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.MarkClaimsPublished(ctx, publication.DesiredRevision, 2); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SetIntegrationState(ctx, "wireguard/wg0", "healthy", 1, true); err != nil {
+		t.Fatal(err)
+	}
+	keyBytes := make([]byte, 32)
+	for index := range keyBytes {
+		keyBytes[index] = 7
+	}
+	controller := &wireguard.Controller{Runner: healthyWGRunner{
+		key: base64.StdEncoding.EncodeToString(keyBytes), timestamp: time.Now().Unix(),
+	}}
+	provider := Provider{
+		Store: store, Ledger: ledger, RequireProvenance: true,
+		Backend: nft.New(healthyAuditRulesetRunner{}), AuditForeignProvenance: true,
+		WG: controller, WGName: "wg0", WGHealthyWithin: 3 * time.Minute,
+		IPv6Mode: "disabled", ZoneCount: 3, PolicyCount: 4,
+		ActiveIntegrations: map[string]bool{
+			"runtime/claims": true, "wireguard/wg0": true,
+		},
+		Managed: &ManagedProjection{
+			Tunnel: true, PublicTCP: []int{443}, PublicUDP: []int{53},
+			LANManagementTCP: []int{22}, LANAllowTCP: []int{8096},
+			LANAllowUDP: []int{1900},
+		},
+	}
+	snapshot, err := provider.Snapshot(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != "HEALTHY" || !snapshot.Active || !snapshot.PolicyMatch ||
+		!snapshot.KillSwitchEnforced || !snapshot.Managed || !snapshot.ManagedTunnel ||
+		!snapshot.WireGuard.Healthy || snapshot.ProvenanceLedger != "ok" ||
+		snapshot.ProvenanceAuditStatus != "ok" || snapshot.BlockClaims != 1 ||
+		snapshot.BlockedAddresses != 1 || snapshot.ClaimsDesiredRev != snapshot.ClaimsAppliedRev {
+		t.Fatalf("complete healthy projection was degraded: %#v", snapshot)
+	}
+	if len(snapshot.PublicTCP) != 1 || snapshot.PublicTCP[0] != 443 ||
+		len(snapshot.LANAllowTCP) != 1 || snapshot.LANAllowTCP[0] != 8096 ||
+		snapshot.ClaimsBySource["manual"] != 1 || snapshot.ClaimsBySource["allow"] != 1 {
+		t.Fatalf("managed or claim projection is incomplete: %#v", snapshot)
+	}
+}
+
+func BenchmarkStatusSnapshot(b *testing.B) {
+	root := b.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		b.Fatal(err)
+	}
+	store, err := state.Open(context.Background(), filepath.Join(root, "state.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer store.Close()
+	provider := Provider{
+		Store: store, Backend: nft.New(emptyRulesetRunner{}),
+		IPv6Mode: "disabled", ZoneCount: 3, PolicyCount: 4,
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := provider.Snapshot(context.Background()); err != nil {
+			b.Fatal(err)
+		}
 	}
 }

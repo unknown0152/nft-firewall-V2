@@ -225,3 +225,41 @@ func TestOpenReadOnlyRejectsUnsafeDatabaseDirectoryWithoutMutation(t *testing.T)
 		assertNoSQLiteSidecars(t, databasePath)
 	})
 }
+
+func TestOpenRecoveryUsesExistingCurrentSchemaWithoutMutation(t *testing.T) {
+	ctx := context.Background()
+	root := secureTestDir(t)
+	path := filepath.Join(root, "state.db")
+	store, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Close(); err != nil {
+		t.Fatal(err)
+	}
+	before, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	recovery, err := OpenRecovery(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := recovery.QuickCheck(ctx); err != nil {
+		recovery.Close()
+		t.Fatal(err)
+	}
+	if err := recovery.Close(); err != nil {
+		t.Fatal(err)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !bytes.Equal(before, after) {
+		t.Fatal("recovery open changed the authoritative database image")
+	}
+	if _, err := OpenRecovery(ctx, filepath.Join(root, "missing.db")); err == nil {
+		t.Fatal("recovery open created a missing database")
+	}
+}

@@ -10,8 +10,10 @@ if [ -d /run/systemd/system ]; then
             :
             ;;
         remove|deconfigure)
-            systemctl disable --now nftfw-web.service nftfw-rollback.timer \
-                nftfw-rollback.service nftfwd.service \
+            systemctl disable --now nftfw-web.service nftfw-vpn.service \
+                nftfw-setup-rollback.timer nftfw-setup-rollback.service \
+                nftfw-managed-rollback.timer nftfw-managed-rollback.service \
+                nftfw-rollback.timer nftfw-rollback.service nftfwd.service \
                 nftfw-enforcement-ready.service nftfw-early.service \
                 >/dev/null 2>&1 || true
             ;;

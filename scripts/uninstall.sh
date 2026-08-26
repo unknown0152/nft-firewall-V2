@@ -8,8 +8,8 @@ for arg in "$@"; do
         *) echo "Usage: uninstall.sh [--purge-state]" >&2; exit 2 ;;
     esac
 done
-systemctl disable --now nftfw-web.service nftfw-rollback.timer nftfwd.service nftfw-early.service 2>/dev/null || true
-rm -f /etc/systemd/system/nftfw-early.service /etc/systemd/system/nftfwd.service /etc/systemd/system/nftfw-web.service /etc/systemd/system/nftfw-rollback.service /etc/systemd/system/nftfw-rollback.timer
+systemctl disable --now nftfw-web.service nftfw-vpn.service nftfw-setup-rollback.timer nftfw-setup-rollback.service nftfw-managed-rollback.timer nftfw-managed-rollback.service nftfw-rollback.timer nftfwd.service nftfw-enforcement-ready.service nftfw-early.service 2>/dev/null || true
+rm -f /etc/systemd/system/nftfw-early.service /etc/systemd/system/nftfw-enforcement-ready.service /etc/systemd/system/nftfwd.service /etc/systemd/system/nftfw-web.service /etc/systemd/system/nftfw-vpn.service /etc/systemd/system/nftfw-setup-rollback.service /etc/systemd/system/nftfw-setup-rollback.timer /etc/systemd/system/nftfw-managed-rollback.service /etc/systemd/system/nftfw-managed-rollback.timer /etc/systemd/system/nftfw-rollback.service /etc/systemd/system/nftfw-rollback.timer
 systemctl daemon-reload
 rm -f /usr/sbin/nftfw
 rm -rf /usr/lib/nftfw

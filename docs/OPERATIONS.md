@@ -1,6 +1,7 @@
 # Operations
 
-These commands describe normal operation of the accepted 2.0.3 release.
+These commands describe advanced-mode operation inherited from 2.0.3. For
+2.1.0 managed setup and routine commands, start with `CLI.md`.
 Complete the host-specific handoff in `HOST-HANDOFF.md` before first
 activation.
 

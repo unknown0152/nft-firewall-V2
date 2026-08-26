@@ -82,6 +82,11 @@ for input in \
     "$ROOT_DIR/packaging/systemd/nftfw-enforcement-ready.service" \
     "$ROOT_DIR/packaging/systemd/nftfw-rollback.service" \
     "$ROOT_DIR/packaging/systemd/nftfw-rollback.timer" \
+    "$ROOT_DIR/packaging/systemd/nftfw-setup-rollback.service" \
+    "$ROOT_DIR/packaging/systemd/nftfw-setup-rollback.timer" \
+    "$ROOT_DIR/packaging/systemd/nftfw-managed-rollback.service" \
+    "$ROOT_DIR/packaging/systemd/nftfw-managed-rollback.timer" \
+    "$ROOT_DIR/packaging/systemd/nftfw-vpn.service" \
     "$ROOT_DIR/packaging/systemd/nftfw-web.service" \
     "$ROOT_DIR/packaging/systemd/nftfwd.service" \
     "$ROOT_DIR/packaging/systemd/nftfwd-docker-access.conf.example" \
@@ -120,8 +125,8 @@ if [[ -n "$candidate_extra" || "$candidate_disposition" != release || \
     echo "Development, CI, and Stage R candidate artifacts are intrinsically non-installable." >&2
     exit 1
 fi
-[[ "$candidate_version" == 2.0.3 ]] || {
-    echo "Refusing source installer candidate version ${candidate_version:-unknown}; expected exact release 2.0.3." >&2
+[[ "$candidate_version" == 2.1.0 ]] || {
+    echo "Refusing source installer candidate version ${candidate_version:-unknown}; expected exact release 2.1.0." >&2
     exit 1
 }
 dpkg --validate-version "$candidate_version" >/dev/null 2>&1 || {
@@ -202,7 +207,7 @@ if [[ -e "$BIN_DIR/nftfw" || -L "$BIN_DIR/nftfw" ]]; then
         exit 1
     fi
     case "$installed_version" in
-        2.0.2|2.0.2-*|2.0.2+*|2.0.2~*|2.0.3|2.0.3-*|2.0.3+*|2.0.3~*) ;;
+        2.0.2|2.0.2-*|2.0.2+*|2.0.2~*|2.0.3|2.0.3-*|2.0.3+*|2.0.3~*|2.1.0|2.1.0-*|2.1.0+*|2.1.0~*) ;;
         *)
             echo "Refusing an incompatible NFT Firewall V2 version identity: $installed_version" >&2
             exit 1
@@ -298,6 +303,11 @@ systemd_units=(
     nftfw-enforcement-ready.service
     nftfw-rollback.service
     nftfw-rollback.timer
+    nftfw-setup-rollback.service
+    nftfw-setup-rollback.timer
+    nftfw-managed-rollback.service
+    nftfw-managed-rollback.timer
+    nftfw-vpn.service
     nftfw-web.service
     nftfwd.service
 )
@@ -317,4 +327,5 @@ done
 systemctl daemon-reload
 echo "NFT Firewall V2 installed without enabling, starting, stopping, or restarting any unit."
 echo "Pre-existing unit lifecycle state was preserved; a fresh installation remains inactive."
-echo "No firewall policy or enforcement pointer was created. Validate with: nftfw config validate && nftfw plan"
+echo "No firewall policy, VPN interface, route, or enforcement pointer was created."
+echo "Clean Debian 13 setup: sudo nftfw setup --vpn /path/to/working-vpn.conf"

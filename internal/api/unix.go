@@ -281,7 +281,7 @@ func validateRequest(r Request, control bool) error {
 		if r.Safe == r.Unsafe || r.Generation != 0 || r.Address != "" || r.ClaimID != 0 || r.Source != "" || r.Reason != "" || r.ExpiresSec != 0 || r.Limit != 0 || r.Offset != 0 {
 			return errors.New("apply requires exactly one explicit safe or unsafe mode")
 		}
-	case "commit", "rollback":
+	case "commit", "rollback", "generation":
 		if r.Generation == 0 || r.Safe || r.Unsafe || r.Address != "" || r.ClaimID != 0 || r.Source != "" || r.Reason != "" || r.ExpiresSec != 0 || r.Limit != 0 || r.Offset != 0 {
 			return errors.New("generation operation requires only a positive generation")
 		}

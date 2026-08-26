@@ -82,7 +82,8 @@ func (e Effective) ExplainEffective(q Query, runtime RuntimeContext) Decision {
 			continue
 		}
 		svc, ok := e.Svcs[p.Service]
-		if !ok || svc.Protocol != q.Protocol || (svc.Protocol != "icmp" && !containsPort(svc.Ports, q.Port)) {
+		if !ok || (svc.Protocol != "any" && svc.Protocol != q.Protocol) ||
+			(svc.Protocol != "any" && svc.Protocol != "icmp" && !containsPort(svc.Ports, q.Port)) {
 			continue
 		}
 		cp := p

@@ -13,6 +13,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unknown0152/nft-firewall-v2/internal/app"
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
 	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
@@ -414,6 +415,12 @@ func TestVerifierIsReadOnlyAndRejectsPendingState(t *testing.T) {
 	if err := verifyEnforcementState(ctx, root, secureTestDir(t), backend); err == nil || !strings.Contains(err.Error(), "remains pending") {
 		t.Fatalf("verifier accepted pending state: %v", err)
 	}
+}
+
+func TestRollbackLoopStopsImmediatelyWithCanceledContext(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	rollbackLoop(ctx, &app.Runtime{})
 }
 
 func newStateLayout(t *testing.T) (string, string) {

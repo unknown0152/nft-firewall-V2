@@ -78,7 +78,7 @@ if [ -e "$state_dir/state.db" ] || [ -L "$state_dir/state.db" ]; then
     exit 1
 fi
 
-unit_names='nftfw-early.service nftfw-enforcement-ready.service nftfw-rollback.service nftfw-rollback.timer nftfw-web.service nftfwd.service'
+unit_names='nftfw-early.service nftfw-enforcement-ready.service nftfw-rollback.service nftfw-rollback.timer nftfw-setup-rollback.service nftfw-setup-rollback.timer nftfw-managed-rollback.service nftfw-managed-rollback.timer nftfw-vpn.service nftfw-web.service nftfwd.service'
 for shadow_root in /etc/systemd/system /run/systemd/system /usr/local/lib/systemd/system; do
     for unit_name in $unit_names; do
         shadow=$shadow_root/$unit_name

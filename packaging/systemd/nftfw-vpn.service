@@ -1,0 +1,43 @@
+[Unit]
+Description=NFT Firewall V2 managed WireGuard tunnel and routing
+Documentation=file:/usr/share/doc/nft-firewall-v2/QUICKSTART.md
+Wants=network-online.target
+After=network-online.target nftfw-enforcement-ready.service
+Requisite=nftfw-enforcement-ready.service
+Before=nftfw-web.service
+ConditionPathExists=/etc/nftfw/intent.toml
+ConditionPathExists=/etc/wireguard/nftfw0.conf
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/nftfw/nftfw tunnel up
+ExecStop=/usr/lib/nftfw/nftfw tunnel down
+RemainAfterExit=yes
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
+ReadOnlyPaths=/etc/nftfw/intent.toml /etc/wireguard/nftfw0.conf
+ReadWritePaths=/run/nftfw -/run/resolvconf -/run/systemd/resolve
+CapabilityBoundingSet=CAP_NET_ADMIN
+AmbientCapabilities=CAP_NET_ADMIN
+
+[Install]
+WantedBy=multi-user.target

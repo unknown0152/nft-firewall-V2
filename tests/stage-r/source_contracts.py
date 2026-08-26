@@ -225,6 +225,11 @@ class InstallerLifecycleContracts(unittest.TestCase):
             "nftfw-enforcement-ready.service",
             "nftfw-rollback.service",
             "nftfw-rollback.timer",
+            "nftfw-setup-rollback.service",
+            "nftfw-setup-rollback.timer",
+            "nftfw-managed-rollback.service",
+            "nftfw-managed-rollback.timer",
+            "nftfw-vpn.service",
             "nftfw-web.service",
             "nftfwd.service",
         ):
@@ -555,6 +560,11 @@ class InstallerLifecycleContracts(unittest.TestCase):
             "nftfw-enforcement-ready.service",
             "nftfw-rollback.service",
             "nftfw-rollback.timer",
+            "nftfw-setup-rollback.service",
+            "nftfw-setup-rollback.timer",
+            "nftfw-managed-rollback.service",
+            "nftfw-managed-rollback.timer",
+            "nftfw-vpn.service",
             "nftfw-web.service",
             "nftfwd.service",
         }
@@ -597,6 +607,45 @@ class InstallerLifecycleContracts(unittest.TestCase):
 
 
 class SystemdGraphContracts(unittest.TestCase):
+    def test_managed_setup_rollback_can_restore_exact_owned_state(self) -> None:
+        unit = parse_unit("packaging/systemd/nftfw-setup-rollback.service")
+        self.assertEqual(one(unit, "Service", "ProtectKernelTunables"), "no")
+        capabilities = set(one(unit, "Service", "CapabilityBoundingSet").split())
+        self.assertIn("CAP_NET_ADMIN", capabilities)
+        self.assertIn("CAP_CHOWN", capabilities)
+        writable = one(unit, "Service", "ReadWritePaths").split()
+        self.assertIn("-/etc/wireguard", writable)
+        self.assertIn("/etc/sysctl.d", writable)
+        self.assertIn("/etc/systemd/system", writable)
+
+    def test_managed_policy_rollback_is_narrow_and_generation_scoped(self) -> None:
+        service = parse_unit("packaging/systemd/nftfw-managed-rollback.service")
+        timer = parse_unit("packaging/systemd/nftfw-managed-rollback.timer")
+        self.assertEqual(
+            one(service, "Service", "ExecStart"),
+            "/usr/lib/nftfw/nftfw managed-recover --expired",
+        )
+        self.assertEqual(
+            words(service, "Service", "RestrictAddressFamilies"),
+            {"AF_UNIX"},
+        )
+        self.assertEqual(
+            words(service, "Service", "ReadWritePaths"),
+            {"/etc/nftfw", "/var/lib/nftfw", "/run/nftfw"},
+        )
+        self.assertEqual(one(service, "Service", "CapabilityBoundingSet"), "")
+        self.assertEqual(one(service, "Service", "AmbientCapabilities"), "")
+        self.assertEqual(
+            one(timer, "Timer", "Unit"),
+            "nftfw-managed-rollback.service",
+        )
+        self.assertEqual(one(timer, "Timer", "OnUnitActiveSec"), "15s")
+        recovery = read("cmd/nftfw/managed_recovery.go")
+        runtime = read("internal/app/runtime.go")
+        self.assertIn("nftfw.managed-change-journal.v1", recovery)
+        self.assertIn('Op: "generation", Generation: record.Generation', recovery)
+        self.assertIn('case "generation":', runtime)
+
     ACTIVATING_KEYS = ("Requires", "Wants", "BindsTo", "Upholds")
     EARLY_RO = {
         "/etc/nftfw",
@@ -948,22 +997,22 @@ class NftfwdCLIContracts(unittest.TestCase):
 
 
 class ReleaseCandidateMetadataContracts(unittest.TestCase):
-    def test_build_defaults_and_ci_identify_2_0_3(self) -> None:
+    def test_build_defaults_and_ci_identify_2_1_0(self) -> None:
         makefile = read("Makefile")
         if not (
             re.search(r"(?m)^TARGET_VERSION := .*RELEASE_VERSION", makefile)
             and "VERSION ?= $(TARGET_VERSION)" in makefile
         ):
             self.fail("Makefile must source its default VERSION from RELEASE_VERSION")
-        if read("RELEASE_VERSION").strip() != "2.0.3":
-            self.fail("tracked RELEASE_VERSION must identify the 2.0.3 source line")
+        if read("RELEASE_VERSION").strip() != "2.1.0":
+            self.fail("tracked RELEASE_VERSION must identify the 2.1.0 source line")
         build_deb = read("scripts/build-deb.sh")
         if 'version=${1:-}' not in build_deb or "Usage: build-deb.sh <version>" not in build_deb:
             self.fail("build-deb.sh must require an explicit version argument")
         if re.search(r"version=\$\{1:-2\.0\.1\}", build_deb):
             self.fail("build-deb.sh retains the obsolete 2.0.1 default")
-        if "make deb VERSION=2.0.3+ci" not in read(".github/workflows/ci.yml"):
-            self.fail("CI package build must use the clearly non-final 2.0.3+ci version")
+        if "make deb VERSION=2.1.0+ci" not in read(".github/workflows/ci.yml"):
+            self.fail("CI package build must use the clearly non-final 2.1.0+ci version")
         if "nft-firewall-v2_2.0.1_" in read("INSTALL.md"):
             self.fail("INSTALL.md still names a 2.0.1 package as the current install input")
 
@@ -1031,7 +1080,7 @@ class ReleaseCandidateMetadataContracts(unittest.TestCase):
         self.assertIn('"$binary" version --json', installer)
         self.assertIn('"$candidate_disposition" != release', installer)
         self.assertIn('"$candidate_version" == *~stage.r.*', installer)
-        self.assertIn('"$candidate_version" == 2.0.3', installer)
+        self.assertIn('"$candidate_version" == 2.1.0', installer)
         self.assertLess(
             installer.index('"$candidate_disposition" != release'),
             installer.index("validation_dir=\"\""),
@@ -1044,7 +1093,7 @@ class ReleaseCandidateMetadataContracts(unittest.TestCase):
         base = [
             "make",
             "release-metadata-check",
-            "VERSION=2.0.3~stage.r.aaaaaaaaaaaa",
+            "VERSION=2.1.0~stage.r.aaaaaaaaaaaa",
             "BUILD_DATE=2026-08-24T00:00:00Z",
         ]
         accepted = subprocess.run(
@@ -1086,7 +1135,7 @@ class ReleaseCandidateMetadataContracts(unittest.TestCase):
             [
                 "make",
                 "release-metadata-check",
-                "VERSION=2.0.3",
+                "VERSION=2.1.0",
                 "BUILD_DATE=2026-08-24T00:00:00Z",
                 "COMMIT=" + "a" * 40,
                 "DISPOSITION=stage-r-candidate-only",
@@ -1102,7 +1151,7 @@ class ReleaseCandidateMetadataContracts(unittest.TestCase):
             [
                 "make",
                 "release-metadata-check",
-                "VERSION=2.0.3+ci",
+                "VERSION=2.1.0+ci",
                 "BUILD_DATE=2026-08-24T00:00:00Z",
                 "COMMIT=" + "a" * 40,
                 "DISPOSITION=ci",
@@ -1154,8 +1203,8 @@ class ReleaseCandidateMetadataContracts(unittest.TestCase):
         first_heading = re.search(r"(?m)^## ([^\n]+)$", changelog)
         self.assertIsNotNone(first_heading, "CHANGELOG.md has no release heading")
         self.assertTrue(
-            first_heading.group(1).startswith("2.0.3"),
-            f"first changelog release must be 2.0.3, found {first_heading.group(1)!r}",
+            first_heading.group(1).startswith("2.1.0"),
+            f"first changelog release must be 2.1.0, found {first_heading.group(1)!r}",
         )
 
     def test_untagged_builder_marks_private_rc_as_not_deployable(self) -> None:

@@ -249,6 +249,45 @@ func TestReadOnlyValidationDoesNotCreateSidecars(t *testing.T) {
 	}
 }
 
+func TestBackupCreatesVerifiedNoOverwriteCopy(t *testing.T) {
+	ctx := context.Background()
+	path := ledgerPath(t, "ledger.db")
+	ledger, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ledger.Close()
+	if err := ledger.Reserve(ctx, []Assignment{active("lan0", 1), active("vpn0", 2)}); err != nil {
+		t.Fatal(err)
+	}
+	backupPath := filepath.Join(filepath.Dir(path), "backup", "ledger.db")
+	if err := ledger.Backup(ctx, backupPath); err != nil {
+		t.Fatal(err)
+	}
+	backup, err := OpenReadOnly(ctx, backupPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer backup.Close()
+	sourceDigest, err := ledger.Digest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	backupDigest, err := backup.Digest(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sourceDigest != backupDigest {
+		t.Fatal("provenance backup digest differs")
+	}
+	if info, err := os.Stat(backupPath); err != nil || info.Mode().Perm() != 0o600 {
+		t.Fatalf("unsafe backup: info=%v err=%v", info, err)
+	}
+	if err := ledger.Backup(ctx, backupPath); err == nil {
+		t.Fatal("provenance backup overwrote an existing destination")
+	}
+}
+
 func TestUnsafeLedgerPathRejected(t *testing.T) {
 	ctx := context.Background()
 	if _, err := Open(ctx, ledgerPath(t, "ledger%66.db")); err == nil {

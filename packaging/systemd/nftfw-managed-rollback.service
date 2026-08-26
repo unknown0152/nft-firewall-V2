@@ -1,0 +1,32 @@
+[Unit]
+Description=Recover an expired NFT Firewall V2 managed policy change
+Documentation=file:/usr/share/doc/nft-firewall-v2/RECOVERY.md
+After=local-fs.target nftfwd.service
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/nftfw/nftfw managed-recover --expired
+User=root
+Group=root
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX
+CapabilityBoundingSet=
+AmbientCapabilities=
+ReadWritePaths=/etc/nftfw /var/lib/nftfw /run/nftfw

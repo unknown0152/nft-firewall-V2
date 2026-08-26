@@ -30,6 +30,32 @@ func TestExplainUsesCompilerModel(t *testing.T) {
 	}
 }
 
+func TestExplainAnyProtocolService(t *testing.T) {
+	c := config.Defaults()
+	c.Interfaces = []config.Interface{
+		{Name: "eth0", Role: "uplink", ProvenanceID: 1},
+		{Name: "wg0", Role: "vpn", ProvenanceID: 2},
+	}
+	c.Services = []config.Service{{Name: "all-outbound", Protocol: "any"}}
+	c.Policies = []config.Policy{{
+		Name: "host-all-outbound", From: "host", To: "any",
+		Service: "all-outbound", Action: "allow",
+	}}
+	e, err := Compile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, query := range []Query{
+		{From: "host", To: "203.0.113.20", Protocol: "tcp", Port: 443},
+		{From: "host", To: "203.0.113.20", Protocol: "udp", Port: 3478},
+		{From: "host", To: "203.0.113.20", Protocol: "icmp"},
+	} {
+		if decision := e.Explain(query); decision.Action != "allow" {
+			t.Fatalf("any protocol did not match %#v: %#v", query, decision)
+		}
+	}
+}
+
 func FuzzExplainAlwaysReturnsAVerdict(f *testing.F) {
 	f.Add("192.168.1.5", "host", "tcp", 22)
 	f.Add("invalid", "unknown", "udp", -1)

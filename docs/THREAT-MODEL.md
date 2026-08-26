@@ -1,6 +1,8 @@
 # Threat Model
 
-This is the accepted 2.0.3 release boundary. Stage R2 packet, package, boot,
+The 2.1.0 boundary preserves the accepted 2.0.3 enforcement model and adds
+provider-profile parsing, discovery, managed routing, setup transactions, and
+their independent rollback owner. The prior Stage R2 packet, package, boot,
 Docker, and real-provider evidence passed. A new host still needs its own
 topology review and guarded handoff because those choices are not release
 properties.

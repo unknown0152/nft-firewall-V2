@@ -131,3 +131,27 @@ func TestTypedOperatorRemovalDoesNotCrossAllowAndBlockClaims(t *testing.T) {
 		t.Fatal("block removal deleted an allow lease")
 	}
 }
+
+func TestEffectiveProjectsIPv4AndIPv6Blocks(t *testing.T) {
+	ctx := context.Background()
+	store, err := state.Open(ctx, filepath.Join(secureTestDir(t), "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer store.Close()
+	service := Service{Store: store, Max: 10}
+	if _, err := service.Add(ctx, "192.0.2.10", "manual", "v4", "admin", nil); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.Add(ctx, "2001:db8::10", "manual", "v6", "admin", nil); err != nil {
+		t.Fatal(err)
+	}
+	v4, v6, err := service.Effective(ctx)
+	if err != nil || len(v4) != 1 || v4[0] != "192.0.2.10/32" ||
+		len(v6) != 1 || v6[0] != "2001:db8::10/128" {
+		t.Fatalf("unexpected effective blocks: %v %v %v", v4, v6, err)
+	}
+	if _, _, err := (Service{}).Effective(ctx); err == nil {
+		t.Fatal("effective blocks accepted a nil store")
+	}
+}

@@ -344,6 +344,110 @@ func (l *Ledger) Digest(ctx context.Context) (string, error) {
 	return hex.EncodeToString(sum[:]), nil
 }
 
+func (l *Ledger) QuickCheck(ctx context.Context) error {
+	if l == nil || l.DB == nil {
+		return errors.New("provenance ledger is required")
+	}
+	var result string
+	if err := l.DB.QueryRowContext(ctx, "PRAGMA quick_check").Scan(&result); err != nil {
+		return err
+	}
+	if result != "ok" {
+		return fmt.Errorf("provenance SQLite quick_check: %s", result)
+	}
+	return nil
+}
+
+// Backup writes a consistent, verified copy without replacing an existing
+// destination. The caller must hold the global NFTFW mutation lock.
+func (l *Ledger) Backup(ctx context.Context, destination string) error {
+	if l == nil || l.DB == nil || l.readOnly {
+		return errors.New("writable provenance ledger is required")
+	}
+	abs, err := filepath.Abs(destination)
+	if err != nil || abs != destination || strings.ContainsAny(abs, "?#%") ||
+		!databasePattern.MatchString(filepath.Base(abs)) {
+		return errors.New("provenance backup path is invalid")
+	}
+	parent := filepath.Dir(abs)
+	if err := os.MkdirAll(parent, 0o750); err != nil {
+		return err
+	}
+	resolved, err := filepath.EvalSymlinks(parent)
+	if err != nil || resolved != parent {
+		return errors.New("provenance backup directory path is unsafe")
+	}
+	info, err := os.Stat(parent)
+	if err != nil || info.Mode().Perm()&0o022 != 0 {
+		return errors.New("provenance backup directory is group/other writable")
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
+		return errors.New("provenance backup directory has unsafe ownership")
+	}
+	if _, err := os.Lstat(abs); err == nil {
+		return errors.New("provenance backup destination already exists")
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	file, err := os.CreateTemp(parent, "nftfw-provenance-backup-*.db")
+	if err != nil {
+		return err
+	}
+	temporary := file.Name()
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(temporary); err != nil {
+		return err
+	}
+	defer os.Remove(temporary)
+	if _, err := l.DB.ExecContext(ctx, "VACUUM INTO ?", temporary); err != nil {
+		return fmt.Errorf("create provenance backup: %w", err)
+	}
+	if err := secureBackupFile(temporary); err != nil {
+		return err
+	}
+	backup, err := OpenReadOnly(ctx, temporary)
+	if err != nil {
+		return fmt.Errorf("verify provenance backup: %w", err)
+	}
+	sourceDigest, sourceErr := l.Digest(ctx)
+	backupDigest, backupErr := backup.Digest(ctx)
+	checkErr := backup.QuickCheck(ctx)
+	closeErr := backup.Close()
+	if sourceErr != nil || backupErr != nil || checkErr != nil || closeErr != nil ||
+		sourceDigest != backupDigest {
+		return errors.New("provenance backup verification failed")
+	}
+	file, err = os.Open(temporary)
+	if err != nil {
+		return err
+	}
+	if err := file.Sync(); err != nil {
+		file.Close()
+		return err
+	}
+	if err := file.Close(); err != nil {
+		return err
+	}
+	if err := os.Rename(temporary, abs); err != nil {
+		return err
+	}
+	return syncLedger(abs)
+}
+
+func secureBackupFile(path string) error {
+	info, err := os.Lstat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("provenance backup file is unsafe")
+	}
+	if err := os.Chmod(path, 0o600); err != nil {
+		return err
+	}
+	return nil
+}
+
 // MergeFrom performs a monotonic, merge-only restore. An older saved ledger is
 // compatible only when allocations missing from it are already tombstoned in
 // the live ledger; live identities are never removed, changed, or resurrected.

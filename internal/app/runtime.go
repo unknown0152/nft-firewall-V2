@@ -20,6 +20,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/containers"
 	"github.com/unknown0152/nft-firewall-v2/internal/geo"
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
+	"github.com/unknown0152/nft-firewall-v2/internal/intent"
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
 	"github.com/unknown0152/nft-firewall-v2/internal/policy"
 	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
@@ -31,6 +32,7 @@ import (
 )
 
 type Runtime struct {
+	ConfigPath          string
 	Config              config.Config
 	Effective           policy.Effective
 	Store               *state.Store
@@ -40,6 +42,7 @@ type Runtime struct {
 	MutationLockDir     string
 	EndpointResolver    *wireguard.Resolver
 	WGController        *wireguard.Controller
+	ManagedIntent       *intent.Intent
 	threatFeedFetcher   func(context.Context, threatintel.Feed) ([]string, error)
 	containerNetFetcher func(context.Context) ([]string, []string, error)
 	claimMu             sync.Mutex
@@ -91,6 +94,15 @@ func open(ctx context.Context, configPath string, runner nft.Runner, auditConfig
 	if err != nil {
 		return nil, err
 	}
+	var managedIntent *intent.Intent
+	intentPath := filepath.Join(filepath.Dir(configPath), "intent.toml")
+	if loaded, loadErr := intent.Load(intentPath); loadErr == nil {
+		managedIntent = &loaded
+	} else if _, statErr := os.Lstat(intentPath); statErr == nil {
+		// Managed mode is optional. A missing file means advanced mode; an
+		// invalid present file must not be silently represented as managed.
+		return nil, fmt.Errorf("load managed intent: %w", loadErr)
+	}
 	databasePath := c.State.Database
 	if override := os.Getenv("NFTFW_STATE_DB"); override != "" {
 		databasePath = override
@@ -105,6 +117,8 @@ func open(ctx context.Context, configPath string, runner nft.Runner, auditConfig
 			return nil, fmt.Errorf("resolve test state database path: %w", resolveErr)
 		}
 		mutationLockDir = filepath.Join(state.StateRootForDatabasePath(absoluteDatabase), "test-runtime")
+		// #nosec G703 -- this path is used only with an injected test runner,
+		// is made absolute above, and is constrained beneath the derived state root.
 		if err := os.MkdirAll(mutationLockDir, 0o700); err != nil {
 			return nil, fmt.Errorf("create isolated mutation lock directory: %w", err)
 		}
@@ -170,7 +184,7 @@ func open(ctx context.Context, configPath string, runner nft.Runner, auditConfig
 	}
 	resolver := &wireguard.Resolver{CachePath: filepath.Join(st.Dir, "wg-endpoints.json"), KeepRecent: c.WireGuard.KeepRecent, Max: 64, MaxStale: 24 * time.Hour}
 	controller := &wireguard.Controller{}
-	runtime := &Runtime{Config: c, Effective: e, Store: st, Ledger: ledger, Backend: be, Manager: m, MutationLockDir: mutationLockDir, EndpointResolver: resolver, WGController: controller}
+	runtime := &Runtime{ConfigPath: configPath, Config: c, Effective: e, Store: st, Ledger: ledger, Backend: be, Manager: m, MutationLockDir: mutationLockDir, EndpointResolver: resolver, WGController: controller, ManagedIntent: managedIntent}
 	// OpenQuiet performs no startup retirement writes. The normal daemon open
 	// owns lifecycle retirement while the initialization lock remains held.
 	if auditConfiguration {
@@ -214,6 +228,14 @@ func (r *Runtime) Artifact(ctx context.Context) (compiler.Artifact, error) {
 }
 
 func (r *Runtime) artifactLocked(ctx context.Context) (compiler.Artifact, error) {
+	current, err := r.currentConfiguration()
+	if err != nil {
+		return compiler.Artifact{}, err
+	}
+	return current.artifactLockedCurrent(ctx)
+}
+
+func (r *Runtime) artifactLockedCurrent(ctx context.Context) (compiler.Artifact, error) {
 	if r.Ledger == nil {
 		return compiler.Artifact{}, errors.New("writable monotonic provenance ledger is unavailable")
 	}
@@ -271,6 +293,42 @@ func (r *Runtime) artifactLocked(ctx context.Context) (compiler.Artifact, error)
 		return compiler.Artifact{}, err
 	}
 	return compiler.Compile(compiler.Input{Policy: r.Effective, BlockedV4: claimSets.blockedV4, BlockedV6: claimSets.blockedV6, BootstrapV4: v4, BootstrapV6: v6, DockerNets: dockerV4, DockerNets6: dockerV6}, id)
+}
+
+func (r *Runtime) currentConfiguration() (*Runtime, error) {
+	if r.ConfigPath == "" {
+		return r, nil
+	}
+	loaded, err := config.Load(r.ConfigPath)
+	if err != nil {
+		return nil, fmt.Errorf("reload protected configuration: %w", err)
+	}
+	effective, err := policy.Compile(loaded)
+	if err != nil {
+		return nil, fmt.Errorf("compile reloaded configuration: %w", err)
+	}
+	var managedIntent *intent.Intent
+	intentPath := filepath.Join(filepath.Dir(r.ConfigPath), "intent.toml")
+	if value, loadErr := intent.Load(intentPath); loadErr == nil {
+		managedIntent = &value
+	} else if _, statErr := os.Lstat(intentPath); statErr == nil {
+		return nil, fmt.Errorf("reload managed intent: %w", loadErr)
+	}
+	return &Runtime{
+		ConfigPath:          r.ConfigPath,
+		Config:              loaded,
+		Effective:           effective,
+		Store:               r.Store,
+		Ledger:              r.Ledger,
+		Backend:             r.Backend,
+		Manager:             r.Manager,
+		MutationLockDir:     r.MutationLockDir,
+		EndpointResolver:    r.EndpointResolver,
+		WGController:        r.WGController,
+		ManagedIntent:       managedIntent,
+		threatFeedFetcher:   r.threatFeedFetcher,
+		containerNetFetcher: r.containerNetFetcher,
+	}, nil
 }
 
 type runtimeClaimSets struct {
@@ -454,12 +512,31 @@ func (r *Runtime) containerNets(ctx context.Context) (v4, v6 []string, err error
 }
 
 func (r *Runtime) Status(ctx context.Context) (any, error) {
+	current, err := r.currentConfiguration()
+	if err != nil {
+		return nil, err
+	}
+	return current.statusCurrent(ctx)
+}
+
+func (r *Runtime) statusCurrent(ctx context.Context) (any, error) {
+	var managed *health.ManagedProjection
+	if r.ManagedIntent != nil {
+		managed = &health.ManagedProjection{
+			Tunnel: true, PublicTCP: r.ManagedIntent.PublicTCP,
+			PublicUDP:        r.ManagedIntent.PublicUDP,
+			LANManagementTCP: r.ManagedIntent.ManagementTCP,
+			LANAllowTCP:      r.ManagedIntent.LANAllowTCP,
+			LANAllowUDP:      r.ManagedIntent.LANAllowUDP,
+		}
+	}
 	return health.Provider{
 		Store: r.Store, Ledger: r.Ledger, RequireProvenance: true, AuditForeignProvenance: true, Backend: r.Backend, WG: r.WGController,
 		WGName:          r.Config.WireGuard.Interface,
 		WGHealthyWithin: time.Duration(r.Config.WireGuard.HandshakeSecond) * time.Second,
 		IPv6Mode:        r.Config.System.IPv6Mode, ZoneCount: len(r.Config.Zones), PolicyCount: len(r.Config.Policies),
 		ActiveIntegrations: r.activeIntegrationNames(),
+		Managed:            managed,
 	}.Snapshot(ctx)
 }
 
@@ -549,6 +626,8 @@ func (r *Runtime) Control(ctx context.Context, req api.Request) (any, error) {
 		return nil, r.Commit(ctx, req.Generation)
 	case "rollback":
 		return nil, r.Rollback(ctx, req.Generation)
+	case "generation":
+		return r.Store.Generation(ctx, req.Generation)
 	case "reconcile":
 		return r.Reconcile(ctx, true)
 	case "wg-refresh":

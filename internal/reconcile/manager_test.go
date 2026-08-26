@@ -418,6 +418,45 @@ func newManager(t *testing.T) (*Manager, *state.Store, *runner) {
 	return &Manager{Backend: nft.New(r), Store: s, SafeTTL: time.Millisecond, SafeGuard: func(context.Context) error { return nil }, SafeGuardLocked: func(context.Context) error { return nil }, ForeignMarkGuard: permitOwnedInstall, MutationLockDir: s.Dir}, s, r
 }
 
+func BenchmarkNoOpReconcile(b *testing.B) {
+	root := b.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		b.Fatal(err)
+	}
+	store, err := state.Open(context.Background(), filepath.Join(root, "state.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer store.Close()
+	ledger, err := provenance.Open(context.Background(), filepath.Join(root, "provenance-ledger.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	if err := ledger.Reserve(context.Background(), artifact(1).Provenance); err != nil {
+		ledger.Close()
+		b.Fatal(err)
+	}
+	if err := ledger.Close(); err != nil {
+		b.Fatal(err)
+	}
+	fake := &runner{}
+	manager := &Manager{
+		Backend: nft.New(fake), Store: store, ForeignMarkGuard: permitOwnedInstall,
+		MutationLockDir: root,
+	}
+	if _, err := manager.Apply(context.Background(), artifact(1), false); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		drift, err := manager.Reconcile(context.Background(), false)
+		if err != nil || drift.Missing || drift.Repaired {
+			b.Fatalf("unexpected no-op reconcile: %#v %v", drift, err)
+		}
+	}
+}
+
 func TestOwnedGenerationInstallsFailClosedOnGuardFailure(t *testing.T) {
 	ctx := context.Background()
 	guardFailure := errors.New("synthetic foreign mark collision")

@@ -19,7 +19,7 @@ for command_name in find grep install mktemp sed systemd-analyze; do
         exit 1
     }
 done
-for binary in nftfwd nftfw-web; do
+for binary in nftfw nftfwd nftfw-web; do
     [[ -x "$root_dir/dist/$binary-linux-$arch" ]] || {
         echo "Missing executable: $root_dir/dist/$binary-linux-$arch" >&2
         exit 1
@@ -32,14 +32,16 @@ cleanup() {
 }
 trap cleanup EXIT
 install -d -m 0700 "$validation_dir/bin" "$validation_dir/units"
+install -m 0755 "$root_dir/dist/nftfw-linux-$arch" "$validation_dir/bin/nftfw"
 install -m 0755 "$root_dir/dist/nftfwd-linux-$arch" "$validation_dir/bin/nftfwd"
 install -m 0755 "$root_dir/dist/nftfw-web-linux-$arch" "$validation_dir/bin/nftfw-web"
 
 for unit in "$root_dir"/packaging/systemd/*.service "$root_dir"/packaging/systemd/*.timer; do
     name=${unit##*/}
     sed \
-        -e "s#/usr/lib/nftfw/nftfwd#$validation_dir/bin/nftfwd#g" \
         -e "s#/usr/lib/nftfw/nftfw-web#$validation_dir/bin/nftfw-web#g" \
+        -e "s#/usr/lib/nftfw/nftfwd#$validation_dir/bin/nftfwd#g" \
+        -e "s#/usr/lib/nftfw/nftfw#$validation_dir/bin/nftfw#g" \
         "$unit" > "$validation_dir/units/$name"
 done
 

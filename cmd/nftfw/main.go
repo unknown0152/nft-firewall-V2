@@ -40,7 +40,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: nftfw <version|config|plan|apply|commit|rollback|reconcile|status|health|doctor|explain|audit|blocks|block|allow|wg|state>")
+		return errors.New("usage: nftfw <setup|tunnel|expose|exposure|lan|backup|version|config|plan|apply|commit|rollback|reconcile|status|health|doctor|explain|audit|blocks|block|allow|wg|state>")
 	}
 	if version.IsStageRCandidateOnly() && args[0] != "version" {
 		return errors.New("stage R candidate-only build is quarantined; only `nftfw version [--json]` is permitted")
@@ -58,6 +58,20 @@ func run(args []string) error {
 		controlSock = "/run/nftfw/control.sock"
 	}
 	switch args[0] {
+	case "setup":
+		return setupCommand(args[1:])
+	case "tunnel":
+		return tunnelCommand(args[1:])
+	case "expose":
+		return exposeCommand(args[1:])
+	case "exposure":
+		return exposureCommand(args[1:])
+	case "lan":
+		return lanCommand(args[1:])
+	case "backup":
+		return managedBackupCommand(args[1:])
+	case "managed-recover":
+		return managedRecoverCommand(args[1:])
 	case "version":
 		if len(args) > 2 || (len(args) == 2 && args[1] != "--json") {
 			return errors.New("usage: nftfw version [--json]")
@@ -69,8 +83,11 @@ func run(args []string) error {
 		fmt.Printf("nftfw %s (commit %s, built %s)\n", info.Version, info.Commit, info.Date)
 		return nil
 	case "config":
+		if len(args) >= 2 && args[1] == "show" {
+			return managedConfigShow(args[2:])
+		}
 		if len(args) < 2 || len(args) > 3 || args[1] != "validate" {
-			return errors.New("usage: nftfw config validate [path]")
+			return errors.New("usage: nftfw config validate [path] | nftfw config show --effective [--json]")
 		}
 		path := configPath
 		if len(args) > 2 {
@@ -186,7 +203,7 @@ func run(args []string) error {
 			}
 			return nil
 		}
-		fmt.Printf("Status: %s\nActive: %t\nActive generation: %d\nPolicy match: %t\nKill switch: %s\nDrift: %t\nWireGuard healthy: %t\nBlocked addresses: %d\nDatabase: %s\n", snapshot.Status, snapshot.Active, snapshot.ActiveGeneration, snapshot.PolicyMatch, snapshot.KillSwitch, snapshot.Drift, snapshot.WireGuard.Healthy, snapshot.BlockedAddresses, snapshot.Database)
+		fmt.Printf("Status: %s\nActive: %t\nActive generation: %d\nPolicy match: %t\nKill switch: %s\nDrift: %t\nWireGuard healthy: %t\nManaged setup: %t\nPublic TCP: %v\nPublic UDP: %v\nBlocked addresses: %d\nDatabase: %s\n", snapshot.Status, snapshot.Active, snapshot.ActiveGeneration, snapshot.PolicyMatch, snapshot.KillSwitch, snapshot.Drift, snapshot.WireGuard.Healthy, snapshot.Managed, snapshot.PublicTCP, snapshot.PublicUDP, snapshot.BlockedAddresses, snapshot.Database)
 		if snapshot.Reason != "" {
 			fmt.Printf("Reason: %s\n", snapshot.Reason)
 		}

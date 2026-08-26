@@ -1,17 +1,18 @@
 # NFT Firewall V2 Security Audit
 
-Audit date: 2026-08-16, 2026-08-17, 2026-08-23, 2026-08-24, and 2026-08-25 UTC. Scope: production Go, configuration/compiler,
+Audit date: 2026-08-16, 2026-08-17, 2026-08-23, 2026-08-24,
+2026-08-25, and 2026-08-26 UTC. Scope: production Go, configuration/compiler,
 nftables ownership, Unix APIs, persistence/rollback, systemd, integrations,
 web, installers, tests, dependencies, Git history, and release contents.
 
-Current source disposition: **2.0.3 FINAL RELEASE APPROVED**.
-Source-only Stage R, protected-parent candidate comparison, privileged R2,
-tagged final build, post-tag validation, and final approval passed against
-commit `e2b3fa0a20fa6e36325792397564966b21045120` and annotated tag
-`v2.0.3`. The findings below through NFV2-030 record the tagged 2.0.1 audit
-history; NFV2-031 through NFV2-041 record the 2.0.2/2.0.3 release work.
-Consolidated results are listed in `TEST_RESULTS.md`. This document does not
-select or authorize a target host's policy or topology.
+Current source disposition: **2.1.0 STAGE_R_CANDIDATE_ONLY**.
+The 2.1.0 source-only Stage E-R matrix passed; independent candidate
+comparison, privileged R2, tag validation, publication, and deployment have
+not yet been authorized or executed. The findings below through NFV2-030
+record the tagged 2.0.1 audit history; NFV2-031 through NFV2-041 record the
+accepted 2.0.2/2.0.3 release work; NFV2-042 onward records 2.1.0 source work.
+Consolidated current results are listed in `TEST_RESULTS.md`. This document
+does not select or authorize a target host's policy or topology.
 
 ## Findings repaired
 
@@ -71,6 +72,14 @@ and post-tag gates.
 | NFV2-040 | The R2 contract required v1-to-v6 state migration, but the frozen CLI only rejected legacy schemas and supplied no reviewed offline path | HIGH | Add an explicit globally locked migration that accepts only exact schema 1-5, refuses active/sidecar/unknown/weakened/ambiguous inputs, creates a byte-identical no-overwrite backup, leaves the source unchanged, migrates a separate bounded work copy, and publishes only a read-only-verified schema-6 destination | CLOSED; privileged package/database proof PASS |
 | NFV2-041 | Release source archives inherited Git's ambient `tar.umask`, so a clean clone could export `0664` files and fail or diverge from the reviewed mode inventory | MEDIUM | Force `tar.umask=0022` on the exact-commit archive command and retain independent extracted mode/blob verification | CLOSED; two-parent artifact proof PASS |
 
+## 2.1.0 source candidate findings
+
+| ID | Finding | Severity | Source repair | Current status |
+| --- | --- | --- | --- | --- |
+| NFV2-042 | Managed `expose`/`lan` wrote new files but ordinary daemon apply compiled stale in-memory configuration | HIGH | Reload and strictly validate the protected config and managed intent at artifact, reconcile, and status boundaries | CLOSED; unit/race/source-contract proof PASS, privileged R2 NOT EXECUTED |
+| NFV2-043 | CLI death during managed file publication could leave intent/config bytes inconsistent with the pending or committed generation | HIGH | Add exact old/new file hashes, a root-only durable managed-change journal, an exact generation-status control query, deterministic restore/finish-forward logic, and a separate 15-second watchdog | CLOSED; pre-apply/applied/committed crash regressions PASS, privileged R2 NOT EXECUTED |
+| NFV2-044 | The initial managed-change recovery unit omitted `CapabilityBoundingSet`, leaving root capabilities available despite no capability need | MEDIUM | Clear bounding and ambient capabilities; restrict the service to AF_UNIX and exact writable paths | CLOSED; systemd source contract and offline security analysis PASS |
+
 ## Adversarial review areas
 
 | Area | Result |
@@ -103,9 +112,9 @@ and post-tag gates.
    repeatedly fight reconciliation. V2 detects/repairs its own objects only.
 5. The local dashboard has no application authentication. Its loopback bind,
    service sandbox, and status-only socket are required controls.
-6. The reference development-host reboot and live acceptance passed, but
-   different kernels, interfaces, firewall managers, VPN providers, Docker
-   networks, and management paths remain host-specific.
+6. The accepted 2.0.3 reference-host evidence does not validate 2.1.0 managed
+   setup. Different kernels, interfaces, firewall managers, VPN providers,
+   Docker networks, and management paths remain host-specific until R2.
 7. Release checksums and provenance are not cryptographically signed. A
    release operator must add a signature using an independently controlled
    identity; the build does not fabricate one.
@@ -115,11 +124,11 @@ unresolved high/critical implementation findings.
 
 ## Final scan evidence
 
-The 2.0.3 source passed Go 1.25.13 unit/race/vet/module/fmt, staticcheck
-v0.7.0, govulncheck v1.7.0, gosec v2.28.0, nine bounded fuzz targets,
-complete shell analysis, Stage R source/guard/comparator contracts, and
-deterministic tree/history secret scans with zero findings. External gates
-also passed independent candidate comparison, privileged R2, tagged package
-and archive inspection, extracted-tree scans, reproducibility, and post-tag
-validation. The exact public result is summarized in `TEST_RESULTS.md`;
-provider and private topology evidence remains outside the repository.
+The 2.1.0 source passed Go 1.27.0 unit/race/vet/module/fmt, staticcheck
+v0.8.1, govulncheck v1.7.0, gosec v2.29.0, nine bounded fuzz targets,
+complete shell analysis, Stage R source/guard/comparator contracts, staged
+systemd verification, and the coverage/benchmark gates. Candidate
+source/history/extracted-tree scans and two-parent comparison are generated
+only after the clean source freeze. Privileged R2, tagged package/archive
+inspection, post-tag validation, publication, and deployment are not current
+2.1.0 evidence.

@@ -80,7 +80,7 @@ func run(root, version, commit, tag, buildDate, epochText, goVersion, output str
 	if !commitPattern.MatchString(commit) {
 		return errors.New("commit must be a full lowercase SHA-1")
 	}
-	if goVersion != "go1.25.13" {
+	if goVersion != "go1.27.0" {
 		return fmt.Errorf("unsupported release toolchain %q", goVersion)
 	}
 	if _, err := time.Parse(time.RFC3339, buildDate); err != nil {

@@ -55,6 +55,22 @@ type Snapshot struct {
 	ProvenanceAuditScope   string                   `json:"provenance_audit_scope"`
 	ProvenanceAuditStatus  string                   `json:"provenance_audit_status"`
 	ProvenanceForeignRules int                      `json:"provenance_foreign_rules"`
+	Managed                bool                     `json:"managed"`
+	ManagedTunnel          bool                     `json:"managed_tunnel"`
+	PublicTCP              []int                    `json:"public_tcp,omitempty"`
+	PublicUDP              []int                    `json:"public_udp,omitempty"`
+	LANManagementTCP       []int                    `json:"lan_management_tcp,omitempty"`
+	LANAllowTCP            []int                    `json:"lan_allow_tcp,omitempty"`
+	LANAllowUDP            []int                    `json:"lan_allow_udp,omitempty"`
+}
+
+type ManagedProjection struct {
+	Tunnel           bool
+	PublicTCP        []int
+	PublicUDP        []int
+	LANManagementTCP []int
+	LANAllowTCP      []int
+	LANAllowUDP      []int
 }
 
 type Provider struct {
@@ -70,6 +86,7 @@ type Provider struct {
 	Ledger                 *provenance.Ledger
 	RequireProvenance      bool
 	AuditForeignProvenance bool
+	Managed                *ManagedProjection
 }
 
 func (p Provider) Snapshot(ctx context.Context) (Snapshot, error) {
@@ -82,6 +99,15 @@ func (p Provider) Snapshot(ctx context.Context) (Snapshot, error) {
 		IPv6Mode: p.IPv6Mode, ZoneCount: p.ZoneCount, PolicyCount: p.PolicyCount,
 		ClaimsBySource: map[string]int{}, ProvenanceMask: "0xff000000",
 		ProvenanceKeepMask: "0x00ffffff", ProvenanceLedger: "unavailable",
+	}
+	if p.Managed != nil {
+		s.Managed = true
+		s.ManagedTunnel = p.Managed.Tunnel
+		s.PublicTCP = append([]int(nil), p.Managed.PublicTCP...)
+		s.PublicUDP = append([]int(nil), p.Managed.PublicUDP...)
+		s.LANManagementTCP = append([]int(nil), p.Managed.LANManagementTCP...)
+		s.LANAllowTCP = append([]int(nil), p.Managed.LANAllowTCP...)
+		s.LANAllowUDP = append([]int(nil), p.Managed.LANAllowUDP...)
 	}
 	degrade := func(reason string) {
 		s.Status = "DEGRADED"

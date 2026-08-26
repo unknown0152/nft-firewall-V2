@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -555,6 +556,175 @@ func TestGenerationIntegrityAndSQLiteBackup(t *testing.T) {
 	}
 }
 
+func TestStatePublicLifecycleAndViews(t *testing.T) {
+	ctx := context.Background()
+	path := filepath.Join(secureTestDir(t), "state.db")
+	s, err := Open(ctx, path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+
+	if got, err := s.NextGeneration(ctx); err != nil || got != 1 {
+		t.Fatalf("unexpected next generation: %d %v", got, err)
+	}
+	script1 := "table inet nftfw_filter { comment \"one\"; }\n"
+	if err := s.SaveGenerationWithMetadata(
+		ctx, 1, testChecksum(script1), script1, nil, nil, testGenerationMetadata(t),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkApplied(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetObservedHash(ctx, 1, testChecksum("observed")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.SetObservedHash(ctx, 1, "invalid"); err == nil {
+		t.Fatal("malformed observed hash accepted")
+	}
+	if expected, err := s.ExpectedGeneration(ctx); err != nil || expected.ID != 1 {
+		t.Fatalf("applied generation was not expected: %#v %v", expected, err)
+	}
+	if err := s.Commit(ctx, 1); err != nil {
+		t.Fatal(err)
+	}
+	if committed, err := s.LastKnownGood(ctx); err != nil || committed.ID != 1 {
+		t.Fatalf("committed generation missing: %#v %v", committed, err)
+	}
+	generation1, err := s.Generation(ctx, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got, err := s.ReadGenerationScript(generation1); err != nil || got != script1 {
+		t.Fatalf("generation alias read failed: %q %v", got, err)
+	}
+
+	if got, err := s.NextGeneration(ctx); err != nil || got != 2 {
+		t.Fatalf("unexpected second generation: %d %v", got, err)
+	}
+	previous := uint64(1)
+	deadline := time.Now().UTC().Add(time.Hour)
+	script2 := "table inet nftfw_filter { comment \"two\"; }\n"
+	if err := s.SaveGenerationWithMetadata(
+		ctx, 2, testChecksum(script2), script2, &previous, &deadline, testGenerationMetadata(t),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.MarkApplied(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.PrepareCommit(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+	if stored, err := s.PreparedDeadline(ctx, 2); err != nil || stored == nil ||
+		!stored.Equal(deadline) {
+		t.Fatalf("prepared deadline mismatch: %v %v", stored, err)
+	}
+	if expected, err := s.ExpectedGeneration(ctx); err != nil || expected.ID != 1 {
+		t.Fatalf("unpublished prepared generation became expected: %#v %v", expected, err)
+	}
+	if err := s.MarkRolledBack(ctx, 2); err != nil {
+		t.Fatal(err)
+	}
+
+	script3 := "table inet nftfw_filter { comment \"three\"; }\n"
+	if err := s.SaveGenerationWithMetadata(
+		ctx, 3, testChecksum(script3), script3, &previous, nil, testGenerationMetadata(t),
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.FinalizeRecoveryRollback(ctx, 3, "test recovery"); err != nil {
+		t.Fatal(err)
+	}
+	if generation3, err := s.Generation(ctx, 3); err != nil || generation3.Status != "rolled_back" {
+		t.Fatalf("recovery rollback was not durable: %#v %v", generation3, err)
+	}
+
+	now := time.Now().UTC()
+	manualID, err := s.AddClaim(ctx, Claim{
+		Address: "192.0.2.10/32", Family: "ipv4", Source: "manual",
+		Reason: "operator", Actor: "admin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiry := now.Add(time.Hour)
+	allowID, err := s.AddClaim(ctx, Claim{
+		Address: "192.0.2.20/32", Family: "ipv4", Source: "allow",
+		Reason: "temporary", Actor: "admin", ExpiresAt: &expiry,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AddClaim(ctx, Claim{
+		Address: "192.0.2.30/32", Family: "ipv4", Source: "threatfeed/example",
+		Reason: "feed", Actor: "integration",
+	}); err != nil {
+		t.Fatal(err)
+	}
+	claims, publication, err := s.ClaimsWithPublication(ctx, now)
+	if err != nil || len(claims) != 3 || publication.DesiredRevision <= publication.AppliedRevision {
+		t.Fatalf("unexpected claims/publication: %#v %#v %v", claims, publication, err)
+	}
+	revision, err := s.PrepareClaimPublication(ctx)
+	if err != nil || revision != publication.DesiredRevision {
+		t.Fatalf("publication preparation changed the pending revision: %d %v", revision, err)
+	}
+	if err := s.MarkClaimsPublished(ctx, revision, len(claims)); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RemoveOperatorClaim(ctx, allowID, "admin", "block"); err == nil {
+		t.Fatal("temporary allow removed through block API")
+	}
+	if err := s.RemoveOperatorClaim(ctx, allowID, "admin", "allow"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.RemoveOperatorClaim(ctx, manualID, "admin", "block"); err != nil {
+		t.Fatal(err)
+	}
+	restored := Claim{
+		ID: manualID, Address: "192.0.2.10/32", Family: "ipv4", Source: "manual",
+		Reason: "operator", Actor: "admin", CreatedAt: now,
+	}
+	if err := s.RestoreClaim(ctx, restored, "recovery"); err != nil {
+		t.Fatal(err)
+	}
+	if count, err := s.ClaimCountExcludingSource(ctx, "manual"); err != nil || count != 1 {
+		t.Fatalf("unexpected non-manual claim count: %d %v", count, err)
+	}
+	claims, err = s.Claims(ctx, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := EffectiveAddressesFrom(claims, "ipv4", "threatfeed"); !reflect.DeepEqual(
+		got, []string{"192.0.2.30/32"},
+	) {
+		t.Fatalf("unexpected source projection: %v", got)
+	}
+	if got := EffectiveAddressesFrom(claims, "ipv4", ""); !reflect.DeepEqual(
+		got, []string{"192.0.2.10/32", "192.0.2.30/32"},
+	) {
+		t.Fatalf("unexpected all-source projection: %v", got)
+	}
+
+	if err := s.Audit(ctx, "operator", "view_test", "complete"); err != nil {
+		t.Fatal(err)
+	}
+	if recent, err := s.RecentAudit(ctx, 0); err != nil || len(recent) == 0 {
+		t.Fatalf("recent audit unavailable: %#v %v", recent, err)
+	}
+	if err := s.SetIntegrationState(ctx, "wireguard/nftfw0", "healthy", 1, true); err != nil {
+		t.Fatal(err)
+	}
+	if states, err := s.IntegrationStates(ctx); err != nil || len(states) < 2 {
+		t.Fatalf("integration states unavailable: %#v %v", states, err)
+	}
+	if root := StateRootForDatabasePath(path); root != filepath.Dir(path) {
+		t.Fatalf("unexpected state root: %s", root)
+	}
+}
+
 func TestOpenRejectsSymlinkedStatePaths(t *testing.T) {
 	dir := secureTestDir(t)
 	realDir := filepath.Join(dir, "real")
@@ -639,5 +809,58 @@ func TestConcurrentDatabaseOpenWaitsForWALLock(t *testing.T) {
 	close(errorsSeen)
 	for openErr := range errorsSeen {
 		t.Errorf("concurrent state open failed: %v", openErr)
+	}
+}
+
+func BenchmarkSQLiteGenerationStatus(b *testing.B) {
+	root := b.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		b.Fatal(err)
+	}
+	store, err := Open(context.Background(), filepath.Join(root, "state.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer store.Close()
+	b.ReportAllocs()
+	b.ResetTimer()
+	for b.Loop() {
+		if _, err := store.NextGeneration(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+		if _, err := store.ClaimPublicationState(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+		if err := store.QuickCheck(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkSQLiteBackup(b *testing.B) {
+	root := b.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		b.Fatal(err)
+	}
+	store, err := Open(context.Background(), filepath.Join(root, "state.db"))
+	if err != nil {
+		b.Fatal(err)
+	}
+	defer store.Close()
+	backupRoot := filepath.Join(root, "backups")
+	if err := os.Mkdir(backupRoot, 0o700); err != nil {
+		b.Fatal(err)
+	}
+	b.ReportAllocs()
+	for index := 0; b.Loop(); index++ {
+		destination := filepath.Join(backupRoot, fmt.Sprintf("state-%d.db", index))
+		if err := store.Backup(context.Background(), destination); err != nil {
+			b.Fatal(err)
+		}
+		b.StopTimer()
+		if err := os.Remove(destination); err != nil {
+			b.Fatal(err)
+		}
+		b.StartTimer()
 	}
 }

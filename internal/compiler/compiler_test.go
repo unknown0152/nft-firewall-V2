@@ -1,6 +1,7 @@
 package compiler
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 
@@ -8,7 +9,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/policy"
 )
 
-func testEffective(t *testing.T) policy.Effective {
+func testEffective(t testing.TB) policy.Effective {
 	t.Helper()
 	c := config.Defaults()
 	c.Interfaces = []config.Interface{{Name: "eth0", Role: "uplink", ProvenanceID: 1}, {Name: "wg0", Role: "vpn", ProvenanceID: 2}}
@@ -20,6 +21,57 @@ func testEffective(t *testing.T) policy.Effective {
 		t.Fatal(err)
 	}
 	return e
+}
+
+func BenchmarkCompileStandard(b *testing.B) {
+	effective := testEffective(b)
+	input := Input{Policy: effective, BootstrapV4: []string{"198.51.100.10/32"}}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := Compile(input, 1); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkCompileMaximumPolicies(b *testing.B) {
+	c := config.Defaults()
+	c.Interfaces = []config.Interface{
+		{Name: "eth0", Role: "uplink", ProvenanceID: 1},
+		{Name: "wg0", Role: "vpn", ProvenanceID: 2},
+	}
+	for zone := 0; zone < 250; zone++ {
+		c.Zones = append(c.Zones, config.Zone{
+			Name:     fmt.Sprintf("zone-%03d", zone),
+			Networks: []string{fmt.Sprintf("10.%d.%d.1/32", zone/256, zone%256)},
+		})
+	}
+	for service := 0; service < 40; service++ {
+		c.Services = append(c.Services, config.Service{
+			Name:     fmt.Sprintf("service-%02d", service),
+			Protocol: "tcp", Ports: []int{10000 + service},
+		})
+	}
+	for zone := 0; zone < 250; zone++ {
+		for service := 0; service < 40; service++ {
+			c.Policies = append(c.Policies, config.Policy{
+				Name: fmt.Sprintf("policy-%03d-%02d", zone, service),
+				From: fmt.Sprintf("zone-%03d", zone), To: "any",
+				Service: fmt.Sprintf("service-%02d", service), Action: "allow",
+			})
+		}
+	}
+	effective, err := policy.Compile(c)
+	if err != nil {
+		b.Fatal(err)
+	}
+	input := Input{Policy: effective}
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := Compile(input, 1); err != nil {
+			b.Fatal(err)
+		}
+	}
 }
 func TestCompileOwnsOnlyNamedTables(t *testing.T) {
 	a, err := Compile(Input{Policy: testEffective(t), BootstrapV4: []string{"198.51.100.10/32"}}, 7)
@@ -50,6 +102,29 @@ func TestCompileOwnsOnlyNamedTables(t *testing.T) {
 	tag := `iifname "eth0" ct direction original ct mark & 0xff000000 == 0x00000000 ct mark set (ct mark & 0x00ffffff) | 0x01000000 counter comment "nftfw:provenance-tag-input:eth0"`
 	if !strings.Contains(a.Script, tag) || strings.Contains(tag, " accept ") {
 		t.Fatal("write-once lower-bit-preserving provenance tag missing")
+	}
+}
+
+func TestAnyProtocolOutboundIsPinnedToVPN(t *testing.T) {
+	effective := testEffective(t)
+	effective.Config.Services = append(effective.Config.Services, config.Service{Name: "all-outbound", Protocol: "any"})
+	effective.Config.Policies = append(effective.Config.Policies, config.Policy{
+		Name: "host-all-outbound", From: "host", To: "any",
+		Service: "all-outbound", Action: "allow",
+	})
+	compiled, err := policy.Compile(effective.Config)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := Compile(Input{Policy: compiled}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, family := range []string{"meta nfproto ipv4", "meta nfproto ipv6"} {
+		want := family + ` oifname "wg0"  accept comment "nftfw-policy:host-all-outbound"`
+		if !strings.Contains(artifact.Script, want) {
+			t.Fatalf("all-protocol VPN-pinned rule missing %q", want)
+		}
 	}
 }
 

@@ -17,9 +17,9 @@ jobs:
           cache: true
       - name: Install pinned analyzers
         run: |
-          go install honnef.co/go/tools/cmd/staticcheck@v0.7.0
+          go install honnef.co/go/tools/cmd/staticcheck@v0.8.1
           go install golang.org/x/vuln/cmd/govulncheck@v1.7.0
-          go install github.com/securego/gosec/v2/cmd/gosec@v2.28.0
+          go install github.com/securego/gosec/v2/cmd/gosec@v2.29.0
       - run: go mod verify
       - run: go mod tidy -diff
       - run: make fmt-check
@@ -57,15 +57,15 @@ jobs:
         with:
           go-version-file: go.mod
           cache: true
-      - run: make deb VERSION=2.0.3+ci COMMIT="$GITHUB_SHA" DISPOSITION=ci
+      - run: make deb VERSION=2.1.0+ci COMMIT="$GITHUB_SHA" DISPOSITION=ci
       - run: ./tests/packaging/systemd_preflight.sh amd64
       - run: cd dist && sha256sum -c SHA256SUMS
-      - run: dpkg-deb --info dist/nft-firewall-v2_2.0.3+ci_amd64.deb
-      - run: dpkg-deb --info dist/nft-firewall-v2_2.0.3+ci_arm64.deb
+      - run: dpkg-deb --info dist/nft-firewall-v2_2.1.0+ci_amd64.deb
+      - run: dpkg-deb --info dist/nft-firewall-v2_2.1.0+ci_arm64.deb
       - name: Confirm CI packages remain non-release build artifacts
         run: |
-          test "$(dpkg-deb -f dist/nft-firewall-v2_2.0.3+ci_amd64.deb X-NFTFW-Build-Disposition)" = ci
-          test "$(dpkg-deb -f dist/nft-firewall-v2_2.0.3+ci_arm64.deb X-NFTFW-Build-Disposition)" = ci
+          test "$(dpkg-deb -f dist/nft-firewall-v2_2.1.0+ci_amd64.deb X-NFTFW-Build-Disposition)" = ci
+          test "$(dpkg-deb -f dist/nft-firewall-v2_2.1.0+ci_arm64.deb X-NFTFW-Build-Disposition)" = ci
       - name: Verify static current-architecture executables
         run: |
           file dist/nftfw-linux-amd64 dist/nftfwd-linux-amd64 dist/nftfw-web-linux-amd64

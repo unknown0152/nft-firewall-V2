@@ -86,6 +86,8 @@ func TestDashboardUsesFailClosedStatusContract(t *testing.T) {
 		"&&hashValid",
 		"data.protected===true",
 		"data.status==='HEALTHY'&&contract",
+		"data.managed===true?'Managed':'Advanced'",
+		"ports(data.public_tcp,data.public_udp)",
 	} {
 		if !strings.Contains(appJS, required) {
 			t.Fatalf("dashboard is missing strict status check %q", required)
@@ -123,6 +125,21 @@ func TestDashboardProtectedRejectsMissingAndWrongTypedFields(t *testing.T) {
 		mutate(candidate)
 		if dashboardProtected(candidate) {
 			t.Fatalf("invalid protected contract %d was accepted: %#v", index, candidate)
+		}
+	}
+}
+
+func BenchmarkDashboardProtected(b *testing.B) {
+	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	healthy := map[string]any{
+		"schema": "nftfw.status.v2", "status": "HEALTHY", "active": true,
+		"policy_match": true, "kill_switch_enforced": true,
+		"policy_hash": hash, "policy_checksum": hash,
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		if !dashboardProtected(healthy) {
+			b.Fatal("healthy fixture rejected")
 		}
 	}
 }

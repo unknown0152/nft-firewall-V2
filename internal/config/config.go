@@ -478,11 +478,11 @@ func Validate(c Config) error {
 		if _, ok := services[s.Name]; ok {
 			return fmt.Errorf("duplicate service %q", s.Name)
 		}
-		if s.Protocol != "tcp" && s.Protocol != "udp" && s.Protocol != "icmp" {
+		if s.Protocol != "tcp" && s.Protocol != "udp" && s.Protocol != "icmp" && s.Protocol != "any" {
 			return fmt.Errorf("service %s has invalid protocol %q", s.Name, s.Protocol)
 		}
-		if s.Protocol == "icmp" && len(s.Ports) != 0 {
-			return fmt.Errorf("service %s: icmp cannot have ports", s.Name)
+		if (s.Protocol == "icmp" || s.Protocol == "any") && len(s.Ports) != 0 {
+			return fmt.Errorf("service %s: %s cannot have ports", s.Name, s.Protocol)
 		}
 		seenPorts := map[int]bool{}
 		for _, p := range s.Ports {
@@ -491,7 +491,7 @@ func Validate(c Config) error {
 			}
 			seenPorts[p] = true
 		}
-		if s.Protocol != "icmp" && len(s.Ports) == 0 {
+		if s.Protocol != "icmp" && s.Protocol != "any" && len(s.Ports) == 0 {
 			return fmt.Errorf("service %s must define at least one port", s.Name)
 		}
 		services[s.Name] = s
