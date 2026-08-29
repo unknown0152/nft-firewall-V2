@@ -50,9 +50,10 @@ sudo nftfw setup --vpn /path/to/working-vpn.conf --dry-run
 
 Setup fails before mutation when the OS, route, LAN, resolver, firewall
 ownership, Docker topology, existing NFTFW state, reserved routing identities,
-or VPN profile cannot be proved safe. Eligible Docker IPv4 bridges are adopted
-automatically; the plan names them and states that NFTFW will own kernel IPv4
-forwarding while Docker's own forwarding/firewall mutation remains disabled.
+or VPN profile cannot be proved safe. Docker must have no running or retained
+containers. Eligible empty Docker IPv4 bridges are adopted automatically; the
+plan names them and states that NFTFW will own kernel IPv4 forwarding while
+Docker's own forwarding/firewall mutation remains disabled.
 
 ## Verify
 
@@ -76,12 +77,13 @@ state, advanced TOML, generations, snapshots, the enforcement pointer,
 provenance ledger, unit state, and existing exposure. It does not convert an
 advanced host to managed routing.
 
-An existing NFTFW host is not eligible for automatic clean setup. Docker and
-application workloads are eligible only when every Docker network satisfies
-the managed bridge contract in `docs/DOCKER.md`; unsupported network drivers,
+An existing NFTFW host is not eligible for automatic clean setup. Running or
+retained Docker/application workloads are also never eligible for that path.
+The read-only adoption planner may classify them for a separate plan when
+every Docker network satisfies `docs/DOCKER.md`; unsupported network drivers,
 IPv6, internal networks, overlap, ambiguity, or an unreadable local socket
-stop setup before mutation. Do not delete state or disable a firewall manager
-to bypass refusal.
+stop planning. Do not delete state, containers, or firewall evidence merely to
+bypass refusal.
 
 Generate the nonactivating local adoption worksheet with:
 

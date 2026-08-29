@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"runtime"
 	"sort"
 	"strconv"
@@ -23,6 +24,8 @@ import (
 )
 
 const maxCommandOutput = 1 << 20
+
+var dockerContainerID = regexp.MustCompile(`^[a-f0-9]{64}$`)
 
 type Runner interface {
 	Run(context.Context, string, ...string) ([]byte, error)
@@ -60,6 +63,12 @@ type Snapshot struct {
 	DockerPresent          bool                   `json:"docker_present"`
 	DockerClean            bool                   `json:"docker_clean"`
 	DockerNetworks         []config.DockerNetwork `json:"docker_networks"`
+}
+
+type DockerState struct {
+	Present  bool
+	Clean    bool
+	Networks []config.DockerNetwork
 }
 
 type Inspector struct {
@@ -170,6 +179,9 @@ func (s Snapshot) ValidateCleanHost() error {
 	}
 	if s.OwnedNFTables || s.ExistingNFTFWState {
 		return errors.New("DISCOVERY_EXISTING_NFTFW_REQUIRES_ADOPT")
+	}
+	if s.DockerPresent && !s.DockerClean {
+		return errors.New("DISCOVERY_DOCKER_WORKLOADS_REQUIRE_ADOPT")
 	}
 	return nil
 }
@@ -345,11 +357,8 @@ func (i Inspector) dockerState(ctx context.Context) (bool, bool, []config.Docker
 		"version", "--format", "{{.Server.Version}}"); err != nil {
 		return true, false, nil, errors.New("DISCOVERY_DOCKER_SOCKET_UNREADABLE")
 	}
-	containers, containerErr := i.Runner.Run(ctx, "docker", "--host",
-		"unix:///var/run/docker.sock", "ps", "-aq")
-	networks, networkErr := i.Runner.Run(ctx, "docker", "--host",
-		"unix:///var/run/docker.sock", "network", "ls", "--filter", "type=custom", "-q")
-	if containerErr != nil || networkErr != nil {
+	before, err := i.observeDockerWorkloads(ctx)
+	if err != nil {
 		return true, false, nil, errors.New("DISCOVERY_DOCKER_STATE_UNREADABLE")
 	}
 	observer := containerspkgObserver(i.Runner)
@@ -357,8 +366,81 @@ func (i Inspector) dockerState(ctx context.Context) (bool, bool, []config.Docker
 	if err != nil {
 		return true, false, nil, err
 	}
-	clean := strings.TrimSpace(string(containers)) == "" && strings.TrimSpace(string(networks)) == ""
-	return true, clean, discovered, nil
+	after, err := i.observeDockerWorkloads(ctx)
+	if err != nil {
+		return true, false, nil, errors.New("DISCOVERY_DOCKER_STATE_UNREADABLE")
+	}
+	if before.signature() != after.signature() {
+		return true, false, nil, errors.New("DISCOVERY_DOCKER_STATE_CHANGED")
+	}
+	return true, len(after.retained) == 0, discovered, nil
+}
+
+type dockerWorkloads struct {
+	running  []string
+	retained []string
+}
+
+func (i Inspector) observeDockerWorkloads(ctx context.Context) (dockerWorkloads, error) {
+	runningData, runningErr := i.Runner.Run(ctx, "docker", "--host",
+		"unix:///var/run/docker.sock", "ps", "-q", "--no-trunc")
+	retainedData, retainedErr := i.Runner.Run(ctx, "docker", "--host",
+		"unix:///var/run/docker.sock", "ps", "-aq", "--no-trunc")
+	if runningErr != nil || retainedErr != nil {
+		return dockerWorkloads{}, errors.New("docker workload observation failed")
+	}
+	running, err := parseDockerContainerIDs(runningData)
+	if err != nil {
+		return dockerWorkloads{}, err
+	}
+	retained, err := parseDockerContainerIDs(retainedData)
+	if err != nil {
+		return dockerWorkloads{}, err
+	}
+	retainedSet := make(map[string]bool, len(retained))
+	for _, id := range retained {
+		retainedSet[id] = true
+	}
+	for _, id := range running {
+		if !retainedSet[id] {
+			return dockerWorkloads{}, errors.New("inconsistent Docker workload observation")
+		}
+	}
+	return dockerWorkloads{running: running, retained: retained}, nil
+}
+
+func parseDockerContainerIDs(data []byte) ([]string, error) {
+	if len(data) > maxCommandOutput {
+		return nil, errors.New("docker workload output too large")
+	}
+	seen := map[string]bool{}
+	result := strings.Fields(string(data))
+	for _, id := range result {
+		if !dockerContainerID.MatchString(id) || seen[id] {
+			return nil, errors.New("invalid Docker workload observation")
+		}
+		seen[id] = true
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func (d dockerWorkloads) signature() string {
+	return strings.Join(d.running, ",") + "\x00" + strings.Join(d.retained, ",")
+}
+
+// InspectDocker returns the bounded local Docker classification used by
+// clean-host setup so a prepared plan can be revalidated before ownership
+// files or forwarding state are changed.
+func (i Inspector) InspectDocker(ctx context.Context) (DockerState, error) {
+	if i.Runner == nil {
+		i.Runner = ExecRunner{}
+	}
+	present, clean, networks, err := i.dockerState(ctx)
+	if err != nil {
+		return DockerState{}, err
+	}
+	return DockerState{Present: present, Clean: clean, Networks: networks}, nil
 }
 
 func containerspkgObserver(runner Runner) containers.Observer {

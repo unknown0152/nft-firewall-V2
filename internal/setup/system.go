@@ -298,6 +298,13 @@ func (s *System) Install(ctx context.Context, plan Plan) error {
 			!bytes.Equal(current, private.DockerData) {
 			return errors.New("SETUP_DOCKER_CONFIG_CHANGED_AFTER_PLAN")
 		}
+		state, inspectErr := (discovery.Inspector{
+			Runner: discoveryAdapter{s.Runner},
+		}).InspectDocker(ctx)
+		if inspectErr != nil || !state.Present || !state.Clean ||
+			!sameDockerNetworks(state.Networks, private.Intent.DockerNetworks) {
+			return errors.New("SETUP_DOCKER_STATE_CHANGED_AFTER_PLAN")
+		}
 	}
 	files := []struct {
 		path string
@@ -364,6 +371,12 @@ func (s *System) Install(ctx context.Context, plan Plan) error {
 		}
 	}
 	return nil
+}
+
+func sameDockerNetworks(left, right []config.DockerNetwork) bool {
+	leftJSON, leftErr := json.Marshal(left)
+	rightJSON, rightErr := json.Marshal(right)
+	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
 }
 
 func (s *System) ConfigureDocker(ctx context.Context, plan Plan) error {

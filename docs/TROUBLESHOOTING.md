@@ -54,6 +54,16 @@ Common pre-mutation codes include:
 
 - `DISCOVERY_DOCKER_SOCKET_UNREADABLE`: Docker is installed but the local
   daemon socket cannot be inspected;
+- `DISCOVERY_DOCKER_WORKLOADS_REQUIRE_ADOPT`: at least one running or retained
+  container makes this a non-clean host; preserve the workload and use a
+  separately reviewed migration plan, or intentionally stop and remove only
+  disposable containers before retrying clean-host setup;
+- `DISCOVERY_DOCKER_STATE_CHANGED`: the running/retained container observation
+  changed while Docker topology was being inspected; let Docker settle and
+  retry;
+- `SETUP_DOCKER_STATE_CHANGED_AFTER_PLAN`: workloads or authorized bridge
+  topology changed after confirmation but before ownership-file publication;
+  inspect the host and generate a fresh plan;
 - `DOCKER_DAEMON_CONFIG_*`: `daemon.json` is malformed, duplicated,
   oversized, symlinked, unsafe, or changed during read;
 - `DOCKER_NETWORK_DRIVER_UNSUPPORTED_*` or
@@ -67,6 +77,14 @@ Common pre-mutation codes include:
 Do not edit the generated bridge name, enable Docker iptables, or remove a
 network merely to bypass the code. Correct the Docker topology, then repeat
 `nftfw setup --dry-run`.
+
+## Route-table preflight refused
+
+`TUNNEL_ROUTE_TABLE_INSPECTION_FAILED` means the bounded numeric all-table
+route query itself failed or returned malformed/ambiguous data. A normally
+absent reserved table is clean and does not produce this error. Do not create
+table 51820 manually; investigate `ip -j -N -4 route show table all`, command
+permissions, timeout, and JSON support.
 
 ## Docker degraded after setup
 

@@ -33,7 +33,10 @@ sudo nftfw setup --vpn /path/to/working-vpn.conf --dry-run
 Review the detected uplink, private LAN, management ports, resolver, and the
 explicit statement that public exposure is empty. If Docker is installed,
 also review every adopted bridge network, `Docker IPv4 forwarding: NFTFW
-OWNED`, and whether one Docker restart is required.
+OWNED`, and whether one Docker restart is required. Clean-host setup accepts
+eligible empty bridge networks but refuses every running or retained
+container; stop and use a separately reviewed existing-host plan instead of
+allowing setup to assume ownership of an application workload.
 
 ## 3. Configure
 

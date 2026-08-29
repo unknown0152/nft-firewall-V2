@@ -16,6 +16,25 @@ type fakeRunner struct {
 	errors  map[string]error
 }
 
+type changingWorkloadRunner struct {
+	base  *fakeRunner
+	calls map[string]int
+}
+
+func (r *changingWorkloadRunner) Run(ctx context.Context, name string, args ...string) ([]byte, error) {
+	key := strings.Join(append([]string{name}, args...), " ")
+	if key == "docker --host unix:///var/run/docker.sock ps -q --no-trunc" ||
+		key == "docker --host unix:///var/run/docker.sock ps -aq --no-trunc" {
+		call := r.calls[key]
+		r.calls[key] = call + 1
+		if call > 0 {
+			return []byte(strings.Repeat("e", 64) + "\n"), nil
+		}
+		return nil, nil
+	}
+	return r.base.Run(ctx, name, args...)
+}
+
 func (r *fakeRunner) Run(_ context.Context, name string, args ...string) ([]byte, error) {
 	key := strings.Join(append([]string{name}, args...), " ")
 	if err := r.errors[key]; err != nil {
@@ -58,7 +77,8 @@ func addCleanDocker(runner *fakeRunner) {
 	runner.outputs["docker --version"] = []byte("Docker version 29.0.0\n")
 	delete(runner.errors, "docker --host unix:///var/run/docker.sock version --format {{.Server.Version}}")
 	runner.outputs["docker --host unix:///var/run/docker.sock version --format {{.Server.Version}}"] = []byte("29.0.0\n")
-	runner.outputs["docker --host unix:///var/run/docker.sock ps -aq"] = nil
+	runner.outputs["docker --host unix:///var/run/docker.sock ps -q --no-trunc"] = nil
+	runner.outputs["docker --host unix:///var/run/docker.sock ps -aq --no-trunc"] = nil
 	runner.outputs["docker --host unix:///var/run/docker.sock network ls --filter type=custom -q"] = nil
 	id := strings.Repeat("a", 64)
 	runner.outputs["docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}"] =
@@ -122,6 +142,66 @@ func TestInspectorDiscoverClassifiesDockerIPv6AndManagers(t *testing.T) {
 	}
 }
 
+func TestInspectorDiscoverAllowsEligibleEmptyCustomBridge(t *testing.T) {
+	runner := cleanDiscoveryRunner()
+	addCleanDocker(runner)
+	builtInID := strings.Repeat("a", 64)
+	appID := strings.Repeat("d", 64)
+	runner.outputs["docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}"] =
+		[]byte(builtInID + "\tbridge\tbridge\n" +
+			appID + "\tmedia-app\tbridge\n" +
+			strings.Repeat("b", 64) + "\thost\thost\n" +
+			strings.Repeat("c", 64) + "\tnone\tnull\n")
+	runner.outputs["docker --host unix:///var/run/docker.sock network inspect -- "+appID] =
+		[]byte(`[{"Id":"` + appID + `","Name":"media-app","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{},"IPAM":{"Config":[{"Subnet":"172.23.0.0/16","Gateway":"172.23.0.1"}]}}]`)
+	runner.outputs["ip -j link show dev br-"+appID[:12]] =
+		[]byte(`[{"ifname":"br-` + appID[:12] + `"}]`)
+	snapshot, err := (Inspector{Runner: runner, Root: discoveryRoot(t)}).Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.DockerPresent || !snapshot.DockerClean || len(snapshot.DockerNetworks) != 2 {
+		t.Fatalf("eligible empty custom bridge was not classified clean: %#v", snapshot)
+	}
+}
+
+func TestInspectorDiscoverRefusesRunningAndRetainedDockerWorkloads(t *testing.T) {
+	id := strings.Repeat("f", 64)
+	tests := []struct {
+		name     string
+		running  []byte
+		retained []byte
+	}{
+		{name: "running", running: []byte(id + "\n"), retained: []byte(id + "\n")},
+		{name: "retained-stopped", retained: []byte(id + "\n")},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := cleanDiscoveryRunner()
+			addCleanDocker(runner)
+			runner.outputs["docker --host unix:///var/run/docker.sock ps -q --no-trunc"] = test.running
+			runner.outputs["docker --host unix:///var/run/docker.sock ps -aq --no-trunc"] = test.retained
+			_, err := (Inspector{Runner: runner, Root: discoveryRoot(t)}).Discover(context.Background())
+			if err == nil || err.Error() != "DISCOVERY_DOCKER_WORKLOADS_REQUIRE_ADOPT" {
+				t.Fatalf("Docker workload was not refused: %v", err)
+			}
+			if strings.Contains(err.Error(), id) {
+				t.Fatalf("Docker refusal leaked a container identity: %v", err)
+			}
+		})
+	}
+}
+
+func TestInspectorDiscoverRejectsChangingDockerWorkloads(t *testing.T) {
+	runner := cleanDiscoveryRunner()
+	addCleanDocker(runner)
+	changing := &changingWorkloadRunner{base: runner, calls: map[string]int{}}
+	_, err := (Inspector{Runner: changing, Root: discoveryRoot(t)}).Discover(context.Background())
+	if err == nil || err.Error() != "DISCOVERY_DOCKER_STATE_CHANGED" {
+		t.Fatalf("changing Docker workload observation was accepted: %v", err)
+	}
+}
+
 func TestInspectorDiscoverCommandFailures(t *testing.T) {
 	tests := []struct {
 		command string
@@ -173,13 +253,14 @@ func TestInspectorHelpersAndExistingState(t *testing.T) {
 	runner.outputs["docker --version"] = []byte("Docker version 29\n")
 	delete(runner.errors, "docker --host unix:///var/run/docker.sock version --format {{.Server.Version}}")
 	runner.outputs["docker --host unix:///var/run/docker.sock version --format {{.Server.Version}}"] = []byte("29")
-	runner.errors["docker --host unix:///var/run/docker.sock ps -aq"] = errors.New("unreadable")
+	runner.errors["docker --host unix:///var/run/docker.sock ps -aq --no-trunc"] = errors.New("unreadable")
 	present, clean, networks, err := inspector.dockerState(context.Background())
 	if !present || clean || len(networks) != 0 || err == nil {
 		t.Fatalf("unreadable Docker state classified clean: present=%t clean=%t networks=%v err=%v", present, clean, networks, err)
 	}
-	delete(runner.errors, "docker --host unix:///var/run/docker.sock ps -aq")
-	runner.outputs["docker --host unix:///var/run/docker.sock ps -aq"] = []byte("container\n")
+	delete(runner.errors, "docker --host unix:///var/run/docker.sock ps -aq --no-trunc")
+	containerID := strings.Repeat("d", 64)
+	runner.outputs["docker --host unix:///var/run/docker.sock ps -aq --no-trunc"] = []byte(containerID + "\n")
 	runner.outputs["docker --host unix:///var/run/docker.sock network ls --filter type=custom -q"] = nil
 	id := strings.Repeat("d", 64)
 	runner.outputs["docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}"] =
@@ -228,6 +309,31 @@ func TestReadOSReleaseAndBoundedHelpers(t *testing.T) {
 	buffer.data = make([]byte, maxCommandOutput)
 	if _, err := buffer.Write([]byte("x")); err == nil {
 		t.Fatal("oversized command output accepted")
+	}
+}
+
+func TestParseDockerContainerIDsIsBoundedAndCanonical(t *testing.T) {
+	first := strings.Repeat("a", 64)
+	full := strings.Repeat("b", 64)
+	ids, err := parseDockerContainerIDs([]byte(full + "\n" + first + "\n"))
+	if err != nil || !reflect.DeepEqual(ids, []string{first, full}) {
+		t.Fatalf("valid Docker IDs were not canonicalized: ids=%v err=%v", ids, err)
+	}
+	if ids, err := parseDockerContainerIDs(nil); err != nil || len(ids) != 0 {
+		t.Fatalf("empty workload observation rejected: ids=%v err=%v", ids, err)
+	}
+	for name, data := range map[string][]byte{
+		"unsafe":    []byte("container-name\n"),
+		"truncated": []byte(strings.Repeat("a", 12) + "\n"),
+		"uppercase": []byte(strings.Repeat("A", 64) + "\n"),
+		"duplicate": []byte(first + "\n" + first + "\n"),
+		"oversized": make([]byte, maxCommandOutput+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := parseDockerContainerIDs(data); err == nil {
+				t.Fatal("invalid Docker workload output accepted")
+			}
+		})
 	}
 }
 
@@ -340,6 +446,13 @@ func TestValidateCleanHost(t *testing.T) {
 	if err := base.ValidateCleanHost(); err == nil {
 		t.Fatal("foreign firewall accepted")
 	}
+	base.ForeignNFTables = false
+	base.DockerPresent = true
+	base.DockerClean = false
+	if err := base.ValidateCleanHost(); err == nil ||
+		err.Error() != "DISCOVERY_DOCKER_WORKLOADS_REQUIRE_ADOPT" {
+		t.Fatalf("non-clean Docker state was accepted: %v", err)
+	}
 }
 
 func BenchmarkParsePrivateNetworks(b *testing.B) {
@@ -365,6 +478,16 @@ func BenchmarkInspectorDiscover(b *testing.B) {
 	b.ReportAllocs()
 	for b.Loop() {
 		if _, err := inspector.Discover(context.Background()); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkParseDockerContainerIDs(b *testing.B) {
+	data := []byte(strings.Repeat("a", 64) + "\n" + strings.Repeat("b", 64) + "\n")
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := parseDockerContainerIDs(data); err != nil {
 			b.Fatal(err)
 		}
 	}

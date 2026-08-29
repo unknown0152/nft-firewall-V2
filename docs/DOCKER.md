@@ -1,8 +1,8 @@
 # Docker
 
-Managed setup adopts Docker automatically when the local daemon and every
-routed network can be proved safe. The operator still supplies only the
-working WireGuard profile.
+Managed setup adopts Docker automatically only when the local daemon contains
+no running or retained containers and every routed network can be proved safe.
+The operator still supplies only the working WireGuard profile.
 
 ## Eligible networks
 
@@ -22,6 +22,25 @@ NFTFW queries only `unix:///var/run/docker.sock`.
 
 Setup adopts all eligible routed bridges together. It never ignores an
 unknown bridge while enabling forwarding for the rest.
+
+## Clean-host workload boundary
+
+NFTFW observes both running containers and all retained containers before and
+after network discovery. A stable non-empty result stops clean-host setup with
+`DISCOVERY_DOCKER_WORKLOADS_REQUIRE_ADOPT`; a changing result stops with
+`DISCOVERY_DOCKER_STATE_CHANGED`. Neither code includes a container ID, image,
+name, or network detail.
+
+An eligible empty user-defined bridge is not a workload and remains supported.
+This lets setup establish VPN-only forwarding before an application is
+created. A prepared Docker plan is observed again immediately before NFTFW
+writes Docker ownership, sysctl, or managed configuration files; any workload
+or topology change stops with `SETUP_DOCKER_STATE_CHANGED_AFTER_PLAN`.
+
+Do not remove a retained application container merely to bypass the refusal.
+Use a separately reviewed existing-host migration plan when workload
+continuity matters. The 2.1.0 `setup adopt` command is planning-only and does
+not authorize or execute that migration.
 
 ## Ownership transaction
 

@@ -45,13 +45,17 @@ The one-file path intentionally supports a narrow first matrix:
 - one strict wg-quick-style profile with one peer and `0.0.0.0/0`;
 - nftables JSON support and no competing firewall owner;
 - no existing NFTFW state;
-- Docker absent, or reachable only through the local socket with eligible,
-  non-overlapping IPv4 bridge networks.
+- Docker absent, or reachable only through the local socket with no running
+  or retained containers and only eligible, non-overlapping IPv4 bridge
+  networks.
 
 Managed setup may adopt the built-in bridge and normal Compose-style bridge
-networks, including active workloads. It shows every network and ownership
-change before mutation. If Docker daemon settings must change, setup asks
-again immediately before one Docker restart. Macvlan, ipvlan, overlay, Swarm,
+networks when they contain no workload. Eligible empty custom networks remain
+supported so containers can be created after protection is active. Any
+running or retained container requires a separate existing-host plan and is
+refused by clean-host setup. Setup shows every network and ownership change
+before mutation. If Docker daemon settings must change, setup asks again
+immediately before one Docker restart. Macvlan, ipvlan, overlay, Swarm,
 Kubernetes, internal, IPv6, overlapping, malformed, or changing Docker
 topologies are refused.
 

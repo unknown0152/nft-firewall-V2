@@ -55,7 +55,7 @@ func (r *systemRunner) Run(_ context.Context, input []byte, name string, args ..
 		return nil, errors.New("absent")
 	case command == "ip -j -4 rule show":
 		return []byte("[]"), nil
-	case command == "ip -j -4 route show table 51820":
+	case command == "ip -j -N -4 route show table all":
 		return []byte("[]"), nil
 	case command == "ip -j -d link show":
 		return []byte("[]"), nil
@@ -300,7 +300,7 @@ func TestManagedDockerCompliantConfigDoesNotRestart(t *testing.T) {
 			OSID: "debian", OSVersion: "13", Architecture: "amd64",
 			Uplink: "eth0", UplinkGateway: netip.MustParseAddr("192.168.1.1"),
 			LANNetworks:   []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")},
-			ManagementTCP: []int{22}, DockerPresent: true,
+			ManagementTCP: []int{22}, DockerPresent: true, DockerClean: true,
 			DockerNetworks: []config.DockerNetwork{{
 				Name: "bridge", Driver: "bridge", BridgeInterface: "docker0",
 				DynamicBridge: true, Subnets: []string{"172.17.0.0/16"},
@@ -347,7 +347,7 @@ func TestDockerCandidateCheckFailsBeforeOwnershipWrite(t *testing.T) {
 			OSID: "debian", OSVersion: "13", Architecture: "amd64",
 			Uplink: "eth0", UplinkGateway: netip.MustParseAddr("192.168.1.1"),
 			LANNetworks:   []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")},
-			ManagementTCP: []int{22}, DockerPresent: true,
+			ManagementTCP: []int{22}, DockerPresent: true, DockerClean: true,
 			DockerNetworks: []config.DockerNetwork{{
 				Name: "bridge", Driver: "bridge", BridgeInterface: "docker0",
 				DynamicBridge: true, Subnets: []string{"172.17.0.0/16"},
@@ -384,6 +384,41 @@ func TestInstallRejectsUnsafeDockerSocketOwnershipTarget(t *testing.T) {
 	}
 }
 
+func TestInstallRefusesDockerWorkloadAppearingAfterPlanBeforeOwnershipWrite(t *testing.T) {
+	runner := &systemRunner{}
+	system, plan, paths := configuredDockerPlan(t, runner, false)
+	private, err := privatePlan(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private.DockerData, private.DockerChanged, err = containers.ManagedDaemonConfig(paths.DockerDaemon)
+	if err != nil || private.DockerChanged {
+		t.Fatalf("test daemon projection failed: changed=%t err=%v", private.DockerChanged, err)
+	}
+	private.PolicyData = []byte("table inet nftfw_filter {}\n")
+	containerID := strings.Repeat("9", 64)
+	runner.outputs["docker --host unix:///var/run/docker.sock ps -q --no-trunc"] = nil
+	runner.outputs["docker --host unix:///var/run/docker.sock ps -aq --no-trunc"] = []byte(containerID + "\n")
+	originalDaemon := append([]byte(nil), mustRead(t, paths.DockerDaemon)...)
+	if err := system.Install(context.Background(), plan); err == nil ||
+		err.Error() != "SETUP_DOCKER_STATE_CHANGED_AFTER_PLAN" {
+		t.Fatalf("post-plan Docker workload was not refused: %v", err)
+	}
+	if string(mustRead(t, paths.DockerDaemon)) != string(originalDaemon) {
+		t.Fatal("Docker ownership changed after workload refusal")
+	}
+	for _, path := range []string{paths.Config, paths.Intent, paths.VPN, paths.Sysctl} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("managed file changed after workload refusal: %s: %v", path, err)
+		}
+	}
+	for _, command := range runner.commands {
+		if strings.HasPrefix(command, "sysctl -w") || command == "systemctl daemon-reload" {
+			t.Fatalf("host ownership mutation followed workload refusal: %s", command)
+		}
+	}
+}
+
 func TestManagedDockerOwnershipForwardingAndRollback(t *testing.T) {
 	id := strings.Repeat("a", 64)
 	runner := &systemRunner{outputs: map[string][]byte{
@@ -408,7 +443,7 @@ func TestManagedDockerOwnershipForwardingAndRollback(t *testing.T) {
 			OSID: "debian", OSVersion: "13", Architecture: "amd64",
 			Uplink: "eth0", UplinkGateway: netip.MustParseAddr("192.168.1.1"),
 			LANNetworks:   []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")},
-			ManagementTCP: []int{22}, DockerPresent: true,
+			ManagementTCP: []int{22}, DockerPresent: true, DockerClean: true,
 			DockerNetworks: []config.DockerNetwork{{
 				Name: "cosmos-app", Driver: "bridge",
 				BridgeInterface: "br-" + id[:12], DynamicBridge: true,
@@ -495,6 +530,12 @@ func TestConfigureDockerRequiresImmediateRestartApproval(t *testing.T) {
 	id := strings.Repeat("b", 64)
 	runner := &systemRunner{outputs: map[string][]byte{
 		"sysctl -n net.ipv4.ip_forward": []byte("1\n"),
+		"docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}": []byte(
+			id + "\tbridge\tbridge\n",
+		),
+		"docker --host unix:///var/run/docker.sock network inspect -- " + id: []byte(
+			`[{"Id":"` + id + `","Name":"bridge","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{},"IPAM":{"Config":[{"Subnet":"172.17.0.0/16","Gateway":"172.17.0.1"}]}}]`,
+		),
 	}}
 	system, paths := testSystem(t, runner)
 	if err := os.MkdirAll(filepath.Dir(paths.DockerDaemon), 0o700); err != nil {
@@ -508,7 +549,7 @@ func TestConfigureDockerRequiresImmediateRestartApproval(t *testing.T) {
 			OSID: "debian", OSVersion: "13", Architecture: "amd64",
 			Uplink: "eth0", UplinkGateway: netip.MustParseAddr("192.168.1.1"),
 			LANNetworks:   []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")},
-			ManagementTCP: []int{22}, DockerPresent: true,
+			ManagementTCP: []int{22}, DockerPresent: true, DockerClean: true,
 			DockerNetworks: []config.DockerNetwork{{
 				Name: "bridge", Driver: "bridge", BridgeInterface: "docker0",
 				DynamicBridge: true, Subnets: []string{"172.17.0.0/16"},
@@ -1060,7 +1101,7 @@ func TestPrepareRejectsUnsafeManagedDockerOwnershipTarget(t *testing.T) {
 			OSID: "debian", OSVersion: "13", Architecture: "amd64",
 			Uplink: "eth0", UplinkGateway: netip.MustParseAddr("192.168.1.1"),
 			LANNetworks:   []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")},
-			ManagementTCP: []int{22}, DockerPresent: true,
+			ManagementTCP: []int{22}, DockerPresent: true, DockerClean: true,
 			DockerNetworks: []config.DockerNetwork{{
 				Name: "media", Driver: "bridge", BridgeInterface: "br-" + id[:12],
 				DynamicBridge: true, Subnets: []string{"172.20.0.0/16"},

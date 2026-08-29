@@ -13,7 +13,9 @@ nftfw setup rollback [--expired]
 no-op. A different profile or unhealthy prior managed state is refused. The
 dry-run lists adopted Docker networks, NFTFW IPv4-forwarding ownership, and
 whether one Docker restart is required. Interactive setup asks again
-immediately before that restart; `--yes` accepts both confirmations.
+immediately before that restart; `--yes` accepts both confirmations. This
+clean-host path refuses every running or retained Docker container while
+retaining eligible empty built-in and custom bridge networks.
 
 `setup adopt` is a separate, root-only, non-mutating reader for a compatible
 existing 2.0.3 advanced-mode installation. It does not use the setup mutation

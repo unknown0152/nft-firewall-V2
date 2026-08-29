@@ -7,9 +7,10 @@ web, installers, tests, dependencies, Git history, and release contents.
 
 Current source disposition: **2.1.0 STAGE_R_CANDIDATE_ONLY**.
 The amended 2.1.0 source-only Stage E-R matrix passed; independent candidate
-comparison remains a post-freeze external gate. The first privileged R2 run
-hard-stopped on NFV2-049 before package construction; a renewed R2 run, tag
-validation, publication, and deployment have not been executed. The findings
+comparison remains a post-freeze external gate. Successive privileged R2 runs
+hard-stopped safely on NFV2-049 and then NFV2-050 before live setup mutation;
+the required review also exposed NFV2-051. A renewed R2 run, tag validation,
+publication, and deployment have not been executed. The findings
 below through NFV2-030 record the tagged 2.0.1 audit history; NFV2-031 through
 NFV2-041 record the accepted 2.0.2/2.0.3 release work; NFV2-042 onward records
 2.1.0 source work.
@@ -86,6 +87,8 @@ and post-tag gates.
 | NFV2-047 | Managed Docker ownership introduces root-sensitive daemon JSON, socket-access, forwarding, and uninstall handoff boundaries | HIGH | Strict no-follow/owner/mode/size/duplicate-key reads, semantic merge, checksummed exact rollback, narrow socket drop-in, and fail-closed uninstall handoff that removes only exact managed content | CLOSED; tamper/failure/rollback/package lifecycle tests PASS, privileged R2 NOT EXECUTED |
 | NFV2-048 | The frozen 2.1.0 CLI documented `setup adopt` for existing hosts but implemented no such action | HIGH | Add an explicit dry-run-only planner structurally separate from setup mutation; verify exact schema-6 state/pointer/snapshot/provenance, the committed live-policy fingerprint, and bounded host topology twice; emit only a deterministic redacted worksheet; refuse execution pending a separate Stage E-L plan | CLOSED; command/refusal/redaction/race/exact-fixture/no-mutation source proof PASS, privileged R2 NOT EXECUTED |
 | NFV2-049 | A security test created its intended mode-`0644` refusal fixture with `os.WriteFile` and therefore inherited the privileged runner's `umask 0077` as mode `0600` | MEDIUM | Explicitly set and verify the unsafe fixture mode; add an isolated `umask 0077` regression covering protected-mode handling, root ownership, and explicit world-readable refusal without changing the runtime helper | CLOSED; targeted and full-suite normal/`umask 0077` source proof PASS, renewed privileged R2 NOT EXECUTED |
+| NFV2-050 | Clean Debian 13 returns valid empty JSON plus status 2 when the reserved route table does not yet exist, and preflight discarded the JSON before classification | MEDIUM | Query bounded numeric all-table JSON, select only exact table 51820 entries, and reject malformed identities, command failures, or populated ownership without interpreting stderr | CLOSED; absent/empty/populated/malformed/oversized/timeout/permission/command source proof PASS, renewed privileged R2 NOT EXECUTED |
+| NFV2-051 | Discovery recorded non-clean Docker state but clean-host validation and intent generation ignored it, allowing automatic ownership planning around retained workloads | HIGH | Observe running/all containers around topology discovery, refuse every stable non-empty or changing observation, retain eligible empty custom bridges, and repeat clean/topology validation immediately before ownership publication | CLOSED; empty/custom/running/retained/race/redaction/post-plan source proof PASS, renewed privileged R2 NOT EXECUTED |
 
 ## Adversarial review areas
 
@@ -105,7 +108,8 @@ and post-tag gates.
 | HTTP resource limits | Loopback default, read/header/write/idle timeouts, 16 KiB headers, status-only upstream response limit |
 | Secret logging | Status omits keys/peer IDs; controller observation is aggregate; test config excluded; current-tree scan passes while exact frozen history and extracted archives remain post-freeze gates |
 | Capabilities/systemd | Static units bind the root daemon to `CAP_NET_ADMIN`; web has no capabilities; staged, package, runtime, and reboot verification passed |
-| Managed Docker | Docker keeps all five packet-mutation settings false; NFTFW alone owns IPv4 forwarding, container policy/NAT, current bridge binding, and the narrow local socket handoff |
+| Managed routing | Numeric all-table JSON makes an absent reserved table clean without accepting command failure, malformed identity, or populated ownership |
+| Managed Docker | Clean-host setup refuses running or retained workloads; Docker keeps all five packet-mutation settings false; NFTFW alone owns IPv4 forwarding, container policy/NAT, current bridge binding, and the narrow local socket handoff |
 | Adoption planner | Dry-run-only component has no writer/mutation backend; double observation, exact state/provenance verification, bounded fixed output, and untrusted-error redaction are source-tested |
 
 ## Accepted residual risks
@@ -134,7 +138,7 @@ unresolved high/critical implementation findings.
 ## Final scan evidence
 
 The amended 2.1.0 source passed Go 1.27.0 unit/race/vet/module/fmt, staticcheck
-v0.8.1, govulncheck v1.7.0, gosec v2.29.0, eleven bounded fuzz targets,
+v0.8.1, govulncheck v1.7.0, gosec v2.29.0, twelve bounded fuzz targets,
 complete shell analysis, Stage R source/guard/comparator contracts, staged
 systemd verification, the full suite under `umask 0077`, and the
 coverage/benchmark gates. Candidate

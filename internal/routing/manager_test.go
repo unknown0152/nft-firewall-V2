@@ -38,7 +38,7 @@ func (f *fakeRunner) Run(_ context.Context, input []byte, name string, args ...s
 	if command == "ip -j -4 rule show" {
 		return []byte("[]"), nil
 	}
-	if command == "ip -j -4 route show table 51820" {
+	if command == "ip -j -N -4 route show table all" {
 		return []byte("[]"), nil
 	}
 	if command == "ip -j -d link show" {
@@ -183,8 +183,8 @@ func TestUpRefusesForeignRouteTableBeforeMutation(t *testing.T) {
 		switch command {
 		case "ip -j -4 rule show":
 			return []byte("[]"), nil
-		case "ip -j -4 route show table 51820":
-			return []byte(`[{"dst":"default","dev":"foreign0"}]`), nil
+		case "ip -j -N -4 route show table all":
+			return []byte(`[{"dst":"default","dev":"foreign0","table":"51820"}]`), nil
 		default:
 			return nil, nil
 		}
@@ -212,15 +212,15 @@ func TestPreflightCleanRejectsReservedIdentityBeforeMutation(t *testing.T) {
 			switch name + " " + strings.Join(args, " ") {
 			case "ip -j -4 rule show":
 				return []byte("[]"), nil
-			case "ip -j -4 route show table 51820":
-				return []byte(`[{"dst":"default","dev":"foreign0"}]`), nil
+			case "ip -j -N -4 route show table all":
+				return []byte(`[{"dst":"default","dev":"foreign0","table":"51820"}]`), nil
 			default:
 				return []byte("[]"), nil
 			}
 		},
 		"link": func(_ context.Context, _ []byte, name string, args ...string) ([]byte, error) {
 			switch name + " " + strings.Join(args, " ") {
-			case "ip -j -4 rule show", "ip -j -4 route show table 51820":
+			case "ip -j -4 rule show", "ip -j -N -4 route show table all":
 				return []byte("[]"), nil
 			case "ip -j -d link show":
 				return []byte(`[{"ifname":"nftfw0"}]`), nil
@@ -235,6 +235,130 @@ func TestPreflightCleanRejectsReservedIdentityBeforeMutation(t *testing.T) {
 				t.Fatal("reserved routing identity was accepted")
 			}
 		})
+	}
+}
+
+func TestPreflightCleanTreatsAbsentManagedTableAsClean(t *testing.T) {
+	var commands []string
+	runner := runnerFunc(func(_ context.Context, _ []byte, name string, args ...string) ([]byte, error) {
+		command := name + " " + strings.Join(args, " ")
+		commands = append(commands, command)
+		switch command {
+		case "ip -j -4 rule show":
+			return []byte("[]"), nil
+		case "ip -j -N -4 route show table all":
+			return []byte(`[
+{"dst":"default","dev":"eth0"},
+{"dst":"127.0.0.0/8","dev":"lo","table":"255"},
+{"dst":"default","dev":"other0","table":100}
+]`), nil
+		case "ip -j -d link show":
+			return []byte(`[{"ifname":"eth0"}]`), nil
+		default:
+			return nil, errors.New("unexpected command")
+		}
+	})
+	if err := (Manager{Runner: runner}).PreflightClean(context.Background(), routeConfig(t)); err != nil {
+		t.Fatalf("absent managed route table was not clean: %v", err)
+	}
+	joined := strings.Join(commands, "\n")
+	if strings.Contains(joined, "route show table 51820") ||
+		!strings.Contains(joined, "ip -j -N -4 route show table all") {
+		t.Fatalf("preflight did not use structured all-table inspection: %v", commands)
+	}
+}
+
+func TestDecodeManagedRoutesStrictlySelectsReservedTable(t *testing.T) {
+	routes, err := decodeManagedRoutes([]byte(`[
+{"dst":"default","dev":"eth0"},
+{"dst":"127.0.0.0/8","dev":"lo","table":"255"},
+{"dst":"default","dev":"nftfw0","table":"51820"},
+{"dst":"10.0.0.0/8","dev":"nftfw0","table":51820}
+]`), DefaultTable)
+	if err != nil || len(routes) != 2 || routes[0].Destination != "default" ||
+		routes[1].Destination != "10.0.0.0/8" {
+		t.Fatalf("managed route selection failed: routes=%#v err=%v", routes, err)
+	}
+	if routes, err := decodeManagedRoutes([]byte("[]"), DefaultTable); err != nil || len(routes) != 0 {
+		t.Fatalf("empty all-table observation rejected: routes=%#v err=%v", routes, err)
+	}
+}
+
+func TestDecodeManagedRoutesRejectsAmbiguousOrMalformedOutput(t *testing.T) {
+	tests := map[string][]byte{
+		"null":            []byte("null"),
+		"object":          []byte(`{}`),
+		"invalid-table":   []byte(`[{"table":"custom","dst":"default"}]`),
+		"negative-table":  []byte(`[{"table":-1,"dst":"default"}]`),
+		"duplicate-table": []byte(`[{"table":"51820","table":"255"}]`),
+		"invalid-dst":     []byte(`[{"table":"51820","dst":1}]`),
+		"trailing":        []byte(`[] true`),
+	}
+	for name, data := range tests {
+		t.Run(name, func(t *testing.T) {
+			if _, err := decodeManagedRoutes(data, DefaultTable); err == nil {
+				t.Fatal("ambiguous or malformed route output accepted")
+			}
+		})
+	}
+	if _, err := decodeManagedRoutes(make([]byte, DefaultCommandOutput+1), DefaultTable); err == nil {
+		t.Fatal("oversized route output accepted")
+	}
+	if _, err := decodeManagedRoutes([]byte("[]"), 0); err == nil {
+		t.Fatal("invalid managed table accepted")
+	}
+}
+
+func TestManagedRouteInspectionRejectsCommandFailureClasses(t *testing.T) {
+	for name, injected := range map[string]error{
+		"timeout":    context.DeadlineExceeded,
+		"permission": os.ErrPermission,
+		"command":    errors.New("command failed"),
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := runnerFunc(func(context.Context, []byte, string, ...string) ([]byte, error) {
+				return nil, injected
+			})
+			if _, err := inspectManagedRoutes(
+				context.Background(), runner, DefaultTable,
+			); err == nil {
+				t.Fatal("route command failure was accepted")
+			}
+		})
+	}
+	for name, output := range map[string][]byte{
+		"empty-output": nil,
+		"malformed":    []byte("{"),
+		"oversized":    make([]byte, DefaultCommandOutput+1),
+	} {
+		t.Run(name, func(t *testing.T) {
+			runner := runnerFunc(func(context.Context, []byte, string, ...string) ([]byte, error) {
+				return output, nil
+			})
+			if _, err := inspectManagedRoutes(
+				context.Background(), runner, DefaultTable,
+			); err == nil {
+				t.Fatal("invalid route command output was accepted")
+			}
+		})
+	}
+}
+
+func TestOwnershipAllowsOnlyExactExistingManagedDefaultRoute(t *testing.T) {
+	runner := runnerFunc(func(_ context.Context, _ []byte, name string, args ...string) ([]byte, error) {
+		switch name + " " + strings.Join(args, " ") {
+		case "ip -j -4 rule show":
+			return []byte("[]"), nil
+		case "ip -j -N -4 route show table all":
+			return []byte(`[{"dst":"default","dev":"nftfw0","table":"51820"}]`), nil
+		default:
+			return nil, nil
+		}
+	})
+	if err := (Manager{Runner: runner}).checkOwnershipConflicts(
+		context.Background(), routeConfig(t),
+	); err != nil {
+		t.Fatalf("exact owned route was rejected: %v", err)
 	}
 }
 
@@ -429,7 +553,7 @@ func TestPreflightCleanFailureBoundaries(t *testing.T) {
 				if command == "ip -j -4 rule show" {
 					return []byte("[]"), nil
 				}
-				if command == "ip -j -4 route show table 51820" {
+				if command == "ip -j -N -4 route show table all" {
 					return nil, errors.New("failed")
 				}
 				return []byte("[]"), nil
@@ -479,7 +603,7 @@ func TestUpReusesExistingInterfaceWithoutCreatingIt(t *testing.T) {
 		command := name + " " + strings.Join(args, " ")
 		commands = append(commands, command)
 		switch command {
-		case "ip -j -4 rule show", "ip -j -4 route show table 51820", "ip -j -d link show":
+		case "ip -j -4 rule show", "ip -j -N -4 route show table all", "ip -j -d link show":
 			return []byte("[]"), nil
 		case "ip link show dev nftfw0":
 			return nil, nil
@@ -620,7 +744,7 @@ func TestRemainingRoutingInspectionFailures(t *testing.T) {
 		if command == "ip -j -4 rule show" {
 			return []byte("[]"), nil
 		}
-		if command == "ip -j -4 route show table 51820" {
+		if command == "ip -j -N -4 route show table all" {
 			return []byte("{"), nil
 		}
 		return []byte("[]"), nil
@@ -633,7 +757,7 @@ func TestRemainingRoutingInspectionFailures(t *testing.T) {
 		if command == "ip -j -4 rule show" {
 			return []byte("[]"), nil
 		}
-		if command == "ip -j -4 route show table 51820" {
+		if command == "ip -j -N -4 route show table all" {
 			return nil, errors.New("failed")
 		}
 		return []byte("[]"), nil
@@ -644,7 +768,7 @@ func TestRemainingRoutingInspectionFailures(t *testing.T) {
 	linkCommandFailure := runnerFunc(func(_ context.Context, _ []byte, name string, args ...string) ([]byte, error) {
 		command := name + " " + strings.Join(args, " ")
 		switch command {
-		case "ip -j -4 rule show", "ip -j -4 route show table 51820":
+		case "ip -j -4 rule show", "ip -j -N -4 route show table all":
 			return []byte("[]"), nil
 		case "ip -j -d link show":
 			return nil, errors.New("failed")
@@ -676,4 +800,30 @@ func BenchmarkValidateConfig(b *testing.B) {
 			b.Fatal(err)
 		}
 	}
+}
+
+func BenchmarkDecodeManagedRoutes(b *testing.B) {
+	data := []byte(`[
+{"dst":"default","dev":"eth0"},
+{"dst":"127.0.0.0/8","dev":"lo","table":"255"},
+{"dst":"default","dev":"nftfw0","table":"51820"}
+]`)
+	b.ReportAllocs()
+	for b.Loop() {
+		if _, err := decodeManagedRoutes(data, DefaultTable); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func FuzzDecodeManagedRoutes(f *testing.F) {
+	f.Add([]byte("[]"))
+	f.Add([]byte(`[{"dst":"default","dev":"nftfw0","table":"51820"}]`))
+	f.Add([]byte(`[{"table":"51820","table":"255"}]`))
+	f.Fuzz(func(t *testing.T, data []byte) {
+		if len(data) > DefaultCommandOutput {
+			return
+		}
+		_, _ = decodeManagedRoutes(data, DefaultTable)
+	})
 }

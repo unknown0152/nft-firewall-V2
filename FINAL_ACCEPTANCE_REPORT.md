@@ -40,6 +40,11 @@ live installation, firewall application, VPN interruption, or deployment.
   complete suite also passes with `umask 0077` in an unprivileged environment.
 - Overall statement coverage at least 75%, with all five new core packages at
   or above 90%.
+- Clean-host routing uses bounded numeric all-table JSON: an absent reserved
+  table is clean, but failed, malformed, or populated observations refuse.
+- Managed Docker clean-host setup accepts eligible empty bridges only and
+  revalidates that no running or retained workload appeared immediately before
+  ownership-file publication.
 - Managed file publication and kernel generation recovery remain separate,
   independently timed, and exact-generation scoped.
 - Existing-host adoption planning has no mutation path, repeats protected
@@ -57,9 +62,10 @@ approval bound to that frozen source commit and comparison SHA-256. Any local
 tag, remote publication, or current-server deployment requires still later
 identity-bound approval.
 
-The first approved R2 attempt hard-stopped before private package construction
-when its privileged source rerun exposed an ambient-umask-dependent test
-fixture. It is not acceptance evidence. The corrected source requires a new
+The latest approved R2 attempt hard-stopped before managed setup mutation when
+the supported clean guest exposed iproute2's missing-table status behavior;
+source review also found non-clean Docker state was classified but not
+refused. It is not acceptance evidence. The corrected source requires a new
 identity-bound E-R2 approval and complete renewed run.
 
 R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED

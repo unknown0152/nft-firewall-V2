@@ -45,6 +45,13 @@ operational state database in a report.
 - Configuration and sensitive state reject unsafe ownership, permissions,
   symlinks, ambiguous topology, unknown fields, malformed addresses, and
   unsafe broad prefixes.
+- Clean-host route preflight selects the reserved table from bounded numeric
+  all-table JSON, so a normally absent table is clean while malformed output,
+  command failure, or populated reserved ownership fails closed.
+- Clean-host Docker setup accepts eligible empty bridges only. Running or
+  retained containers, changing workload observation, unsupported topology,
+  and post-plan workload/topology changes are refused before Docker ownership
+  files or forwarding state are published.
 - Privileged API authorization comes from Unix peer credentials, not request
   content. Request and response bodies are bounded and schemas reject unknown
   or operation-inapplicable fields.

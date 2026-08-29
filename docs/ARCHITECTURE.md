@@ -163,6 +163,19 @@ network ID as durable authorization. Managed intent contains the network name,
 bridge driver, canonical IPv4 subnet/gateway pairs, dynamic bridge binding,
 and stable provenance name `docker:<network>`.
 
+Clean-host discovery sandwiches strict network observation between two
+running/all-container observations. Eligible empty built-in and custom bridges
+can be authorized, but any running or retained container is classified as an
+existing workload and refused. Setup repeats the clean workload and exact
+network-tuple check immediately before publishing ownership files.
+
+Routing ownership is inspected with one bounded `ip -j -N -4 route show table
+all` query. Numeric output gives non-main routes an explicit table identity;
+an absent reserved table is therefore an empty selection, while malformed
+identities, command failure, or any route in the reserved table fail closed.
+The implementation never interprets localized stderr or special-cases the
+iproute2 missing-table exit status.
+
 The transaction strictly merges `/etc/docker/daemon.json`, preserving
 unrelated keys while setting Docker's five firewall/forwarding/masquerade/
 proxy mutation controls to false. NFTFW separately owns persistent and runtime

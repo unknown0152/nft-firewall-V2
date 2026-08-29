@@ -5,7 +5,7 @@ Source disposition: **STAGE_R_CANDIDATE_ONLY**
 Validation date: 2026-08-29
 
 Reopened source baseline:
-`a04358669edd3c2a75cda6ecd56ffc336bad09a8`
+`67d2759b517bf633dba7c6f1eb544c18415d3328`
 
 This tracked report is the pre-build source snapshot. The later frozen commit,
 candidate build evidence, candidate comparison, R2 evidence, tag, and any
@@ -25,15 +25,15 @@ publication decision must remain external and checksummed.
 | Staticcheck v0.8.1 | PASS |
 | govulncheck v1.7.0 | PASS, no reachable vulnerabilities |
 | gosec v2.29.0 reviewed profile | PASS |
-| Eleven bounded fuzz targets | PASS |
+| Twelve bounded fuzz targets | PASS |
 | ShellCheck | PASS |
 | Stage R source/package/systemd contracts | PASS |
 | Staged systemd verification | PASS |
-| Overall statement coverage | PASS, 76.4% |
+| Overall statement coverage | PASS, 76.5% |
 | `internal/setup` coverage | PASS, 90.0% |
 | `internal/wgconfig` coverage | PASS, 90.6% |
-| `internal/intent` coverage | PASS, 92.3% |
-| `internal/routing` coverage | PASS, 90.2% |
+| `internal/intent` coverage | PASS, 92.6% |
+| `internal/routing` coverage | PASS, 90.5% |
 | `internal/adoption` coverage | PASS, 91.1% |
 
 ## Functional source coverage
@@ -42,11 +42,16 @@ publication decision must remain external and checksummed.
 - Debian 13 clean-host discovery and refusal of ambiguous/competing ownership.
 - Deterministic managed intent, advanced TOML, DNS, route, rule, and IPv6
   ownership planning.
+- Bounded numeric all-table routing inspection that treats an absent reserved
+  table as clean while refusing populated, malformed, oversized, timed-out,
+  permission-denied, or command-failed observations.
 - Setup journaling, verified backup, temporary guard, safe apply, commit,
   boot activation, idempotent rerun, and rollback/recovery boundaries.
 - Strict local Docker bridge discovery; semantic daemon JSON ownership;
-  container-zone/VPN-only policy; NFTFW-owned IPv4 forwarding; confirmed
-  restart only when required; topology/route revalidation; and exact rollback.
+  eligible empty custom-network support; running/retained/changing workload
+  refusal; post-plan clean-state revalidation; container-zone/VPN-only policy;
+  NFTFW-owned IPv4 forwarding; confirmed restart only when required;
+  topology/route revalidation; and exact rollback.
 - Stable Docker authorization provenance across a race-consistent full-ID and
   Linux-bridge rebind, including transactional generation publication.
 - Explicit dry-run-only existing-host adoption planning with exact schema-6
@@ -70,20 +75,25 @@ publication decision must remain external and checksummed.
 ## Performance source results
 
 The repeated 10-sample source matrix remained inside the Amendment E budgets
-on the reference NUC. Observed maxima included 0.026 ms provider parsing,
-0.051 ms managed Docker config generation, 0.123 ms strict daemon merge,
-0.103 ms Docker topology projection, 0.159 ms standard compilation, 56.5 ms
-10,000-policy compilation, 0.178 ms canonical fingerprinting, 0.835 ms no-op
-reconciliation, 0.016 ms dashboard status projection, and 0.021 ms adoption
-worksheet generation. Performance evidence is not privileged network proof.
+on the reference NUC. Observed maxima included 0.004811 ms provider parsing,
+0.014579 ms managed Docker config generation, 0.029652 ms strict daemon merge,
+0.013649 ms Docker topology projection, 0.006676 ms managed route decoding,
+0.001380 ms Docker workload-ID classification, 0.062205 ms standard
+compilation, 32.645070 ms 10,000-policy compilation, 0.019173 ms canonical
+fingerprinting, 0.355702 ms no-op reconciliation, 0.000299 ms dashboard status
+projection, and 0.001941 ms adoption worksheet generation. No measured
+operation regressed by more than 10% from the prior recorded matrix.
+Performance evidence is not privileged network proof.
 
 ## Not executed under Stage E-R
 
-The first approval-bound E-R2 attempt hard-stopped before private package
-construction when its privileged `umask 0077` source rerun exposed the test
-fixture defect corrected here. That failed run is not privileged acceptance
-evidence. A renewed E-R2 run has not been executed and requires new approval
-bound to the replacement frozen source and candidate comparison.
+The latest approval-bound E-R2 attempt built and inspected private packages,
+then hard-stopped before managed setup mutation because Debian 13 reports an
+absent table 51820 with valid empty JSON but command status 2. Mandatory source
+review also found the clean-host Docker classification was not enforced. That
+run is not privileged acceptance evidence. A renewed E-R2 run has not been
+executed and requires new approval bound to the replacement frozen source and
+candidate comparison.
 
 | Gate | Result |
 | --- | --- |

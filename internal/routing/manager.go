@@ -97,15 +97,8 @@ func (m Manager) PreflightClean(ctx context.Context, config Config) error {
 			return errors.New("TUNNEL_RULE_PRIORITY_CONFLICT")
 		}
 	}
-	routesOutput, err := m.Runner.Run(
-		ctx, nil, "ip", "-j", "-4", "route", "show", "table", strconv.Itoa(config.Table),
-	)
+	routes, err := inspectManagedRoutes(ctx, m.Runner, config.Table)
 	if err != nil {
-		return errors.New("TUNNEL_ROUTE_TABLE_INSPECTION_FAILED")
-	}
-	var routes []json.RawMessage
-	if len(routesOutput) == 0 || len(routesOutput) > DefaultCommandOutput ||
-		json.Unmarshal(routesOutput, &routes) != nil {
 		return errors.New("TUNNEL_ROUTE_TABLE_INSPECTION_FAILED")
 	}
 	if len(routes) != 0 {
@@ -427,18 +420,8 @@ func (m Manager) checkOwnershipConflicts(ctx context.Context, config Config) err
 		}
 		return errors.New("TUNNEL_RULE_PRIORITY_CONFLICT")
 	}
-	routesOutput, err := m.Runner.Run(
-		ctx, nil, "ip", "-j", "-4", "route", "show", "table", strconv.Itoa(config.Table),
-	)
+	routes, err := inspectManagedRoutes(ctx, m.Runner, config.Table)
 	if err != nil {
-		return errors.New("TUNNEL_ROUTE_TABLE_INSPECTION_FAILED")
-	}
-	var routes []struct {
-		Destination string `json:"dst"`
-		Device      string `json:"dev"`
-	}
-	if len(routesOutput) == 0 || len(routesOutput) > DefaultCommandOutput ||
-		json.Unmarshal(routesOutput, &routes) != nil {
 		return errors.New("TUNNEL_ROUTE_TABLE_INSPECTION_FAILED")
 	}
 	for _, route := range routes {
@@ -449,6 +432,118 @@ func (m Manager) checkOwnershipConflicts(ctx context.Context, config Config) err
 		return errors.New("TUNNEL_ROUTE_TABLE_CONFLICT")
 	}
 	return nil
+}
+
+// routeObservation is deliberately decoded from `ip -j -N ... table all`.
+// Numeric output makes every non-main table identity machine-readable while
+// an absent table remains an ordinary successful observation instead of an
+// iproute2 missing-table command error.
+type routeObservation struct {
+	Table       json.RawMessage
+	Destination string
+	Device      string
+}
+
+func inspectManagedRoutes(ctx context.Context, runner Runner, table int) ([]routeObservation, error) {
+	if _, err := tableNumber(table); err != nil {
+		return nil, err
+	}
+	output, err := runner.Run(
+		ctx, nil, "ip", "-j", "-N", "-4", "route", "show", "table", "all",
+	)
+	if err != nil {
+		return nil, err
+	}
+	return decodeManagedRoutes(output, table)
+}
+
+func decodeManagedRoutes(data []byte, table int) ([]routeObservation, error) {
+	tableID, err := tableNumber(table)
+	if err != nil {
+		return nil, err
+	}
+	if len(data) == 0 || len(data) > DefaultCommandOutput {
+		return nil, errors.New("invalid route output")
+	}
+	var observed []routeObservation
+	if err := json.Unmarshal(data, &observed); err != nil || observed == nil {
+		return nil, errors.New("invalid route output")
+	}
+	result := make([]routeObservation, 0)
+	for _, route := range observed {
+		// iproute2 omits the table field for main-table routes. With -N, every
+		// explicit non-main identity is a decimal table number.
+		if len(route.Table) == 0 {
+			continue
+		}
+		value, err := numericRouteTable(route.Table)
+		if err != nil {
+			return nil, errors.New("invalid route table")
+		}
+		if value == tableID {
+			result = append(result, route)
+		}
+	}
+	return result, nil
+}
+
+func (r *routeObservation) UnmarshalJSON(data []byte) error {
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	token, err := decoder.Token()
+	if err != nil || token != json.Delim('{') {
+		return errors.New("route is not an object")
+	}
+	seen := map[string]bool{}
+	for decoder.More() {
+		keyToken, err := decoder.Token()
+		if err != nil {
+			return err
+		}
+		key, ok := keyToken.(string)
+		if !ok {
+			return errors.New("route key is not a string")
+		}
+		var raw json.RawMessage
+		if err := decoder.Decode(&raw); err != nil {
+			return err
+		}
+		switch key {
+		case "table", "dst", "dev":
+			if seen[key] {
+				return errors.New("duplicate route field")
+			}
+			seen[key] = true
+		}
+		switch key {
+		case "table":
+			r.Table = append(r.Table[:0], raw...)
+		case "dst":
+			if err := json.Unmarshal(raw, &r.Destination); err != nil {
+				return errors.New("invalid route destination")
+			}
+		case "dev":
+			if err := json.Unmarshal(raw, &r.Device); err != nil {
+				return errors.New("invalid route device")
+			}
+		}
+	}
+	end, err := decoder.Token()
+	if err != nil || end != json.Delim('}') {
+		return errors.New("unterminated route object")
+	}
+	return nil
+}
+
+func numericRouteTable(raw json.RawMessage) (uint64, error) {
+	var text string
+	if err := json.Unmarshal(raw, &text); err == nil {
+		return strconv.ParseUint(text, 10, 32)
+	}
+	var value uint64
+	if err := json.Unmarshal(raw, &value); err != nil || value > 0xffffffff {
+		return 0, errors.New("invalid route table")
+	}
+	return value, nil
 }
 
 type policyRule struct {

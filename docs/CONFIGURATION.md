@@ -237,8 +237,9 @@ and explicitly contains:
 
 Managed `nftfw setup --vpn` performs the strict daemon JSON merge, sysctl
 ownership, exact drop-in installation, confirmed Docker restart, topology
-validation, and rollback transaction automatically. The managed operator does
-not supply this TOML.
+validation, and rollback transaction automatically only after proving no
+running or retained container exists. Eligible empty custom bridges may be
+adopted. The managed operator does not supply this TOML.
 
 Each Docker entry is an immutable authorization tuple: configured network
 name, `bridge` driver, current Linux bridge binding, and parallel canonical

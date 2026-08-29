@@ -1018,7 +1018,9 @@ class ManagedDockerContracts(unittest.TestCase):
     def test_docker_observation_is_local_strict_and_stable(self) -> None:
         docker = read("internal/containers/docker.go")
         managed = read("internal/containers/managed.go")
+        discovery = read("internal/discovery/discovery.go")
         intent = read("internal/intent/intent.go")
+        setup = read("internal/setup/system.go")
         self.assertIn(
             'localDockerHost = "unix:///var/run/docker.sock"',
             docker,
@@ -1030,6 +1032,34 @@ class ManagedDockerContracts(unittest.TestCase):
         self.assertIn("INTENT_DOCKER_SUBNET_OVERLAPS_VPN", intent)
         self.assertIn("INTENT_DOCKER_SUBNET_OVERLAPS_BOOTSTRAP", intent)
         self.assertIn("INTENT_DOCKER_SUBNET_OVERLAPS_RESERVED", intent)
+        self.assertIn("observeDockerWorkloads", discovery)
+        self.assertIn('"ps", "-q", "--no-trunc"', discovery)
+        self.assertIn('"ps", "-aq", "--no-trunc"', discovery)
+        self.assertIn("DISCOVERY_DOCKER_WORKLOADS_REQUIRE_ADOPT", discovery)
+        self.assertIn("DISCOVERY_DOCKER_STATE_CHANGED", discovery)
+        self.assertNotIn('"filter", "type=custom"', discovery)
+        self.assertIn("SETUP_DOCKER_STATE_CHANGED_AFTER_PLAN", setup)
+
+    def test_clean_host_route_inspection_uses_numeric_all_table_json(self) -> None:
+        routing = re.sub(r"\s+", " ", read("internal/routing/manager.go"))
+        tests = read("internal/routing/manager_test.go")
+        self.assertIn(
+            '"ip", "-j", "-N", "-4", "route", "show", "table", "all"',
+            routing,
+        )
+        self.assertNotIn(
+            '"route", "show", "table", strconv.Itoa(config.Table)',
+            routing,
+        )
+        self.assertIn("decodeManagedRoutes", routing)
+        self.assertIn("numericRouteTable", routing)
+        for regression in (
+            "TestPreflightCleanTreatsAbsentManagedTableAsClean",
+            "TestDecodeManagedRoutesRejectsAmbiguousOrMalformedOutput",
+            "TestManagedRouteInspectionRejectsCommandFailureClasses",
+            "FuzzDecodeManagedRoutes",
+        ):
+            self.assertIn(regression, tests)
 
     def test_bridge_rebind_and_uninstall_handoff_are_transactional(self) -> None:
         runtime = read("internal/app/runtime.go")

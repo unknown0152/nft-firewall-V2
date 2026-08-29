@@ -117,6 +117,30 @@ func TestGeneratedDockerConfigOwnsVPNOnlyForwarding(t *testing.T) {
 	}
 }
 
+func TestNewRefusesNonCleanDockerBeforeGeneratingIntent(t *testing.T) {
+	profile, _, err := wgconfig.Parse([]byte(`[Interface]
+PrivateKey = ` + key(1) + `
+Address = 10.8.0.2/32
+[Peer]
+PublicKey = ` + key(2) + `
+AllowedIPs = 0.0.0.0/0
+Endpoint = vpn.example.test:51820
+`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	snapshot := discovery.Snapshot{
+		OSID: "debian", OSVersion: "13", Architecture: "amd64",
+		Uplink: "eth0", UplinkGateway: netip.MustParseAddr("192.168.1.1"),
+		LANNetworks:   []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")},
+		DockerPresent: true, DockerClean: false,
+	}
+	_, err = New(snapshot, profile, []netip.Addr{netip.MustParseAddr("198.51.100.8")})
+	if err == nil || err.Error() != "DISCOVERY_DOCKER_WORKLOADS_REQUIRE_ADOPT" {
+		t.Fatalf("non-clean Docker state reached intent generation: %v", err)
+	}
+}
+
 func TestManagedDockerSubnetsRejectIsolationOverlaps(t *testing.T) {
 	tests := []struct {
 		name   string
