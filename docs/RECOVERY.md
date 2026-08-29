@@ -20,7 +20,13 @@ planner itself writes no log.
 
 ## Managed setup interruption
 
-Inspect the root-only setup journal:
+Profile parsing, clean-host discovery, endpoint resolution, Docker inspection,
+route preflight, and plan compilation are read-only and run before the setup
+journal is created. A refusal in that boundary changes no protected state and
+requires no rollback. `SETUP_JOURNAL_WRITE_FAILED` likewise stops before the
+backup or any protected mutation.
+
+After a journal is durably published, inspect the root-only setup journal:
 
 ```bash
 sudo nftfw setup status
@@ -34,6 +40,14 @@ bundle:
 ```bash
 sudo nftfw setup rollback
 ```
+
+An interrupted `inspect` phase, or `backup` phase without a recorded backup,
+is still before protected mutation. Recovery marks it terminal without
+stopping services, changing nftables, or attempting a nonexistent restore.
+Before the temporary guard or any later mutation begins, the complete
+checksummed backup path is durable in the journal. Missing that boundary in a
+guard-or-later phase, or a missing prepared-plan schema, fails closed before
+stopping services instead of guessing.
 
 Rollback first stops the managed tunnel when it may exist, rolls back only the
 exact pending generation, restores files, sysctls, unit state, routes, DNS,

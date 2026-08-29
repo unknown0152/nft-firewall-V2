@@ -23,8 +23,9 @@ candidate construction and independent comparison. The approved source scope
 includes Go 1.27, one-file managed setup, strict VPN import, managed routing,
 strict managed Docker IPv4 bridge adoption and forwarding ownership,
 the explicit dry-run-only existing-host adoption planner, CLI/dashboard
-changes, package source, documentation, benchmarks, tests, and local
-nondeployable candidate builds.
+changes, the corrected managed first-setup transaction boundary, package
+source, documentation, benchmarks, tests, and local nondeployable candidate
+builds.
 
 The candidate binaries permit only their quarantine-safe behavior, candidate
 daemon/web processes refuse startup, and candidate Debian packages refuse
@@ -42,6 +43,10 @@ live installation, firewall application, VPN interruption, or deployment.
   or above 90%.
 - Clean-host routing uses bounded numeric all-table JSON: an absent reserved
   table is clean, but failed, malformed, or populated observations refuse.
+- Managed first setup completes all read-only preparation before publishing a
+  journal containing the prepared summary. Preparation, initial publication,
+  and incomplete-backup failures cannot invoke protected mutation or system
+  rollback; guard-or-later rollback remains bound to a durable backup.
 - Managed Docker clean-host setup accepts eligible empty bridges only and
   revalidates that no running or retained workload appeared immediately before
   ownership-file publication.
@@ -66,11 +71,11 @@ approval bound to that frozen source commit and comparison SHA-256. Any local
 tag, remote publication, or current-server deployment requires still later
 identity-bound approval.
 
-The latest approved R2 attempt passed the preceding disposable source,
-package, database, namespace leak, host-safe-apply, and service-chaos gates,
-then hard-stopped in the bundled Docker lifecycle when an exact v2.0.3-style
-static advanced configuration was rejected for its historical interface-name
-provenance. It is not complete acceptance evidence. The corrected source
-requires a new identity-bound E-R2 approval and complete renewed run.
+The latest approved R2 attempt passed its preceding disposable gates and
+reached managed first setup, then hard-stopped when its own prematurely
+published journal was correctly classified as pre-existing NFTFW state and
+rollback lacked a prepared plan. It is not complete acceptance evidence. The
+corrected source requires a new identity-bound E-R2 approval and complete
+renewed run.
 
 R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED

@@ -685,9 +685,30 @@ func (s *System) Finalize(ctx context.Context, _ Plan) error {
 
 func (s *System) Rollback(ctx context.Context, plan Plan, journal Journal) error {
 	s.defaults()
+	// Inspect and incomplete-backup journals precede the first protected-state
+	// mutation. They can be terminally recorded without stopping services or
+	// attempting to restore a backup that was never durably established.
+	if journalBeforeProtectedMutation(journal) {
+		return nil
+	}
+	backupDir := journal.BackupDir
+	if backupDir == "" {
+		if private, err := privatePlan(plan); err == nil {
+			backupDir = private.BackupDir
+		}
+	}
+	// Once a mutation-capable phase is recorded, recovery must prove both the
+	// prepared-plan identity and its durable backup before touching services.
+	// A missing boundary is ambiguous state and must fail closed in place.
+	if backupDir == "" {
+		return errors.New("SETUP_ROLLBACK_BACKUP_MISSING")
+	}
 	summary := plan.Summary
 	if summary.Schema == "" {
 		summary = journal.Summary
+	}
+	if summary.Schema != "nftfw.setup-plan.v1" {
+		return errors.New("SETUP_ROLLBACK_PLAN_INVALID")
 	}
 	route := routing.Config{
 		Interface: summary.VPNInterface, Table: routing.DefaultTable,
@@ -711,15 +732,7 @@ func (s *System) Rollback(ctx context.Context, plan Plan, journal Journal) error
 	} {
 		_, _ = s.Runner.Run(ctx, nil, "systemctl", "stop", unit)
 	}
-	backupDir := journal.BackupDir
-	if backupDir == "" {
-		if private, err := privatePlan(plan); err == nil {
-			backupDir = private.BackupDir
-		}
-	}
-	if backupDir == "" {
-		failures = append(failures, "backup")
-	} else if err := restoreBackup(ctx, s.Runner, backupDir); err != nil {
+	if err := restoreBackup(ctx, s.Runner, backupDir); err != nil {
 		failures = append(failures, "restore")
 	}
 	_, _ = s.Runner.Run(ctx, nil, "systemctl", "daemon-reload")

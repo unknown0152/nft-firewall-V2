@@ -155,13 +155,25 @@ durable resources.
 
 ## Managed setup and Docker ownership
 
-Managed setup is a phase-recorded transaction:
+Managed setup has a read-only preparation boundary followed by a
+phase-recorded transaction:
 
 ```text
-inspect -> checksum backup -> temporary guard -> install/check candidate
+profile/discovery/plan (no journal, no mutation)
+  -> durable journal containing the prepared summary
+  -> checksum backup -> temporary guard -> install/check candidate
   -> confirmed Docker ownership restart when required
   -> daemon start -> safe apply -> tunnel -> validation -> commit -> boot
 ```
+
+Clean-host discovery deliberately treats any pre-existing setup journal as
+NFTFW state requiring recovery. The engine therefore completes preparation
+before publishing its own journal. A preparation or initial journal-write
+failure returns without rollback because no mutation-capable phase ran. An
+interrupted `inspect` or incomplete `backup` journal with no durable backup is
+terminalized without stopping services; every guard-or-later phase requires a
+valid prepared summary and recorded backup before it uses exact rollback or
+proved committed recovery.
 
 Discovery queries only the local Docker socket and stores no generated Docker
 network ID as durable authorization. Managed intent contains the network name,

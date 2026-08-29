@@ -112,6 +112,17 @@ func (e Engine) Run(ctx context.Context, vpnPath string) (Plan, error) {
 	if e.Executor == nil || e.Journal == nil {
 		return Plan{}, errors.New("SETUP_ENGINE_INCOMPLETE")
 	}
+	// Preparation is strictly read-only. It must finish before the transaction
+	// journal is created because clean-host discovery deliberately classifies
+	// any existing setup journal as NFTFW state requiring explicit recovery.
+	// A preparation failure therefore has nothing to roll back.
+	plan, err := e.Executor.Prepare(ctx, vpnPath)
+	if err != nil {
+		return Plan{}, errors.New(errorCode(err))
+	}
+	if plan.Summary.Schema != "nftfw.setup-plan.v1" {
+		return Plan{}, errors.New("SETUP_PLAN_INVALID")
+	}
 	now := time.Now
 	if e.Now != nil {
 		now = e.Now
@@ -128,19 +139,13 @@ func (e Engine) Run(ctx context.Context, vpnPath string) (Plan, error) {
 	journal := Journal{
 		Schema: "nftfw.setup-journal.v1", Transaction: newID(),
 		Phase: PhaseInspect, Status: "running", StartedAt: started,
-		UpdatedAt: started, Deadline: started.Add(timeout),
+		UpdatedAt: started, Deadline: started.Add(timeout), Summary: plan.Summary,
 	}
+	// Publishing the initial journal is the durable boundary immediately before
+	// the first mutation-capable phase. If publication fails, no setup phase has
+	// run and rollback would have neither a backup nor changed state to restore.
 	if err := e.Journal.Write(journal); err != nil {
 		return Plan{}, errors.New("SETUP_JOURNAL_WRITE_FAILED")
-	}
-	plan, err := e.Executor.Prepare(ctx, vpnPath)
-	if err != nil {
-		return Plan{}, e.fail(ctx, Plan{}, journal, err)
-	}
-	journal.Summary = plan.Summary
-	journal.UpdatedAt = now().UTC()
-	if err := e.Journal.Write(journal); err != nil {
-		return Plan{}, e.fail(ctx, plan, journal, errors.New("SETUP_JOURNAL_WRITE_FAILED"))
 	}
 	steps := []struct {
 		phase Phase
@@ -222,6 +227,16 @@ func (e Engine) RollbackExpired(ctx context.Context, plan Plan) (bool, error) {
 }
 
 func (e Engine) fail(ctx context.Context, plan Plan, journal Journal, cause error) error {
+	if journalBeforeProtectedMutation(journal) {
+		journal.Phase, journal.Status = PhaseFailed, "rolled_back"
+		journal.ErrorCode = errorCode(cause)
+		journal.UpdatedAt = time.Now().UTC()
+		if e.Now != nil {
+			journal.UpdatedAt = e.Now().UTC()
+		}
+		_ = e.Journal.Write(journal)
+		return errors.New(errorCode(cause))
+	}
 	if !journal.Committed && journal.Generation != 0 {
 		if inspector, ok := e.Executor.(CommitInspector); ok {
 			inspectionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
@@ -276,6 +291,13 @@ func (e Engine) fail(ctx context.Context, plan Plan, journal Journal, cause erro
 	journal.Status = "rolled_back"
 	_ = e.Journal.Write(journal)
 	return errors.New(errorCode(cause))
+}
+
+func journalBeforeProtectedMutation(journal Journal) bool {
+	if journal.Committed || journal.Generation != 0 || journal.BackupDir != "" {
+		return false
+	}
+	return journal.Phase == PhaseInspect || journal.Phase == PhaseBackup
 }
 
 func errorCode(err error) string {

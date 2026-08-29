@@ -15,6 +15,9 @@ container state. It imports the VPN profile without printing secrets,
 generates the strict policy, creates the managed WireGuard interface and
 policy routing, installs an independent rollback guard, applies safely,
 validates the tunnel and kill switch, commits, and enables boot protection.
+All parsing and clean-host discovery finish before the setup journal exists.
+The journal is published with the complete redacted plan immediately before
+the backup and protected mutation phases begin.
 
 The clean-host result is:
 
@@ -32,7 +35,10 @@ The clean-host result is:
 The current tree targets **2.1.0** and requires **Go 1.27.0**. Until Stage
 E-R2, tagging, and final publication approval are complete, local Stage E-R
 candidate artifacts are deliberately quarantined and cannot run or install.
-The last published stable line remains 2.0.3.
+The last published stable line remains 2.0.3. The latest privileged 2.1.0 run
+hard-stopped before tagging after exposing the managed first-setup journal
+ordering defect; Amendment K corrects that source boundary, but its complete
+renewed validation is still required.
 
 ## Supported clean-host setup
 

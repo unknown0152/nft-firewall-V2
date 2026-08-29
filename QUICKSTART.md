@@ -101,6 +101,10 @@ sudo nftfw setup rollback
 ```
 
 Then follow `docs/RECOVERY.md`. Do not flush nftables or delete NFTFW state.
+Profile, discovery, Docker, or route-preflight refusals occur before a setup
+journal or protected mutation exists and require no rollback. After a journal
+exists, use only the status and rollback commands above; the independent timer
+also handles an interrupted transaction.
 If a later `expose` or `lan` change is interrupted,
 `nftfw-managed-rollback.timer` finishes a proved commit or restores the exact
 prior files and pending generation.

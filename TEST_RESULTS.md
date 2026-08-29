@@ -2,10 +2,10 @@
 
 Source disposition: **STAGE_R_CANDIDATE_ONLY**
 
-Validation date: 2026-08-29
+Validation date: 2026-08-30
 
 Reopened source baseline:
-`6b04225c6866d13bea632a48f0185f88731be45b`
+`276a891644dc833d828df686b3bbd6494c02ffe6`
 
 This tracked report is the pre-build source snapshot. The later frozen commit,
 candidate build evidence, candidate comparison, R2 evidence, tag, and any
@@ -30,7 +30,7 @@ publication decision must remain external and checksummed.
 | Stage R source/package/systemd contracts | PASS |
 | Staged systemd verification | PASS |
 | Overall statement coverage | PASS, 76.6% |
-| `internal/setup` coverage | PASS, 90.0% |
+| `internal/setup` coverage | PASS, 90.6% |
 | `internal/wgconfig` coverage | PASS, 90.6% |
 | `internal/intent` coverage | PASS, 92.6% |
 | `internal/routing` coverage | PASS, 90.5% |
@@ -45,8 +45,10 @@ publication decision must remain external and checksummed.
 - Bounded numeric all-table routing inspection that treats an absent reserved
   table as clean while refusing populated, malformed, oversized, timed-out,
   permission-denied, or command-failed observations.
-- Setup journaling, verified backup, temporary guard, safe apply, commit,
-  boot activation, idempotent rerun, and rollback/recovery boundaries.
+- Read-only setup preparation before journal publication; prepared-summary
+  journaling at the pre-mutation boundary; no-op preparation, initial-write,
+  and incomplete-backup recovery; verified backup; temporary guard; safe
+  apply; commit; boot activation; idempotent rerun; and exact later rollback.
 - Strict local Docker bridge discovery; semantic daemon JSON ownership;
   eligible empty custom-network support; running/retained/changing workload
   refusal; post-plan clean-state revalidation; container-zone/VPN-only policy;
@@ -79,26 +81,25 @@ publication decision must remain external and checksummed.
 ## Performance source results
 
 The repeated 10-sample source matrix remained inside the Amendment E budgets
-on the reference NUC. Observed maxima included 0.004399 ms provider parsing,
-0.015816 ms managed Docker config generation, 0.030212 ms strict daemon merge,
-0.013306 ms Docker topology projection, 0.006836 ms managed route decoding,
-0.001380 ms Docker workload-ID classification, 0.067118 ms standard
-compilation, 33.665237 ms 10,000-policy compilation, 0.019527 ms canonical
-fingerprinting, 0.346539 ms no-op reconciliation, 0.000301 ms dashboard status
-projection, and 0.001925 ms adoption worksheet generation. No measured
+on the reference NUC. Observed maxima included 0.004406 ms provider parsing,
+0.015499 ms managed Docker config generation, 0.029768 ms strict daemon merge,
+0.012429 ms Docker topology projection, 0.006718 ms managed route decoding,
+0.001378 ms Docker workload-ID classification, 0.063440 ms standard
+compilation, 32.904408 ms 10,000-policy compilation, 0.019690 ms canonical
+fingerprinting, 0.350305 ms no-op reconciliation, 0.0003042 ms dashboard status
+projection, and 0.001879 ms adoption worksheet generation. No measured
 operation regressed by more than 10% from the prior recorded matrix.
 Performance evidence is not privileged network proof.
 
 ## Not executed under Stage E-R
 
-The latest approval-bound E-R2 attempt passed disposable source, private
-package, database, namespace leak, host-safe-apply, and service-chaos gates.
-It then hard-stopped in the bundled Docker lifecycle because the managed
-dynamic projector rejected an exact v2.0.3-style static advanced Docker
-configuration with historical interface-name provenance. That partial run is
-not complete privileged acceptance evidence. A renewed E-R2 run has not been
-executed and requires new approval bound to the replacement frozen source and
-candidate comparison.
+The latest approval-bound E-R2 attempt passed its preceding disposable gates
+and reached the managed first-setup scenario. It then hard-stopped because the
+engine published its journal before clean-host discovery; discovery correctly
+classified that journal as existing NFTFW state, and rollback had no prepared
+plan. That partial run is not complete privileged acceptance evidence. A
+renewed E-R2 run has not been executed and requires new approval bound to the
+replacement frozen source and candidate comparison.
 
 | Gate | Result |
 | --- | --- |

@@ -268,6 +268,155 @@ func TestSystemExecutorCompletesSimulatedCleanHost(t *testing.T) {
 	}
 }
 
+func TestEngineAndSystemPrepareBeforePublishingFirstSetupJournal(t *testing.T) {
+	for _, dryRunFirst := range []bool{false, true} {
+		name := "direct"
+		if dryRunFirst {
+			name = "after-dry-run"
+		}
+		t.Run(name, func(t *testing.T) {
+			runner := &systemRunner{}
+			system, paths := testSystem(t, runner)
+			journalPath := filepath.Join(paths.StateDir, "setup", "journal.json")
+			cleanDiscover := system.Discover
+			discoveries := 0
+			system.Discover = func(ctx context.Context) (discovery.Snapshot, error) {
+				discoveries++
+				if _, err := os.Lstat(journalPath); err == nil {
+					return discovery.Snapshot{}, errors.New("DISCOVERY_EXISTING_NFTFW_REQUIRES_ADOPT")
+				} else if !errors.Is(err, os.ErrNotExist) {
+					return discovery.Snapshot{}, errors.New("DISCOVERY_EXISTING_NFTFW_STATE_UNREADABLE")
+				}
+				return cleanDiscover(ctx)
+			}
+			engine := Engine{
+				Executor: system, Journal: FileJournal{Path: journalPath},
+				NewID: func() string { return "first-setup-order" },
+				Now:   func() time.Time { return testTime() },
+			}
+			if dryRunFirst {
+				if _, err := engine.DryRun(context.Background(), "/provider.conf"); err != nil {
+					t.Fatal(err)
+				}
+				if _, err := os.Lstat(journalPath); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("dry-run published a setup journal: %v", err)
+				}
+			}
+			if _, err := engine.Run(context.Background(), "/provider.conf"); err != nil {
+				t.Fatal(err)
+			}
+			wantDiscoveries := 1
+			if dryRunFirst {
+				wantDiscoveries = 2
+			}
+			if discoveries != wantDiscoveries {
+				t.Fatalf("discoveries=%d want=%d", discoveries, wantDiscoveries)
+			}
+			journal, err := (FileJournal{Path: journalPath}).Read()
+			if err != nil || journal.Status != "complete" || journal.Summary.Schema != "nftfw.setup-plan.v1" {
+				t.Fatalf("first setup journal invalid: %#v %v", journal, err)
+			}
+		})
+	}
+}
+
+func TestEngineAndSystemPreparationBoundaryFailuresDoNotMutate(t *testing.T) {
+	t.Run("prepare", func(t *testing.T) {
+		runner := &systemRunner{}
+		system, paths := testSystem(t, runner)
+		system.Discover = func(context.Context) (discovery.Snapshot, error) {
+			return discovery.Snapshot{}, errors.New("DISCOVERY_COMPETING_FIREWALL")
+		}
+		journalPath := filepath.Join(paths.StateDir, "setup", "journal.json")
+		_, err := (Engine{
+			Executor: system, Journal: FileJournal{Path: journalPath},
+		}).Run(context.Background(), "/provider.conf")
+		if err == nil || err.Error() != "DISCOVERY_COMPETING_FIREWALL" {
+			t.Fatalf("unexpected preparation refusal: %v", err)
+		}
+		if _, err := os.Lstat(journalPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("preparation refusal published a journal: %v", err)
+		}
+		assertNoSetupMutation(t, runner, paths)
+	})
+
+	t.Run("initial-journal", func(t *testing.T) {
+		runner := &systemRunner{}
+		system, paths := testSystem(t, runner)
+		journalPath := filepath.Join(paths.StateDir, "setup", "journal.json")
+		store := &recordingJournal{
+			store: FileJournal{Path: journalPath}, failWrites: 1,
+		}
+		_, err := (Engine{Executor: system, Journal: store}).
+			Run(context.Background(), "/provider.conf")
+		if err == nil || err.Error() != "SETUP_JOURNAL_WRITE_FAILED" {
+			t.Fatalf("unexpected journal refusal: %v", err)
+		}
+		if store.last.Summary.Schema != "nftfw.setup-plan.v1" {
+			t.Fatalf("initial journal lacked prepared plan: %#v", store.last)
+		}
+		if _, err := os.Lstat(journalPath); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("failed journal write published state: %v", err)
+		}
+		assertNoSetupMutation(t, runner, paths)
+	})
+
+	t.Run("backup", func(t *testing.T) {
+		runner := &systemRunner{fail: "sysctl -n"}
+		system, paths := testSystem(t, runner)
+		journalPath := filepath.Join(paths.StateDir, "setup", "journal.json")
+		_, err := (Engine{
+			Executor: system, Journal: FileJournal{Path: journalPath},
+			NewID: func() string { return "backup-boundary" },
+		}).Run(context.Background(), "/provider.conf")
+		if err == nil || err.Error() != "SETUP_BACKUP_SYSCTL_FAILED" {
+			t.Fatalf("unexpected backup refusal: %v", err)
+		}
+		journal, readErr := (FileJournal{Path: journalPath}).Read()
+		if readErr != nil || journal.Status != "rolled_back" ||
+			journal.Phase != PhaseFailed || journal.BackupDir != "" {
+			t.Fatalf("backup refusal journal invalid: %#v %v", journal, readErr)
+		}
+		assertNoSetupMutation(t, runner, paths)
+	})
+}
+
+func assertNoSetupMutation(t testing.TB, runner *systemRunner, paths Paths) {
+	t.Helper()
+	for _, path := range []string{paths.Config, paths.Intent, paths.VPN, paths.Sysctl} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("pre-mutation failure changed %s: %v", path, err)
+		}
+	}
+	for _, command := range runner.commands {
+		if strings.HasPrefix(command, "systemctl enable") ||
+			strings.HasPrefix(command, "systemctl start") ||
+			strings.HasPrefix(command, "systemctl restart") ||
+			strings.HasPrefix(command, "sysctl -w") ||
+			strings.Contains(command, "nft --file") ||
+			strings.Contains(command, "route replace") {
+			t.Fatalf("pre-mutation failure executed %q", command)
+		}
+	}
+}
+
+func TestSystemRollbackBeforeProtectedMutationIsNoOp(t *testing.T) {
+	for _, phase := range []Phase{PhaseInspect, PhaseBackup} {
+		t.Run(string(phase), func(t *testing.T) {
+			runner := &systemRunner{}
+			system, _ := testSystem(t, runner)
+			if err := system.Rollback(context.Background(), Plan{}, Journal{
+				Phase: phase, Summary: Summary{Schema: "nftfw.setup-plan.v1"},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if len(runner.commands) != 0 {
+				t.Fatalf("pre-mutation rollback changed system state: %v", runner.commands)
+			}
+		})
+	}
+}
+
 func TestManagedDockerCompliantConfigDoesNotRestart(t *testing.T) {
 	id := strings.Repeat("c", 64)
 	runner := &systemRunner{outputs: map[string][]byte{
@@ -1332,10 +1481,30 @@ func TestPhaseTunnelClassification(t *testing.T) {
 
 func TestRollbackReportsEachIncompleteRecoveryClass(t *testing.T) {
 	t.Run("missing-backup", func(t *testing.T) {
-		system, _ := testSystem(t, &systemRunner{})
-		err := system.Rollback(context.Background(), Plan{}, Journal{Phase: PhaseGuard})
+		runner := &systemRunner{}
+		system, _ := testSystem(t, runner)
+		err := system.Rollback(context.Background(), Plan{}, Journal{
+			Phase: PhaseGuard, Summary: Summary{Schema: "nftfw.setup-plan.v1"},
+		})
 		if err == nil || !strings.Contains(err.Error(), "BACKUP") {
 			t.Fatalf("missing rollback backup not reported: %v", err)
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("missing backup boundary changed system state: %v", runner.commands)
+		}
+	})
+
+	t.Run("invalid-plan", func(t *testing.T) {
+		runner := &systemRunner{}
+		system, _ := testSystem(t, runner)
+		err := system.Rollback(context.Background(), Plan{}, Journal{
+			Phase: PhaseGuard, BackupDir: t.TempDir(),
+		})
+		if err == nil || !strings.Contains(err.Error(), "PLAN") {
+			t.Fatalf("invalid rollback plan not reported: %v", err)
+		}
+		if len(runner.commands) != 0 {
+			t.Fatalf("invalid prepared-plan boundary changed system state: %v", runner.commands)
 		}
 	})
 
@@ -1385,6 +1554,7 @@ func TestRollbackReportsEachIncompleteRecoveryClass(t *testing.T) {
 		system, _ := testSystem(t, &systemRunner{})
 		err := system.Rollback(context.Background(), Plan{}, Journal{
 			Phase: PhaseInstall, BackupDir: filepath.Join(t.TempDir(), "missing"),
+			Summary: Summary{Schema: "nftfw.setup-plan.v1"},
 		})
 		if err == nil || !strings.Contains(err.Error(), "RESTORE") {
 			t.Fatalf("backup restore failure not reported: %v", err)

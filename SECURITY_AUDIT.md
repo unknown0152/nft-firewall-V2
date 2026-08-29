@@ -1,18 +1,18 @@
 # NFT Firewall V2 Security Audit
 
 Audit date: 2026-08-16, 2026-08-17, 2026-08-23, 2026-08-24,
-2026-08-25, 2026-08-26, and 2026-08-29 UTC. Scope: production Go, configuration/compiler,
+2026-08-25, 2026-08-26, 2026-08-29, and 2026-08-30 UTC. Scope: production Go, configuration/compiler,
 nftables ownership, Unix APIs, persistence/rollback, systemd, integrations,
 web, installers, tests, dependencies, Git history, and release contents.
 
 Current source disposition: **2.1.0 STAGE_R_CANDIDATE_ONLY**.
 The amended 2.1.0 source-only Stage E-R matrix passed; independent candidate
 comparison remains a post-freeze external gate. Successive privileged R2 runs
-hard-stopped safely on NFV2-049, NFV2-050/NFV2-051, and then NFV2-052. The
-latest run reached the bundled Docker lifecycle after passing the preceding
-disposable package, database, namespace, safe-apply, and chaos gates, but did
-not complete R2. A renewed R2 run, tag validation, publication, and deployment
-have not been executed. The findings
+hard-stopped safely on NFV2-049, NFV2-050/NFV2-051, NFV2-052, and then
+NFV2-053. The latest run reached the disposable managed first-setup scenario,
+where the setup transaction's own early journal was correctly treated as
+pre-existing NFTFW state. It did not complete R2. A renewed R2 run, tag
+validation, publication, and deployment have not been executed. The findings
 below through NFV2-030 record the tagged 2.0.1 audit history; NFV2-031 through
 NFV2-041 record the accepted 2.0.2/2.0.3 release work; NFV2-042 onward records
 2.1.0 source work.
@@ -92,6 +92,7 @@ and post-tag gates.
 | NFV2-050 | Clean Debian 13 returns valid empty JSON plus status 2 when the reserved route table does not yet exist, and preflight discarded the JSON before classification | MEDIUM | Query bounded numeric all-table JSON, select only exact table 51820 entries, and reject malformed identities, command failures, or populated ownership without interpreting stderr | CLOSED; absent/empty/populated/malformed/oversized/timeout/permission/command source proof PASS, renewed privileged R2 NOT EXECUTED |
 | NFV2-051 | Discovery recorded non-clean Docker state but clean-host validation and intent generation ignored it, allowing automatic ownership planning around retained workloads | HIGH | Observe running/all containers around topology discovery, refuse every stable non-empty or changing observation, retain eligible empty custom bridges, and repeat clean/topology validation immediately before ownership publication | CLOSED; empty/custom/running/retained/race/redaction/post-plan source proof PASS, renewed privileged R2 NOT EXECUTED |
 | NFV2-052 | The managed dynamic bridge projector required `docker:<network>` provenance for legacy v2.0.3 static advanced Docker entries, rejecting a valid unchanged historical interface-name identity | HIGH | Split projection into non-crossing modes: static entries require an unchanged bridge and exact tuple while retaining their historical identity/ID; dynamic entries require exact `docker:<network>` provenance and alone may rebind | CLOSED; unit/runtime/bundled-fixture source proof PASS, renewed privileged R2 NOT EXECUTED |
+| NFV2-053 | Managed first setup published its transaction journal before clean-host discovery, so discovery classified the transaction's own journal as pre-existing NFTFW state and rollback then lacked a prepared plan | HIGH | Complete read-only preparation before journal publication; write the prepared summary at the durable pre-mutation boundary; return preparation/initial-write failures without rollback; terminalize inspect/incomplete-backup interruption without touching services; require a valid prepared summary and durable backup before guard-or-later rollback can touch services | CLOSED; engine plus real-system ordering, refusal, redaction, initial-write, backup-boundary, expiry, phase-failure, and exact-rollback source proof PASS; renewed privileged R2 NOT EXECUTED |
 
 ## Adversarial review areas
 
@@ -115,6 +116,7 @@ and post-tag gates.
 | Managed Docker | Clean-host setup refuses running or retained workloads; Docker keeps all five packet-mutation settings false; NFTFW alone owns IPv4 forwarding, container policy/NAT, dynamic bridge binding, and the narrow local socket handoff |
 | Legacy Docker compatibility | Static advanced entries retain their exact bridge, tuple, historical interface-name provenance, and ledger ID; they never enter the managed rebind branch |
 | Adoption planner | Dry-run-only component has no writer/mutation backend; double observation, exact state/provenance verification, bounded fixed output, and untrusted-error redaction are source-tested |
+| Managed setup boundary | Profile/discovery/plan complete before journal creation; initial journal contains the prepared summary; pre-backup interruption changes no protected state; guard-or-later recovery requires a valid prepared summary, durable backup, and exact phase record before touching services |
 
 ## Accepted residual risks
 

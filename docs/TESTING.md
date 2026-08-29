@@ -38,6 +38,16 @@ and verify mode `0644` before asserting refusal. The full unprivileged suite is
 also rerun under `umask 0077`; no security refusal fixture may depend on the
 invoking shell's ambient mask.
 
+Managed setup transaction tests use both a phase-injectable executor and the
+real setup `Engine` plus `System`. They prove direct first setup and dry-run
+followed by first setup discover the clean host before a journal exists, the
+initial journal contains the prepared summary, and preparation or initial
+journal publication failures execute no mutation or rollback. An expired
+pre-mutation journal is terminalized without invoking system rollback, while
+backup-complete guard through commit failures retain exact rollback and
+post-commit failures retain forward recovery. The disposable R2 matrix repeats
+the real process-death, timeout, idempotent-rerun, Docker, and reboot cases.
+
 The Stage R runner checks package nonactivation, the early/ready/rollback
 dependency graph, packaged CLI contracts, release-candidate metadata, and
 immutable v2.0.1 expected-red defects without installing or starting anything.

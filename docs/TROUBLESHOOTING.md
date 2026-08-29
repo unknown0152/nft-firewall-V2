@@ -8,6 +8,12 @@ Run the dry-run again and record the bounded error code:
 sudo nftfw setup --vpn /path/to/profile.conf --dry-run
 ```
 
+Profile/discovery/route/Docker refusals happen before the setup journal and
+before protected mutation. Correct the reported condition and rerun the
+dry-run; no rollback is required. `SETUP_JOURNAL_WRITE_FAILED` also means the
+mutation pipeline never started, but the journal path and its parent
+permissions must be repaired before retrying.
+
 Do not disable a firewall manager, delete state, flush nftables, or remove
 routes to bypass a refusal. Confirm the host is in `SUPPORTED-PLATFORMS.md`.
 
@@ -18,6 +24,12 @@ sudo nftfw setup status
 sudo nftfw setup rollback
 sudo journalctl -u nftfw-setup-rollback.service -u nftfwd
 ```
+
+Do not delete a journal to bypass
+`DISCOVERY_EXISTING_NFTFW_REQUIRES_ADOPT`. A genuine pre-existing journal is a
+recovery boundary. `inspect` or incomplete-`backup` state without a recorded
+backup is safely terminalized by `nftfw setup rollback`; guard-or-later state
+must have a verified backup and fails closed if it does not.
 
 The independent setup timer rolls back an expired pre-commit transaction.
 After a durable commit, recovery proceeds forward to the verified boot state.

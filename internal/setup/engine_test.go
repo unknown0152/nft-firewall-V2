@@ -3,6 +3,7 @@ package setup
 import (
 	"context"
 	"errors"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -11,14 +12,19 @@ import (
 
 type fakeExecutor struct {
 	calls               []string
+	events              *[]string
 	failAt              string
 	failCalls           map[string]bool
+	prepareErr          error
 	generationCommitted bool
 	commitInspectErr    error
 }
 
 func (f *fakeExecutor) call(name string) error {
 	f.calls = append(f.calls, name)
+	if f.events != nil {
+		*f.events = append(*f.events, name)
+	}
 	if f.failAt == name || f.failCalls[name] {
 		return errors.New("SETUP_INJECTED_FAILURE")
 	}
@@ -26,7 +32,11 @@ func (f *fakeExecutor) call(name string) error {
 }
 
 func (f *fakeExecutor) Prepare(context.Context, string) (Plan, error) {
-	return Plan{Summary: Summary{Schema: "nftfw.setup-plan.v1"}}, f.call("prepare")
+	err := f.call("prepare")
+	if f.prepareErr != nil {
+		err = f.prepareErr
+	}
+	return Plan{Summary: Summary{Schema: "nftfw.setup-plan.v1"}}, err
 }
 func (f *fakeExecutor) Backup(context.Context, Plan) (string, error) {
 	return "/backup", f.call("backup")
@@ -54,9 +64,37 @@ func (f *fakeExecutor) GenerationCommitted(context.Context, uint64) (bool, error
 	return f.generationCommitted, f.commitInspectErr
 }
 
+type recordingJournal struct {
+	store      FileJournal
+	events     *[]string
+	failWrites int
+	writes     int
+	last       Journal
+}
+
+func (r *recordingJournal) Write(journal Journal) error {
+	r.writes++
+	r.last = journal
+	if r.events != nil {
+		*r.events = append(*r.events, "journal:"+string(journal.Phase))
+	}
+	if r.failWrites == r.writes {
+		return errors.New("injected journal failure")
+	}
+	return r.store.Write(journal)
+}
+
+func (r *recordingJournal) Read() (Journal, error) {
+	return r.store.Read()
+}
+
 func TestRunCompletesInExactOrder(t *testing.T) {
-	executor := &fakeExecutor{}
-	journal := FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")}
+	events := []string{}
+	executor := &fakeExecutor{events: &events}
+	journal := &recordingJournal{
+		store:  FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")},
+		events: &events,
+	}
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	engine := Engine{
 		Executor: executor, Journal: journal, Now: func() time.Time {
@@ -72,6 +110,9 @@ func TestRunCompletesInExactOrder(t *testing.T) {
 	if strings.Join(executor.calls, ",") != want {
 		t.Fatalf("calls=%v want=%s", executor.calls, want)
 	}
+	if len(events) < 2 || events[0] != "prepare" || events[1] != "journal:inspect" {
+		t.Fatalf("preparation did not precede initial journal publication: %v", events)
+	}
 	final, err := journal.Read()
 	if err != nil {
 		t.Fatal(err)
@@ -79,6 +120,87 @@ func TestRunCompletesInExactOrder(t *testing.T) {
 	if final.Status != "complete" || final.Phase != PhaseComplete || final.Generation != 7 ||
 		final.BackupDir != "/backup" {
 		t.Fatalf("unexpected final journal: %#v", final)
+	}
+}
+
+func TestPreparationFailureDoesNotJournalOrRollback(t *testing.T) {
+	for _, test := range []struct {
+		name string
+		err  error
+		want string
+	}{
+		{name: "bounded", err: errors.New("DISCOVERY_COMPETING_FIREWALL"), want: "DISCOVERY_COMPETING_FIREWALL"},
+		{name: "redacted", err: errors.New("provider secret was invalid"), want: "SETUP_FAILED"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			path := filepath.Join(t.TempDir(), "journal.json")
+			executor := &fakeExecutor{prepareErr: test.err}
+			_, err := (Engine{
+				Executor: executor, Journal: FileJournal{Path: path},
+			}).Run(context.Background(), "/vpn.conf")
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("unexpected preparation error: %v", err)
+			}
+			if strings.Join(executor.calls, ",") != "prepare" {
+				t.Fatalf("preparation failure entered mutation or rollback: %v", executor.calls)
+			}
+			if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("preparation failure published a journal: %v", err)
+			}
+		})
+	}
+}
+
+func TestInvalidPreparedPlanDoesNotJournalOrRollback(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "journal.json")
+	executor := &fakeExecutor{}
+	executor.prepareErr = nil
+	// Override the fake's otherwise valid summary through a narrow adapter.
+	invalid := invalidPlanExecutor{fakeExecutor: executor}
+	_, err := (Engine{Executor: invalid, Journal: FileJournal{Path: path}}).
+		Run(context.Background(), "/vpn.conf")
+	if err == nil || err.Error() != "SETUP_PLAN_INVALID" {
+		t.Fatalf("unexpected invalid-plan error: %v", err)
+	}
+	if strings.Join(executor.calls, ",") != "prepare" {
+		t.Fatalf("invalid plan entered mutation or rollback: %v", executor.calls)
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("invalid plan published a journal: %v", err)
+	}
+}
+
+type invalidPlanExecutor struct {
+	*fakeExecutor
+}
+
+func (i invalidPlanExecutor) Prepare(ctx context.Context, path string) (Plan, error) {
+	plan, err := i.fakeExecutor.Prepare(ctx, path)
+	plan.Summary.Schema = "wrong"
+	return plan, err
+}
+
+func TestInitialJournalFailureDoesNotMutateOrRollback(t *testing.T) {
+	events := []string{}
+	executor := &fakeExecutor{events: &events}
+	journal := &recordingJournal{
+		store:      FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")},
+		events:     &events,
+		failWrites: 1,
+	}
+	_, err := (Engine{Executor: executor, Journal: journal}).
+		Run(context.Background(), "/vpn.conf")
+	if err == nil || err.Error() != "SETUP_JOURNAL_WRITE_FAILED" {
+		t.Fatalf("unexpected initial journal error: %v", err)
+	}
+	if strings.Join(executor.calls, ",") != "prepare" {
+		t.Fatalf("journal failure entered mutation or rollback: %v", executor.calls)
+	}
+	if strings.Join(events, ",") != "prepare,journal:inspect" {
+		t.Fatalf("unexpected initial journal boundary: %v", events)
+	}
+	if journal.last.Summary.Schema != "nftfw.setup-plan.v1" {
+		t.Fatalf("initial journal omitted the prepared summary: %#v", journal.last)
 	}
 }
 
@@ -106,6 +228,26 @@ func TestFailureAlwaysRollsBack(t *testing.T) {
 	}
 }
 
+func TestBackupFailureStopsBeforeProtectedMutationWithoutRollback(t *testing.T) {
+	executor := &fakeExecutor{failAt: "backup"}
+	journal := FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")}
+	_, err := (Engine{
+		Executor: executor, Journal: journal,
+		NewID: func() string { return "backup-failure" },
+	}).Run(context.Background(), "/vpn.conf")
+	if err == nil || err.Error() != "SETUP_INJECTED_FAILURE" {
+		t.Fatalf("unexpected backup failure: %v", err)
+	}
+	if strings.Join(executor.calls, ",") != "prepare,backup" {
+		t.Fatalf("backup failure entered protected mutation or rollback: %v", executor.calls)
+	}
+	final, readErr := journal.Read()
+	if readErr != nil || final.Status != "rolled_back" || final.Phase != PhaseFailed ||
+		final.BackupDir != "" {
+		t.Fatalf("unexpected pre-mutation journal: %#v %v", final, readErr)
+	}
+}
+
 func TestExpiredJournalTriggersIndependentRollback(t *testing.T) {
 	executor := &fakeExecutor{}
 	path := filepath.Join(t.TempDir(), "journal.json")
@@ -125,6 +267,33 @@ func TestExpiredJournalTriggersIndependentRollback(t *testing.T) {
 	}
 	if executor.calls[len(executor.calls)-1] != "rollback" {
 		t.Fatalf("expired setup did not roll back: %v", executor.calls)
+	}
+}
+
+func TestExpiredPreMutationJournalDoesNotInvokeRollback(t *testing.T) {
+	executor := &fakeExecutor{}
+	path := filepath.Join(t.TempDir(), "journal.json")
+	store := FileJournal{Path: path}
+	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
+	if err := store.Write(Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "pre-mutation",
+		Phase: PhaseInspect, Status: "running", StartedAt: now.Add(-time.Hour),
+		UpdatedAt: now.Add(-time.Hour), Deadline: now.Add(-time.Minute),
+		Summary: Summary{Schema: "nftfw.setup-plan.v1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	engine := Engine{Executor: executor, Journal: store, Now: func() time.Time { return now }}
+	terminalized, err := engine.RollbackExpired(context.Background(), Plan{})
+	if !terminalized || err == nil || err.Error() != "SETUP_DEADLINE_EXPIRED" {
+		t.Fatalf("unexpected pre-mutation expiry result: terminalized=%t err=%v", terminalized, err)
+	}
+	if len(executor.calls) != 0 {
+		t.Fatalf("pre-mutation expiry invoked executor rollback: %v", executor.calls)
+	}
+	final, readErr := store.Read()
+	if readErr != nil || final.Status != "rolled_back" || final.Phase != PhaseFailed {
+		t.Fatalf("pre-mutation expiry not terminal: %#v %v", final, readErr)
 	}
 }
 
@@ -226,9 +395,9 @@ func TestDryRunAndEngineInputValidation(t *testing.T) {
 	}
 }
 
-func TestEveryPreCommitPhaseFailureRollsBack(t *testing.T) {
+func TestEveryMutationPhaseFailureRollsBack(t *testing.T) {
 	for _, phase := range []string{
-		"prepare", "backup", "guard", "install", "docker", "runtime", "apply", "tunnel", "validate", "commit",
+		"guard", "install", "docker", "runtime", "apply", "tunnel", "validate", "commit",
 	} {
 		t.Run(phase, func(t *testing.T) {
 			executor := &fakeExecutor{failAt: phase}
