@@ -13,12 +13,14 @@ import (
 	"net/netip"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
+	"github.com/unknown0152/nft-firewall-v2/internal/config"
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
 	"github.com/unknown0152/nft-firewall-v2/internal/intent"
 	"github.com/unknown0152/nft-firewall-v2/internal/operatorbackup"
@@ -29,20 +31,22 @@ import (
 )
 
 var (
-	managedIntentPath  = "/etc/nftfw/intent.toml"
-	managedConfigPath  = "/etc/nftfw/nftfw.toml"
-	managedVPNPath     = "/etc/wireguard/nftfw0.conf"
-	setupJournalPath   = "/var/lib/nftfw/setup/journal.json"
-	setupLockPath      = "/run/nftfw/setup.lock"
-	managedStatusSock  = "/run/nftfw/status.sock"
-	managedControlSock = "/run/nftfw/control.sock"
-	managedStateDB     = "/var/lib/nftfw/generation-state/state.db"
-	managedLedger      = "/var/lib/nftfw/provenance-ledger.db"
-	managedGenerations = "/var/lib/nftfw/generations"
-	managedEnforcement = "/var/lib/nftfw/enforcement-enabled"
-	managedSysctl      = "/etc/sysctl.d/90-nftfw-managed.conf"
-	managedStateRoot   = "/var/lib/nftfw"
-	managedRuntimeRoot = "/run/nftfw"
+	managedIntentPath   = "/etc/nftfw/intent.toml"
+	managedConfigPath   = "/etc/nftfw/nftfw.toml"
+	managedVPNPath      = "/etc/wireguard/nftfw0.conf"
+	setupJournalPath    = "/var/lib/nftfw/setup/journal.json"
+	setupLockPath       = "/run/nftfw/setup.lock"
+	managedStatusSock   = "/run/nftfw/status.sock"
+	managedControlSock  = "/run/nftfw/control.sock"
+	managedStateDB      = "/var/lib/nftfw/generation-state/state.db"
+	managedLedger       = "/var/lib/nftfw/provenance-ledger.db"
+	managedGenerations  = "/var/lib/nftfw/generations"
+	managedEnforcement  = "/var/lib/nftfw/enforcement-enabled"
+	managedSysctl       = "/etc/sysctl.d/90-nftfw-managed.conf"
+	managedDockerDaemon = "/etc/docker/daemon.json"
+	managedDockerDropIn = "/etc/systemd/system/nftfwd.service.d/docker-access.conf"
+	managedStateRoot    = "/var/lib/nftfw"
+	managedRuntimeRoot  = "/run/nftfw"
 
 	managedEUID     = os.Geteuid
 	managedAPICall  = api.Call
@@ -108,6 +112,11 @@ func setupCommand(args []string) error {
 		return nil
 	}
 	system := &managedsetup.System{}
+	if *yes {
+		system.ConfirmDockerRestart = func(managedsetup.Summary) error { return nil }
+	} else {
+		system.ConfirmDockerRestart = confirmDockerRestart
+	}
 	engine := managedsetup.Engine{
 		Executor: system, Journal: managedsetup.FileJournal{Path: setupJournalPath},
 		Timeout: 15 * time.Minute,
@@ -306,8 +315,9 @@ func managedConfigShow(args []string) error {
 		"lan_allow_tcp": value.LANAllowTCP, "lan_allow_udp": value.LANAllowUDP,
 		"public_tcp": value.PublicTCP, "public_udp": value.PublicUDP,
 		"ipv6_mode": "disabled", "resolver_mode": value.ResolverMode,
-		"docker_enabled": value.DockerEnabled,
-		"zone_count":     len(generated.Zones), "policy_count": len(generated.Policies),
+		"docker_enabled":  value.DockerEnabled,
+		"docker_networks": dockerNetworkNames(value.DockerNetworks),
+		"zone_count":      len(generated.Zones), "policy_count": len(generated.Policies),
 	}
 	if has(args, "--json") {
 		return printJSONOr(result, true)
@@ -322,6 +332,10 @@ func managedConfigShow(args []string) error {
 		displayPorts(value.PublicTCP), displayPorts(value.PublicUDP))
 	fmt.Printf("IPv6: disabled\nResolver: %s\nDocker integration: %t\n",
 		value.ResolverMode, value.DockerEnabled)
+	if value.DockerEnabled {
+		fmt.Printf("Docker networks: %s\nIPv4 forwarding owner: NFTFW\n",
+			strings.Join(dockerNetworkNames(value.DockerNetworks), ", "))
+	}
 	fmt.Printf("Generated policy: %d zones, %d policies\n", len(generated.Zones), len(generated.Policies))
 	return nil
 }
@@ -367,11 +381,13 @@ func managedBackupCommand(args []string) error {
 		creator := operatorbackup.Creator{
 			Paths: operatorbackup.Paths{
 				Config: managedConfigPath, Intent: managedIntentPath, VPN: managedVPNPath,
-				Sysctl:      managedSysctl,
-				StateDB:     managedStateDB,
-				Ledger:      managedLedger,
-				Generations: managedGenerations,
-				Enforcement: managedEnforcement,
+				Sysctl:       managedSysctl,
+				StateDB:      managedStateDB,
+				Ledger:       managedLedger,
+				Generations:  managedGenerations,
+				Enforcement:  managedEnforcement,
+				DockerDaemon: managedDockerDaemon,
+				DockerDropIn: managedDockerDropIn,
 			},
 			LockDir: managedRuntimeRoot,
 		}
@@ -731,7 +747,9 @@ func existingManagedSetup(ctx context.Context, sourceVPN string) (bool, manageds
 		ManagementTCP: append([]int(nil), value.ManagementTCP...),
 		PublicTCP:     append([]int(nil), value.PublicTCP...),
 		PublicUDP:     append([]int(nil), value.PublicUDP...),
-		IPv6Mode:      "disabled", DockerMode: dockerMode, ResolverMode: value.ResolverMode,
+		IPv6Mode:      "disabled", DockerMode: dockerMode,
+		DockerNetworks: dockerNetworkNames(value.DockerNetworks),
+		ResolverMode:   value.ResolverMode,
 	}, nil
 }
 
@@ -772,17 +790,39 @@ func acquireSetupLock() (func(), error) {
 }
 
 func confirmSetup() (bool, error) {
+	return confirmPrompt("Apply this managed VPN-only firewall plan? [y/N] ")
+}
+
+func confirmPrompt(prompt string) (bool, error) {
 	info, err := os.Stdin.Stat()
 	if err != nil || info.Mode()&os.ModeCharDevice == 0 {
 		return false, errors.New("SETUP_CONFIRMATION_REQUIRED_USE_YES")
 	}
-	fmt.Print("Apply this managed VPN-only firewall plan? [y/N] ")
+	fmt.Print(prompt)
 	line, err := bufio.NewReader(os.Stdin).ReadString('\n')
 	if err != nil {
 		return false, errors.New("SETUP_CONFIRMATION_FAILED")
 	}
 	line = strings.ToLower(strings.TrimSpace(line))
 	return line == "y" || line == "yes", nil
+}
+
+func confirmDockerRestart(summary managedsetup.Summary) error {
+	if !summary.DockerRestart {
+		return nil
+	}
+	fmt.Printf("Docker must restart once to transfer IPv4 forwarding and firewall ownership to NFTFW.\n")
+	fmt.Printf("Managed Docker networks: %s\n", strings.Join(summary.DockerNetworks, ", "))
+	confirmed, err := confirmPrompt(
+		"Restart Docker now with automatic rollback on failure? [y/N] ",
+	)
+	if err != nil {
+		return err
+	}
+	if !confirmed {
+		return errors.New("SETUP_DOCKER_RESTART_CANCELED")
+	}
+	return nil
 }
 
 func printSetupSummary(summary managedsetup.Summary) {
@@ -792,6 +832,13 @@ func printSetupSummary(summary managedsetup.Summary) {
 	if summary.SourceModeWarning {
 		fmt.Println("Warning: the source VPN file is world-readable; the managed copy will be root-only mode 0600.")
 	}
+	if summary.DockerMode == "enabled" {
+		fmt.Printf("Docker networks: %s\n", strings.Join(summary.DockerNetworks, ", "))
+		fmt.Println("Docker IPv4 forwarding: NFTFW OWNED")
+		if summary.DockerRestart {
+			fmt.Println("Docker restart required: YES")
+		}
+	}
 }
 
 func printProtectedSummary(summary managedsetup.Summary, idempotent bool) {
@@ -800,6 +847,11 @@ func printProtectedSummary(summary managedsetup.Summary, idempotent bool) {
 	fmt.Println("VPN: HEALTHY")
 	fmt.Println("IPv4 Internet: VPN ONLY")
 	fmt.Println("IPv6: DISABLED")
+	if summary.DockerMode == "enabled" {
+		fmt.Printf("Docker: PROTECTED (%d networks, IPv4 forwarding NFTFW-owned)\n", len(summary.DockerNetworks))
+	} else {
+		fmt.Println("Docker: DISABLED")
+	}
 	if len(summary.PublicTCP) == 0 && len(summary.PublicUDP) == 0 {
 		fmt.Println("Public exposure: NONE")
 	} else {
@@ -837,4 +889,13 @@ func displayPorts(values []int) string {
 		parts[i] = strconv.Itoa(value)
 	}
 	return strings.Join(parts, ",")
+}
+
+func dockerNetworkNames(networks []config.DockerNetwork) []string {
+	result := make([]string, len(networks))
+	for index, network := range networks {
+		result[index] = network.Name
+	}
+	sort.Strings(result)
+	return result
 }

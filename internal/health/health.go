@@ -62,6 +62,9 @@ type Snapshot struct {
 	LANManagementTCP       []int                    `json:"lan_management_tcp,omitempty"`
 	LANAllowTCP            []int                    `json:"lan_allow_tcp,omitempty"`
 	LANAllowUDP            []int                    `json:"lan_allow_udp,omitempty"`
+	DockerEnabled          bool                     `json:"docker_enabled"`
+	DockerNetworkCount     int                      `json:"docker_network_count"`
+	IPv4Forwarding         bool                     `json:"ipv4_forwarding"`
 }
 
 type ManagedProjection struct {
@@ -71,6 +74,9 @@ type ManagedProjection struct {
 	LANManagementTCP []int
 	LANAllowTCP      []int
 	LANAllowUDP      []int
+	DockerEnabled    bool
+	DockerNetworks   int
+	IPv4Forwarding   bool
 }
 
 type Provider struct {
@@ -108,12 +114,19 @@ func (p Provider) Snapshot(ctx context.Context) (Snapshot, error) {
 		s.LANManagementTCP = append([]int(nil), p.Managed.LANManagementTCP...)
 		s.LANAllowTCP = append([]int(nil), p.Managed.LANAllowTCP...)
 		s.LANAllowUDP = append([]int(nil), p.Managed.LANAllowUDP...)
+		s.DockerEnabled = p.Managed.DockerEnabled
+		s.DockerNetworkCount = p.Managed.DockerNetworks
+		s.IPv4Forwarding = p.Managed.IPv4Forwarding
 	}
 	degrade := func(reason string) {
 		s.Status = "DEGRADED"
 		if s.Reason == "" {
 			s.Reason = reason
 		}
+	}
+	if p.Managed != nil && p.Managed.DockerEnabled &&
+		(!p.Managed.IPv4Forwarding || p.Managed.DockerNetworks == 0) {
+		degrade("managed Docker forwarding is not ready")
 	}
 	if err := p.Store.QuickCheck(ctx); err != nil {
 		s.Database = "degraded"

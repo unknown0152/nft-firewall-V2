@@ -2,10 +2,10 @@
 
 Source disposition: **STAGE_R_CANDIDATE_ONLY**
 
-Validation date: 2026-08-26
+Validation date: 2026-08-29
 
-Source base:
-`da9c611f378d3988c4011dbec7cbba210ab274c5`
+Reopened source baseline:
+`5e02c0a4a9f14cd5d5d9077a951eac7a77d1ecf1`
 
 This tracked report is the pre-build source snapshot. The later frozen commit,
 candidate build evidence, candidate comparison, R2 evidence, tag, and any
@@ -24,15 +24,15 @@ publication decision must remain external and checksummed.
 | Staticcheck v0.8.1 | PASS |
 | govulncheck v1.7.0 | PASS, no reachable vulnerabilities |
 | gosec v2.29.0 reviewed profile | PASS |
-| Nine bounded fuzz targets | PASS |
+| Ten bounded fuzz targets | PASS |
 | ShellCheck | PASS |
 | Stage R source/package/systemd contracts | PASS |
 | Staged systemd verification | PASS |
-| Overall statement coverage | PASS, at least 75% |
-| `internal/setup` coverage | PASS, at least 90% |
-| `internal/wgconfig` coverage | PASS, at least 90% |
-| `internal/intent` coverage | PASS, at least 90% |
-| `internal/routing` coverage | PASS, at least 90% |
+| Overall statement coverage | PASS, 75.6% |
+| `internal/setup` coverage | PASS, 90.0% |
+| `internal/wgconfig` coverage | PASS, 90.6% |
+| `internal/intent` coverage | PASS, 92.3% |
+| `internal/routing` coverage | PASS, 90.2% |
 
 ## Functional source coverage
 
@@ -42,6 +42,11 @@ publication decision must remain external and checksummed.
   ownership planning.
 - Setup journaling, verified backup, temporary guard, safe apply, commit,
   boot activation, idempotent rerun, and rollback/recovery boundaries.
+- Strict local Docker bridge discovery; semantic daemon JSON ownership;
+  container-zone/VPN-only policy; NFTFW-owned IPv4 forwarding; confirmed
+  restart only when required; topology/route revalidation; and exact rollback.
+- Stable Docker authorization provenance across a race-consistent full-ID and
+  Linux-bridge rebind, including transactional generation publication.
 - Managed `expose` and `lan` changes compiled from the newly published
   protected files rather than stale daemon memory.
 - Checksummed managed-change journal recovery for pre-apply, applied,
@@ -54,11 +59,13 @@ publication decision must remain external and checksummed.
 
 ## Performance source results
 
-The 10-sample report is generated outside this tracked snapshot. Smoke results
-on the reference NUC were inside the Amendment E budgets, including standard
-profile/config/compile paths, 10,000-policy compilation, canonical
-fingerprinting, SQLite status/backup, no-op reconciliation, status projection,
-and dashboard serving. Performance evidence is not privileged network proof.
+The 10-sample source matrix remained inside the Amendment E budgets on the
+reference NUC. Observed maxima included 0.006 ms provider parsing, 0.016 ms
+managed Docker config generation, 0.032 ms strict daemon merge, 0.014 ms
+Docker topology projection, 0.078 ms standard compilation, 34.7 ms
+10,000-policy compilation, 0.022 ms canonical fingerprinting, 0.361 ms no-op
+reconciliation, and 0.001 ms dashboard status projection. Performance
+evidence is not privileged network proof.
 
 ## Not executed under Stage E-R
 
@@ -69,7 +76,7 @@ and dashboard serving. Performance evidence is not privileged network proof.
 | Debian install/upgrade/remove in disposable VMs | NOT EXECUTED |
 | Privileged namespace/network/leak matrix | NOT EXECUTED |
 | Clean-server setup and reboot matrix | NOT EXECUTED |
-| Docker ownership handoff | NOT EXECUTED |
+| Privileged Docker ownership/traffic/rollback matrix | NOT EXECUTED |
 | Real-provider VPN test | NOT EXECUTED |
 | Local release tag | NOT CREATED |
 | GitHub publication | NOT AUTHORIZED |

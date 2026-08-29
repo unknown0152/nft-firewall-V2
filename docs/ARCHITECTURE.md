@@ -2,10 +2,11 @@
 
 This describes the 2.1.0 design, which preserves the accepted 2.0.3
 enforcement core and adds managed setup, import, routing, and intent. Its
-source invariants and unprivileged package contracts passed Stage E-R. Its
-privileged runtime, package lifecycle, reboot recovery, Docker integration,
-and real-provider tunnel behavior still require the separately approved
-2.1.0 R2 matrix described in `TEST_RESULTS.md`.
+source invariants and unprivileged package contracts, including the August 29
+managed-Docker reopening, are Stage E-R scope. Privileged runtime, package
+lifecycle, reboot recovery, Docker integration, and real-provider tunnel
+behavior still require the separately approved 2.1.0 R2 matrix described in
+`TEST_RESULTS.md`.
 
 ## Process and privilege model
 
@@ -44,8 +45,9 @@ and integration metadata.
 
 Effective state is a pure combination of desired policy and explicit observed
 inputs: active block prefixes, endpoint sets, and Docker networks matching the
-configured stable name/driver/bridge/subnet/gateway tuple. Compilation returns
-an artifact without applying it.
+configured stable name/driver/subnet/gateway identity plus the current
+race-consistent bridge binding. Compilation returns an artifact without
+applying it.
 
 The high conntrack-mark byte is reserved for immutable ingress provenance.
 Original-direction input and forward flows receive a configured interface ID
@@ -74,11 +76,15 @@ validates both its internal allowlist and `nft --check --file` before running
 `nft --file`. A global ruleset flush is rejected even if a caller attempts to
 supply one.
 
-Runtime claim, endpoint, and Docker sets are updated atomically without
-rebuilding unrelated policy. Temporary trusted sets use nftables kernel
-timeouts and are reconstructed from still-valid SQLite leases after daemon
-restart. Trusted elements are intentionally absent from committed snapshots,
-preventing expired access from replaying at boot.
+Runtime claim, endpoint, and unchanged Docker subnet sets are updated
+atomically without rebuilding unrelated policy. A stable Docker tuple that is
+recreated on a new Linux bridge requires a new committed generation because
+the interface-and-prefix guard and provenance rules are bridge-bound. Managed
+mode applies that rebind, persists the regenerated configuration, and records
+the integration healthy only after both steps succeed. Temporary trusted sets
+use nftables kernel timeouts and are reconstructed from still-valid SQLite
+leases after daemon restart. Trusted elements are intentionally absent from
+committed snapshots, preventing expired access from replaying at boot.
 
 Generation restoration and mutable runtime-set restoration are deliberately
 separate operations. They run under the same shared NFTFW mutation lock, but
@@ -141,6 +147,34 @@ socket. It either verifies and keeps the new files or rolls back the exact
 generation and restores the exact old bytes. This timer does not replace the
 daemon-independent pending-generation timer; the two recover different
 durable resources.
+
+## Managed setup and Docker ownership
+
+Managed setup is a phase-recorded transaction:
+
+```text
+inspect -> checksum backup -> temporary guard -> install/check candidate
+  -> confirmed Docker ownership restart when required
+  -> daemon start -> safe apply -> tunnel -> validation -> commit -> boot
+```
+
+Discovery queries only the local Docker socket and stores no generated Docker
+network ID as durable authorization. Managed intent contains the network name,
+bridge driver, canonical IPv4 subnet/gateway pairs, dynamic bridge binding,
+and stable provenance name `docker:<network>`.
+
+The transaction strictly merges `/etc/docker/daemon.json`, preserving
+unrelated keys while setting Docker's five firewall/forwarding/masquerade/
+proxy mutation controls to false. NFTFW separately owns persistent and runtime
+`net.ipv4.ip_forward = 1`, the forwarding policy, VPN-only NAT, and the exact
+daemon socket sandbox exception. The setup guard drops forwarded traffic that
+does not leave through the managed VPN, so the forwarding sysctl and Docker
+restart cannot create a physical-uplink window before the committed policy.
+
+Setup backup payloads are checksummed. Rollback restores exact files, sysctls,
+unit state, Docker state, and the prior firewall generation before removing
+the guard. An unchanged compliant daemon configuration is an idempotent
+no-restart path.
 
 ## WireGuard
 

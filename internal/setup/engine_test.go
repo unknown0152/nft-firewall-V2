@@ -31,8 +31,11 @@ func (f *fakeExecutor) Prepare(context.Context, string) (Plan, error) {
 func (f *fakeExecutor) Backup(context.Context, Plan) (string, error) {
 	return "/backup", f.call("backup")
 }
-func (f *fakeExecutor) StartGuard(context.Context, Plan) error   { return f.call("guard") }
-func (f *fakeExecutor) Install(context.Context, Plan) error      { return f.call("install") }
+func (f *fakeExecutor) StartGuard(context.Context, Plan) error { return f.call("guard") }
+func (f *fakeExecutor) Install(context.Context, Plan) error    { return f.call("install") }
+func (f *fakeExecutor) ConfigureDocker(context.Context, Plan) error {
+	return f.call("docker")
+}
 func (f *fakeExecutor) StartRuntime(context.Context, Plan) error { return f.call("runtime") }
 func (f *fakeExecutor) ApplySafe(context.Context, Plan) (uint64, error) {
 	return 7, f.call("apply")
@@ -65,7 +68,7 @@ func TestRunCompletesInExactOrder(t *testing.T) {
 	if _, err := engine.Run(context.Background(), "/vpn.conf"); err != nil {
 		t.Fatal(err)
 	}
-	want := "prepare,backup,guard,install,runtime,apply,tunnel,validate,commit,boot,finalize"
+	want := "prepare,backup,guard,install,docker,runtime,apply,tunnel,validate,commit,boot,finalize"
 	if strings.Join(executor.calls, ",") != want {
 		t.Fatalf("calls=%v want=%s", executor.calls, want)
 	}
@@ -225,7 +228,7 @@ func TestDryRunAndEngineInputValidation(t *testing.T) {
 
 func TestEveryPreCommitPhaseFailureRollsBack(t *testing.T) {
 	for _, phase := range []string{
-		"prepare", "backup", "guard", "install", "runtime", "apply", "tunnel", "validate", "commit",
+		"prepare", "backup", "guard", "install", "docker", "runtime", "apply", "tunnel", "validate", "commit",
 	} {
 		t.Run(phase, func(t *testing.T) {
 			executor := &fakeExecutor{failAt: phase}

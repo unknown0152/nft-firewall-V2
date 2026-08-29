@@ -22,6 +22,7 @@ staticcheck ./...
 govulncheck ./...
 gosec -quiet -exclude-generated -exclude=G104,G204,G304,G302 ./...
 ./tests/packaging/systemd_preflight.sh amd64
+bash ./tests/packaging/docker_handoff.sh
 bash ./tests/stage-r/run.sh
 ```
 
@@ -36,11 +37,12 @@ immutable v2.0.1 expected-red defects without installing or starting anything.
 Unit tests cover strict config, compiler invariants, owned transaction
 validation, JSON fingerprints, API size/schema/peer rules, state migrations,
 backup/corruption, provenance union, endpoint rollover/failure, Docker
-observation, feed parsing, explanation, safe apply, and rollback.
+daemon merge/ownership, topology adoption, forwarding, bridge recreation,
+uninstall handoff, feed parsing, explanation, safe apply, and rollback.
 
 Fuzz targets cover config decoding, API decoding, policy explanation, runtime
 prefix compilation, nft transaction validation/fingerprinting, claim
-validation, and feed parsing. Example bounded run:
+validation, strict Docker daemon JSON, and feed parsing. Example bounded run:
 
 ```bash
 go test ./internal/config -run '^$' -fuzz FuzzDecode -fuzztime 5s
@@ -68,6 +70,12 @@ actual compiler/backend output and tests:
 - tunnel removal with physical-link packet capture;
 - already-established TCP and UDP traffic after tunnel removal;
 - host/container IPv6 tunnel loss and active-flow capture.
+
+The Amendment F extension additionally requires disposable-VM proof for
+Docker daemon ownership transfer, built-in and multiple Compose bridges,
+equal host/container VPN exit identity, Docker/network recreation, forwarding
+sysctl loss, Docker restart with the VPN down, and exact rollback at every
+Docker handoff phase.
 
 Success includes exactly:
 

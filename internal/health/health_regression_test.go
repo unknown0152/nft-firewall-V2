@@ -128,6 +128,22 @@ func TestSnapshotDegradesWhenConfiguredIntegrationHasNoState(t *testing.T) {
 	}
 }
 
+func TestSnapshotDegradesWhenManagedDockerForwardingIsDisabled(t *testing.T) {
+	_, provider, _ := newHealthyProvider(t)
+	provider.Managed = &ManagedProjection{
+		Tunnel: true, DockerEnabled: true, DockerNetworks: 2, IPv4Forwarding: false,
+	}
+	snapshot, err := provider.Snapshot(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if snapshot.Status != "DEGRADED" || snapshot.IPv4Forwarding ||
+		snapshot.DockerNetworkCount != 2 ||
+		!strings.Contains(snapshot.Reason, "managed Docker forwarding is not ready") {
+		t.Fatalf("disabled managed forwarding was not degraded: %#v", snapshot)
+	}
+}
+
 func TestSnapshotRejectsWellFormedWrongGenerationChecksum(t *testing.T) {
 	ctx := context.Background()
 	store, provider, checksum := newHealthyProvider(t)

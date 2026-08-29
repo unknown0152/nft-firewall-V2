@@ -25,7 +25,7 @@ func expectedMediaNetwork() []config.DockerNetwork {
 }
 
 func inspectDocument(id, name, driver, bridge, subnetGatewayJSON string) string {
-	return fmt.Sprintf(`[{"Id":%q,"Name":%q,"Driver":%q,"Options":{"com.docker.network.bridge.name":%q},"IPAM":{"Config":[%s]}}]`, id, name, driver, bridge, subnetGatewayJSON)
+	return fmt.Sprintf(`[{"Id":%q,"Name":%q,"Driver":%q,"Internal":false,"EnableIPv6":true,"Options":{"com.docker.network.bridge.name":%q},"IPAM":{"Config":[%s]}}]`, id, name, driver, bridge, subnetGatewayJSON)
 }
 
 func writeDockerFixture(t *testing.T, list, inspect string, inspectExit int) string {
@@ -53,6 +53,23 @@ exit 98
 		t.Fatal(err)
 	}
 	return path
+}
+
+func observerWithDockerFixture(
+	t *testing.T, list, inspect string, inspectExit int, expected []config.DockerNetwork,
+) Observer {
+	t.Helper()
+	binary := writeDockerFixture(t, list, inspect, inspectExit)
+	return Observer{
+		DockerBinary: binary,
+		Expected:     expected,
+		Run: func(ctx context.Context, limit int64, name string, args ...string) ([]byte, error) {
+			if name == "ip" {
+				return []byte(`[{"ifname":"br-media"}]`), nil
+			}
+			return boundedOutput(ctx, limit, name, args...)
+		},
+	}
 }
 
 func TestObserverRequiresDockerFirewallOwnershipDisabled(t *testing.T) {
@@ -85,7 +102,7 @@ func TestObserverRequiresDockerFirewallOwnershipDisabled(t *testing.T) {
 func TestObserverReturnsExactDualStackStableTuple(t *testing.T) {
 	list := dockerIDOne + "\tmedia\tbridge"
 	inspect := inspectDocument(dockerIDOne, "media", "bridge", "br-media", `{"Subnet":"172.19.0.0/16","Gateway":"172.19.0.1"},{"Subnet":"fd00:19::/64","Gateway":"fd00:19::1"}`)
-	o := Observer{DockerBinary: writeDockerFixture(t, list, inspect, 0), Expected: expectedMediaNetwork()}
+	o := observerWithDockerFixture(t, list, inspect, 0, expectedMediaNetwork())
 	networks, err := o.Networks(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -98,7 +115,7 @@ func TestObserverReturnsExactDualStackStableTuple(t *testing.T) {
 func TestObserverAllowsChangedGeneratedIDForSameStableTuple(t *testing.T) {
 	list := dockerIDTwo + "\tmedia\tbridge"
 	inspect := inspectDocument(dockerIDTwo, "media", "bridge", "br-media", `{"Subnet":"172.19.0.0/16","Gateway":"172.19.0.1"},{"Subnet":"fd00:19::/64","Gateway":"fd00:19::1"}`)
-	o := Observer{DockerBinary: writeDockerFixture(t, list, inspect, 0), Expected: expectedMediaNetwork()}
+	o := observerWithDockerFixture(t, list, inspect, 0, expectedMediaNetwork())
 	networks, err := o.Networks(context.Background())
 	if err != nil || len(networks) != 2 || networks[0].ID != dockerIDTwo {
 		t.Fatalf("stable recreation rejected: networks=%#v err=%v", networks, err)
@@ -121,11 +138,15 @@ func TestObserverRejectsDriftAmbiguityAndInspectionRace(t *testing.T) {
 		{"bridge option drift", dockerIDOne + "\tmedia\tbridge", inspectDocument(dockerIDOne, "media", "bridge", "br-other", validIPAM), 0},
 		{"subnet drift", dockerIDOne + "\tmedia\tbridge", inspectDocument(dockerIDOne, "media", "bridge", "br-media", `{"Subnet":"172.20.0.0/16","Gateway":"172.20.0.1"},{"Subnet":"fd00:19::/64","Gateway":"fd00:19::1"}`), 0},
 		{"gateway drift", dockerIDOne + "\tmedia\tbridge", inspectDocument(dockerIDOne, "media", "bridge", "br-media", `{"Subnet":"172.19.0.0/16","Gateway":"172.19.0.2"},{"Subnet":"fd00:19::/64","Gateway":"fd00:19::1"}`), 0},
+		{"internal mode", dockerIDOne + "\tmedia\tbridge", strings.Replace(inspectDocument(dockerIDOne, "media", "bridge", "br-media", validIPAM), `"Internal":false`, `"Internal":true`, 1), 0},
+		{"IPv6 mode drift", dockerIDOne + "\tmedia\tbridge", strings.Replace(inspectDocument(dockerIDOne, "media", "bridge", "br-media", validIPAM), `"EnableIPv6":true`, `"EnableIPv6":false`, 1), 0},
 		{"inspect race", dockerIDOne + "\tmedia\tbridge", "", 1},
 	}
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			o := Observer{DockerBinary: writeDockerFixture(t, test.list, test.inspect, test.inspectExit), Expected: expectedMediaNetwork()}
+			o := observerWithDockerFixture(
+				t, test.list, test.inspect, test.inspectExit, expectedMediaNetwork(),
+			)
 			if _, err := o.Networks(context.Background()); err == nil {
 				t.Fatal("unsafe Docker observation accepted")
 			}

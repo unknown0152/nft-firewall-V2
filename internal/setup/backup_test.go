@@ -252,6 +252,34 @@ func TestRestoreRejectsMissingBackupPayloadAndUnsafeNewTarget(t *testing.T) {
 	}
 }
 
+func TestRestoreRejectsTamperedChecksummedPayload(t *testing.T) {
+	root := t.TempDir()
+	source := filepath.Join(root, "source")
+	if err := os.WriteFile(source, []byte("old"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	runner := &backupRunner{}
+	directory := filepath.Join(root, "backup")
+	manifest, err := createBackup(
+		context.Background(), runner, directory, []string{source}, nil, nil,
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if manifest.Files[0].SHA256 == "" {
+		t.Fatal("new setup backup omitted payload checksum")
+	}
+	if err := os.WriteFile(
+		filepath.Join(directory, manifest.Files[0].Backup), []byte("new"), 0o600,
+	); err != nil {
+		t.Fatal(err)
+	}
+	if err := restoreBackup(context.Background(), runner, directory); err == nil ||
+		err.Error() != "SETUP_BACKUP_RESTORE_CHECKSUM_FAILED" {
+		t.Fatalf("tampered backup payload accepted: %v", err)
+	}
+}
+
 func TestMoreAtomicAndCopyFailures(t *testing.T) {
 	root := t.TempDir()
 	source := filepath.Join(root, "source")
@@ -280,6 +308,29 @@ func TestMoreAtomicAndCopyFailures(t *testing.T) {
 	if err := writeAtomic(filepath.Join(parentFile, "child"), []byte("data"), 0o600); err == nil ||
 		err.Error() != "SETUP_FILE_DIRECTORY_FAILED" {
 		t.Fatalf("file parent accepted as directory: %v", err)
+	}
+	targetDirectory := filepath.Join(root, "target-directory")
+	if err := os.Mkdir(targetDirectory, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := writeAtomic(targetDirectory, []byte("data"), 0o600); err == nil ||
+		err.Error() != "SETUP_FILE_TARGET_UNSAFE" {
+		t.Fatalf("directory accepted as atomic target: %v", err)
+	}
+	largeSource := filepath.Join(root, "large-source")
+	if err := os.WriteFile(largeSource, make([]byte, (4<<20)+1), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := digestRegular(largeSource); err == nil || err.Error() != "SETUP_BACKUP_DIGEST_FAILED" {
+		t.Fatalf("oversized digest source accepted: %v", err)
+	}
+	largeDestination := filepath.Join(root, "large-copy")
+	if err := copyRegular(largeSource, largeDestination, 0o600); err == nil ||
+		err.Error() != "SETUP_BACKUP_FILE_TOO_LARGE" {
+		t.Fatalf("oversized copy source accepted: %v", err)
+	}
+	if _, err := os.Stat(largeDestination); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("failed oversized copy was not removed: %v", err)
 	}
 }
 

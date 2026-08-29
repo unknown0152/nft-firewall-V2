@@ -43,11 +43,12 @@ type SystemConfig struct {
 }
 
 type Interface struct {
-	Name         string   `toml:"name"`
-	Role         string   `toml:"role"`
-	Zone         string   `toml:"zone"`
-	CIDRs        []string `toml:"cidrs"`
-	ProvenanceID uint8    `toml:"provenance_id"`
+	Name           string   `toml:"name"`
+	Role           string   `toml:"role"`
+	Zone           string   `toml:"zone"`
+	CIDRs          []string `toml:"cidrs"`
+	ProvenanceName string   `toml:"provenance_name,omitempty"`
+	ProvenanceID   uint8    `toml:"provenance_id"`
 }
 
 type Zone struct {
@@ -122,6 +123,7 @@ type DockerNetwork struct {
 	Name            string   `toml:"name"`
 	Driver          string   `toml:"driver"`
 	BridgeInterface string   `toml:"bridge_interface"`
+	DynamicBridge   bool     `toml:"dynamic_bridge,omitempty"`
 	Subnets         []string `toml:"subnets"`
 	Gateways        []string `toml:"gateways"`
 }
@@ -147,6 +149,7 @@ type GeoSetConfig struct {
 var namePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9_.-]{0,62}$`)
 var ifacePattern = regexp.MustCompile(`^[a-zA-Z0-9_.-]{1,15}$`)
 var dockerNetworkPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$`)
+var provenanceIdentityPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$`)
 var fwmarkPattern = regexp.MustCompile(`^(0x[0-9a-fA-F]{1,8}|[0-9]{1,10})$`)
 var countryPattern = regexp.MustCompile(`^[A-Za-z]{2}$`)
 
@@ -379,7 +382,11 @@ func Validate(c Config) error {
 		if in.ProvenanceID < provenance.MinID || in.ProvenanceID > provenance.MaxID {
 			return fmt.Errorf("interface %q provenance_id must be %d..%d", in.Name, provenance.MinID, provenance.MaxID)
 		}
-		assignments = append(assignments, provenance.Assignment{Name: in.Name, ID: in.ProvenanceID})
+		provenanceName := InterfaceProvenanceName(in)
+		if !provenanceIdentityPattern.MatchString(provenanceName) {
+			return fmt.Errorf("interface %q has invalid provenance_name %q", in.Name, provenanceName)
+		}
+		assignments = append(assignments, provenance.Assignment{Name: provenanceName, ID: in.ProvenanceID})
 		interfaces[in.Name] = in
 		for _, cidr := range in.CIDRs {
 			if err := validateCIDR(cidr, true); err != nil {
@@ -686,6 +693,17 @@ func Validate(c Config) error {
 		return errors.New("strict VPN mode requires wireguard.interface")
 	}
 	return nil
+}
+
+// InterfaceProvenanceName returns the immutable ledger identity for an
+// interface. Existing configurations retain their historical interface-name
+// identity; managed Docker bridges can use a stable network identity across a
+// race-validated bridge recreation.
+func InterfaceProvenanceName(in Interface) string {
+	if in.ProvenanceName != "" {
+		return in.ProvenanceName
+	}
+	return in.Name
 }
 
 func validateDockerNetworks(networks []DockerNetwork, interfaces map[string]Interface) error {

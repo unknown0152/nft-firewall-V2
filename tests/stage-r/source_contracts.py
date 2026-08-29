@@ -617,6 +617,7 @@ class SystemdGraphContracts(unittest.TestCase):
         self.assertIn("-/etc/wireguard", writable)
         self.assertIn("/etc/sysctl.d", writable)
         self.assertIn("/etc/systemd/system", writable)
+        self.assertIn("-/etc/docker", writable)
 
     def test_managed_policy_rollback_is_narrow_and_generation_scoped(self) -> None:
         service = parse_unit("packaging/systemd/nftfw-managed-rollback.service")
@@ -994,6 +995,56 @@ class NftfwdCLIContracts(unittest.TestCase):
             "recovery.SystemdGuard{StateDir: st.Dir}",
             read("internal/app/runtime.go"),
         )
+
+
+class ManagedDockerContracts(unittest.TestCase):
+    def test_managed_setup_owns_forwarding_without_restoring_docker_mutation(self) -> None:
+        managed = read("internal/containers/managed.go")
+        setup = read("internal/setup/system.go")
+        self.assertIn(
+            '"iptables", "ip6tables", "ip-forward", "ip-masq", "userland-proxy"',
+            managed,
+        )
+        self.assertIn('value[option] = false', managed)
+        self.assertIn('builder.WriteString("net.ipv4.ip_forward = 1\\n")', setup)
+        self.assertIn('settings["net.ipv4.ip_forward"] = "1"', setup)
+        self.assertIn(
+            '"nft", "--check", "--file", candidatePath',
+            setup,
+            "the generated policy must pass nft --check before Docker restart",
+        )
+        self.assertIn("SETUP_DOCKER_CONFIG_CHANGED_AFTER_PLAN", setup)
+
+    def test_docker_observation_is_local_strict_and_stable(self) -> None:
+        docker = read("internal/containers/docker.go")
+        managed = read("internal/containers/managed.go")
+        intent = read("internal/intent/intent.go")
+        self.assertIn(
+            'localDockerHost = "unix:///var/run/docker.sock"',
+            docker,
+        )
+        self.assertIn("duplicate object key", managed)
+        self.assertIn("DOCKER_DAEMON_CONFIG_CHANGED_DURING_READ", managed)
+        self.assertIn("DOCKER_NETWORK_CHANGED_DURING_READ", managed)
+        self.assertIn("INTENT_DOCKER_SUBNET_OVERLAPS_LAN", intent)
+        self.assertIn("INTENT_DOCKER_SUBNET_OVERLAPS_VPN", intent)
+        self.assertIn("INTENT_DOCKER_SUBNET_OVERLAPS_BOOTSTRAP", intent)
+        self.assertIn("INTENT_DOCKER_SUBNET_OVERLAPS_RESERVED", intent)
+
+    def test_bridge_rebind_and_uninstall_handoff_are_transactional(self) -> None:
+        runtime = read("internal/app/runtime.go")
+        helper = read("scripts/docker-handoff.sh")
+        builder = read("scripts/build-deb.sh")
+        prerm = read("packaging/deb/prerm")
+        self.assertIn("dockerBridgeBindingsChanged", runtime)
+        self.assertIn("rebindDockerBridgesLocked", runtime)
+        self.assertIn("r.Manager.Apply(ctx, artifact, false)", runtime)
+        self.assertIn("managedsetup.WriteAtomicFile(projected.ConfigPath", runtime)
+        self.assertIn("docker_bridge_rebound", runtime)
+        self.assertIn("nftfw.docker-uninstall-handoff.v1", helper)
+        self.assertIn("cmp -s -", helper)
+        self.assertIn("scripts/docker-handoff.sh", builder)
+        self.assertIn("nftfw_remove_managed_docker_dropin", prerm)
 
 
 class ReleaseCandidateMetadataContracts(unittest.TestCase):

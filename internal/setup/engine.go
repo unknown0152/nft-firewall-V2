@@ -16,6 +16,7 @@ const (
 	PhaseBackup   Phase = "backup"
 	PhaseGuard    Phase = "guard"
 	PhaseInstall  Phase = "install"
+	PhaseDocker   Phase = "docker"
 	PhaseRuntime  Phase = "runtime"
 	PhaseApply    Phase = "apply"
 	PhaseTunnel   Phase = "tunnel"
@@ -45,6 +46,8 @@ type Summary struct {
 	PublicUDP         []int    `json:"public_udp"`
 	IPv6Mode          string   `json:"ipv6_mode"`
 	DockerMode        string   `json:"docker_mode"`
+	DockerNetworks    []string `json:"docker_networks,omitempty"`
+	DockerRestart     bool     `json:"docker_restart_required"`
 	ResolverMode      string   `json:"resolver_mode"`
 	SourceModeWarning bool     `json:"source_mode_warning"`
 }
@@ -69,6 +72,7 @@ type Executor interface {
 	Backup(context.Context, Plan) (string, error)
 	StartGuard(context.Context, Plan) error
 	Install(context.Context, Plan) error
+	ConfigureDocker(context.Context, Plan) error
 	StartRuntime(context.Context, Plan) error
 	ApplySafe(context.Context, Plan) (uint64, error)
 	StartTunnel(context.Context, Plan) error
@@ -151,6 +155,7 @@ func (e Engine) Run(ctx context.Context, vpnPath string) (Plan, error) {
 		}},
 		{PhaseGuard, func() error { return e.Executor.StartGuard(ctx, plan) }},
 		{PhaseInstall, func() error { return e.Executor.Install(ctx, plan) }},
+		{PhaseDocker, func() error { return e.Executor.ConfigureDocker(ctx, plan) }},
 		{PhaseRuntime, func() error { return e.Executor.StartRuntime(ctx, plan) }},
 		{PhaseApply, func() error {
 			generation, err := e.Executor.ApplySafe(ctx, plan)

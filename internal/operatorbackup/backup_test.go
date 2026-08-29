@@ -10,6 +10,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unknown0152/nft-firewall-v2/internal/config"
+	"github.com/unknown0152/nft-firewall-v2/internal/containers"
 	"github.com/unknown0152/nft-firewall-v2/internal/intent"
 	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
@@ -29,14 +31,18 @@ func backupFixture(t testing.TB) (Creator, string) {
 	root := t.TempDir()
 	stateRoot := filepath.Join(root, "var/lib/nftfw")
 	paths := Paths{
-		Config:      filepath.Join(root, "etc/nftfw/nftfw.toml"),
-		Intent:      filepath.Join(root, "etc/nftfw/intent.toml"),
-		VPN:         filepath.Join(root, "etc/wireguard/nftfw0.conf"),
-		Sysctl:      filepath.Join(root, "etc/sysctl.d/90-nftfw-managed.conf"),
-		StateDB:     filepath.Join(stateRoot, "generation-state/state.db"),
-		Ledger:      filepath.Join(stateRoot, "provenance-ledger.db"),
-		Generations: filepath.Join(stateRoot, "generations"),
-		Enforcement: filepath.Join(stateRoot, "enforcement-enabled"),
+		Config:       filepath.Join(root, "etc/nftfw/nftfw.toml"),
+		Intent:       filepath.Join(root, "etc/nftfw/intent.toml"),
+		VPN:          filepath.Join(root, "etc/wireguard/nftfw0.conf"),
+		Sysctl:       filepath.Join(root, "etc/sysctl.d/90-nftfw-managed.conf"),
+		StateDB:      filepath.Join(stateRoot, "generation-state/state.db"),
+		Ledger:       filepath.Join(stateRoot, "provenance-ledger.db"),
+		Generations:  filepath.Join(stateRoot, "generations"),
+		Enforcement:  filepath.Join(stateRoot, "enforcement-enabled"),
+		DockerDaemon: filepath.Join(root, "etc/docker/daemon.json"),
+		DockerDropIn: filepath.Join(
+			root, "etc/systemd/system/nftfwd.service.d/docker-access.conf",
+		),
 	}
 	value := intent.Intent{
 		Schema: intent.Schema, Managed: true, Uplink: "eth0",
@@ -132,6 +138,50 @@ Endpoint = vpn.example.test:51820
 	}, filepath.Join(root, "backups", "managed")
 }
 
+func enableDockerBackupFixture(t *testing.T, creator Creator) {
+	t.Helper()
+	value, err := intent.Load(creator.Paths.Intent)
+	if err != nil {
+		t.Fatal(err)
+	}
+	value.DockerEnabled = true
+	value.DockerNetworks = []config.DockerNetwork{{
+		Name: "media", Driver: "bridge", BridgeInterface: "br-media",
+		DynamicBridge: true, Subnets: []string{"172.20.0.0/16"},
+		Gateways: []string{"172.20.0.1"},
+	}}
+	intentData, err := value.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, err := value.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated.State.Directory = filepath.Dir(filepath.Dir(creator.Paths.StateDB))
+	generated.State.Database = creator.Paths.StateDB
+	generated.State.ProvenanceLedger = creator.Paths.Ledger
+	configData, err := intent.RenderConfig(generated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range map[string][]byte{
+		creator.Paths.Intent: intentData,
+		creator.Paths.Config: configData,
+		creator.Paths.DockerDaemon: []byte(
+			`{"iptables":false,"ip6tables":false,"ip-forward":false,"ip-masq":false,"userland-proxy":false}` + "\n",
+		),
+		creator.Paths.DockerDropIn: []byte(containers.ManagedSocketDropIn),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
 func TestCreateAndVerifyManagedBackup(t *testing.T) {
 	creator, destination := backupFixture(t)
 	manifest, err := creator.Create(context.Background(), destination)
@@ -170,6 +220,48 @@ func TestVerifyDetectsTampering(t *testing.T) {
 	if _, err := Verify(context.Background(), destination); err == nil ||
 		err.Error() != "BACKUP_CONTENT_MISMATCH" {
 		t.Fatalf("tampered backup was accepted: %v", err)
+	}
+}
+
+func TestVerifyRejectsInvalidDockerOwnershipFiles(t *testing.T) {
+	tests := []struct {
+		name string
+		path func(string) string
+		data string
+		code string
+	}{
+		{
+			name: "daemon",
+			path: func(root string) string { return filepath.Join(root, "docker", "daemon.json") },
+			data: `{"iptables":true}`,
+			code: "BACKUP_DOCKER_CONFIG_INVALID",
+		},
+		{
+			name: "drop-in",
+			path: func(root string) string {
+				return filepath.Join(root, "systemd", "nftfwd-docker-access.conf")
+			},
+			data: "[Service]\nInaccessiblePaths=/run/docker.sock\n",
+			code: "BACKUP_DOCKER_DROPIN_INVALID",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			creator, destination := backupFixture(t)
+			enableDockerBackupFixture(t, creator)
+			manifest, err := creator.Create(context.Background(), destination)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(test.path(destination), []byte(test.data), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			rewriteBackupManifest(t, destination, manifest.CreatedAt)
+			if _, err := Verify(context.Background(), destination); err == nil ||
+				err.Error() != test.code {
+				t.Fatalf("invalid Docker ownership backup accepted: %v", err)
+			}
+		})
 	}
 }
 

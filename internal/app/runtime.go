@@ -26,6 +26,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/reconcile"
 	"github.com/unknown0152/nft-firewall-v2/internal/recovery"
+	managedsetup "github.com/unknown0152/nft-firewall-v2/internal/setup"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
 	"github.com/unknown0152/nft-firewall-v2/internal/threatintel"
 	"github.com/unknown0152/nft-firewall-v2/internal/wireguard"
@@ -45,6 +46,7 @@ type Runtime struct {
 	ManagedIntent       *intent.Intent
 	threatFeedFetcher   func(context.Context, threatintel.Feed) ([]string, error)
 	containerNetFetcher func(context.Context) ([]string, []string, error)
+	dockerObserver      func([]config.DockerNetwork) containers.Observer
 	claimMu             sync.Mutex
 }
 
@@ -232,7 +234,11 @@ func (r *Runtime) artifactLocked(ctx context.Context) (compiler.Artifact, error)
 	if err != nil {
 		return compiler.Artifact{}, err
 	}
-	return current.artifactLockedCurrent(ctx)
+	projected, err := current.projectDockerConfiguration(ctx)
+	if err != nil {
+		return compiler.Artifact{}, err
+	}
+	return projected.artifactLockedCurrent(ctx)
 }
 
 func (r *Runtime) artifactLockedCurrent(ctx context.Context) (compiler.Artifact, error) {
@@ -249,7 +255,9 @@ func (r *Runtime) artifactLockedCurrent(ctx context.Context) (compiler.Artifact,
 	}
 	assignments := make([]provenance.Assignment, 0, len(r.Config.Interfaces))
 	for _, configured := range r.Config.Interfaces {
-		assignments = append(assignments, provenance.Assignment{Name: configured.Name, ID: configured.ProvenanceID})
+		assignments = append(assignments, provenance.Assignment{
+			Name: config.InterfaceProvenanceName(configured), ID: configured.ProvenanceID,
+		})
 	}
 	if err := r.Ledger.Reserve(ctx, assignments); err != nil {
 		return compiler.Artifact{}, fmt.Errorf("durably reserve ingress provenance before compile: %w", err)
@@ -328,6 +336,7 @@ func (r *Runtime) currentConfiguration() (*Runtime, error) {
 		ManagedIntent:       managedIntent,
 		threatFeedFetcher:   r.threatFeedFetcher,
 		containerNetFetcher: r.containerNetFetcher,
+		dockerObserver:      r.dockerObserver,
 	}, nil
 }
 
@@ -478,7 +487,7 @@ func (r *Runtime) containerNets(ctx context.Context) (v4, v6 []string, err error
 		}
 	}
 	if r.Config.Integrations.DockerEnabled {
-		observer := containers.Observer{Expected: r.Config.DockerNetworks}
+		observer := r.newDockerObserver(r.Config.DockerNetworks)
 		ok, detail, policyErr := observer.FirewallPolicy()
 		if policyErr != nil {
 			return nil, nil, fmt.Errorf("docker integration refused: %s: %w", detail, policyErr)
@@ -516,18 +525,79 @@ func (r *Runtime) Status(ctx context.Context) (any, error) {
 	if err != nil {
 		return nil, err
 	}
-	return current.statusCurrent(ctx)
+	projected, err := current.projectDockerConfiguration(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return projected.statusCurrent(ctx)
+}
+
+func (r *Runtime) projectDockerConfiguration(ctx context.Context) (*Runtime, error) {
+	if !r.Config.Integrations.DockerEnabled {
+		return r, nil
+	}
+	observer := r.newDockerObserver(r.Config.DockerNetworks)
+	ok, detail, err := observer.FirewallPolicy()
+	if err != nil {
+		return nil, fmt.Errorf("docker integration refused: %s: %w", detail, err)
+	}
+	if !ok {
+		return nil, fmt.Errorf("docker integration refused: %s", detail)
+	}
+	observed, err := observer.Networks(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("observe Docker bridge bindings: %w", err)
+	}
+	projectedConfig, err := containers.ProjectObservedConfig(r.Config, observed)
+	if err != nil {
+		return nil, err
+	}
+	projectedEffective, err := policy.Compile(projectedConfig)
+	if err != nil {
+		return nil, fmt.Errorf("compile observed Docker configuration: %w", err)
+	}
+	return &Runtime{
+		ConfigPath:          r.ConfigPath,
+		Config:              projectedConfig,
+		Effective:           projectedEffective,
+		Store:               r.Store,
+		Ledger:              r.Ledger,
+		Backend:             r.Backend,
+		Manager:             r.Manager,
+		MutationLockDir:     r.MutationLockDir,
+		EndpointResolver:    r.EndpointResolver,
+		WGController:        r.WGController,
+		ManagedIntent:       r.ManagedIntent,
+		threatFeedFetcher:   r.threatFeedFetcher,
+		containerNetFetcher: r.containerNetFetcher,
+		dockerObserver:      r.dockerObserver,
+	}, nil
+}
+
+func (r *Runtime) newDockerObserver(expected []config.DockerNetwork) containers.Observer {
+	if r.dockerObserver != nil {
+		return r.dockerObserver(expected)
+	}
+	return containers.Observer{Expected: expected}
 }
 
 func (r *Runtime) statusCurrent(ctx context.Context) (any, error) {
 	var managed *health.ManagedProjection
 	if r.ManagedIntent != nil {
+		ipv4Forwarding := true
+		if r.ManagedIntent.DockerEnabled {
+			value, readErr := os.ReadFile("/proc/sys/net/ipv4/ip_forward")
+			ipv4Forwarding = readErr == nil && strings.TrimSpace(string(value)) == "1"
+		}
 		managed = &health.ManagedProjection{
 			Tunnel: true, PublicTCP: r.ManagedIntent.PublicTCP,
 			PublicUDP:        r.ManagedIntent.PublicUDP,
 			LANManagementTCP: r.ManagedIntent.ManagementTCP,
 			LANAllowTCP:      r.ManagedIntent.LANAllowTCP,
 			LANAllowUDP:      r.ManagedIntent.LANAllowUDP,
+			DockerEnabled:    r.ManagedIntent.DockerEnabled,
+			DockerNetworks:   len(r.ManagedIntent.DockerNetworks),
+			IPv4Forwarding:   ipv4Forwarding,
 		}
 	}
 	return health.Provider{
@@ -1084,10 +1154,33 @@ func (r *Runtime) RefreshContainerSets(ctx context.Context) (bool, error) {
 }
 
 func (r *Runtime) refreshContainerSetsLocked(ctx context.Context) (bool, error) {
-	v4, v6, err := r.containerNets(ctx)
+	if r.containerNetFetcher != nil {
+		v4, v6, err := r.containerNets(ctx)
+		if err != nil {
+			return r.failContainerRefresh(ctx, 0, err)
+		}
+		return r.replaceContainerSetsLocked(ctx, v4, v6)
+	}
+	current, err := r.currentConfiguration()
 	if err != nil {
 		return r.failContainerRefresh(ctx, 0, err)
 	}
+	projected, err := current.projectDockerConfiguration(ctx)
+	if err != nil {
+		return r.failContainerRefresh(ctx, 0, err)
+	}
+	if current.Config.Integrations.DockerEnabled &&
+		dockerBridgeBindingsChanged(current.Config, projected.Config) {
+		return r.rebindDockerBridgesLocked(ctx, projected)
+	}
+	v4, v6, err := containerNetsFromConfig(projected.Config)
+	if err != nil {
+		return r.failContainerRefresh(ctx, 0, err)
+	}
+	return r.replaceContainerSetsLocked(ctx, v4, v6)
+}
+
+func (r *Runtime) replaceContainerSetsLocked(ctx context.Context, v4, v6 []string) (bool, error) {
 	existing, err := r.Backend.ExistingOwned(ctx)
 	if err != nil {
 		return r.failContainerRefresh(ctx, len(v4)+len(v6), err)
@@ -1104,6 +1197,101 @@ func (r *Runtime) refreshContainerSetsLocked(ctx context.Context) (bool, error) 
 		}
 	}
 	return true, nil
+}
+
+func (r *Runtime) rebindDockerBridgesLocked(ctx context.Context, projected *Runtime) (bool, error) {
+	count := 0
+	for _, network := range projected.Config.DockerNetworks {
+		count += len(network.Subnets)
+	}
+	if err := r.setDockerIntegrationState(ctx, "degraded", count, false); err != nil {
+		return false, fmt.Errorf("record Docker bridge rebind pending: %w", err)
+	}
+	artifact, err := projected.artifactLockedCurrent(ctx)
+	if err != nil {
+		return r.failContainerRefresh(ctx, count, err)
+	}
+	if _, err := r.Store.PrepareClaimPublication(ctx); err != nil {
+		return r.failContainerRefresh(
+			ctx, count, fmt.Errorf("mark runtime claims pending before Docker bridge rebind: %w", err),
+		)
+	}
+	result, err := r.Manager.Apply(ctx, artifact, false)
+	if err != nil {
+		return r.failContainerRefresh(ctx, count, fmt.Errorf("apply Docker bridge rebind: %w", err))
+	}
+	if !result.Committed {
+		return r.failContainerRefresh(
+			ctx, count, errors.New("docker bridge rebind generation was not committed"),
+		)
+	}
+	if projected.ManagedIntent != nil && projected.ConfigPath != "" {
+		data, err := intent.RenderConfig(projected.Config)
+		if err != nil {
+			return r.failContainerRefresh(ctx, count, fmt.Errorf("render Docker bridge rebind: %w", err))
+		}
+		if err := managedsetup.WriteAtomicFile(projected.ConfigPath, data, 0o640); err != nil {
+			return r.failContainerRefresh(ctx, count, fmt.Errorf("persist Docker bridge rebind: %w", err))
+		}
+	}
+	if _, err := projected.refreshClaimSetsLocked(ctx); err != nil {
+		return r.failContainerRefresh(ctx, count, fmt.Errorf("publish claims after Docker bridge rebind: %w", err))
+	}
+	if err := r.setDockerIntegrationState(ctx, "healthy", count, true); err != nil {
+		return false, fmt.Errorf("record Docker bridge rebind health: %w", err)
+	}
+	if err := r.Store.Audit(
+		ctx, "system", "docker_bridge_rebound",
+		fmt.Sprintf("generation=%d networks=%d", result.Generation, len(projected.Config.DockerNetworks)),
+	); err != nil {
+		return r.failContainerRefresh(ctx, count, fmt.Errorf("audit Docker bridge rebind: %w", err))
+	}
+	return true, nil
+}
+
+func dockerBridgeBindingsChanged(before, after config.Config) bool {
+	if !before.Integrations.DockerEnabled || !after.Integrations.DockerEnabled {
+		return false
+	}
+	bindings := make(map[string]string, len(before.DockerNetworks))
+	for _, network := range before.DockerNetworks {
+		bindings[network.Name] = network.BridgeInterface
+	}
+	if len(bindings) != len(after.DockerNetworks) {
+		return true
+	}
+	for _, network := range after.DockerNetworks {
+		if bindings[network.Name] != network.BridgeInterface {
+			return true
+		}
+	}
+	return false
+}
+
+func containerNetsFromConfig(value config.Config) (v4, v6 []string, err error) {
+	var values []string
+	for _, configured := range value.Interfaces {
+		if configured.Role == "container" {
+			values = append(values, configured.CIDRs...)
+		}
+	}
+	for _, raw := range unique(values) {
+		prefix, parseErr := netip.ParsePrefix(raw)
+		if parseErr != nil || prefix.Bits() == 0 {
+			return nil, nil, fmt.Errorf("invalid container network %q", raw)
+		}
+		if prefix.Addr().Is4() {
+			v4 = append(v4, prefix.String())
+		} else {
+			v6 = append(v6, prefix.String())
+		}
+	}
+	if len(v4)+len(v6) > value.Runtime.MaxSetMembers {
+		return nil, nil, fmt.Errorf("container network count exceeds runtime.max_set_members")
+	}
+	sort.Strings(v4)
+	sort.Strings(v6)
+	return v4, v6, nil
 }
 
 func (r *Runtime) failContainerRefresh(ctx context.Context, count int, cause error) (bool, error) {

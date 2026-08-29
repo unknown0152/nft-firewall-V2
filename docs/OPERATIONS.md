@@ -91,9 +91,10 @@ journalctl -u nftfw-early -u nftfw-enforcement-ready -u nftfwd -u nftfw-rollback
 
 Status includes active/pending generation, checksum, kill-switch state,
 WireGuard health, endpoint count, claim counts by provenance, drift, database
-health, integration state, and recent audit events. It contains no keys or
-peer identifiers. The machine-readable contract and fail-closed consumer
-rules are defined in `STATUS-API.md`.
+health, integration state, managed Docker network count/IPv4 forwarding, and
+recent audit events. It contains no keys or peer identifiers. The
+machine-readable contract and fail-closed consumer rules are defined in
+`STATUS-API.md`.
 
 The read-only dashboard is available locally at `http://127.0.0.1:8787/`.
 Use SSH port forwarding for remote viewing rather than changing its bind:
@@ -101,6 +102,21 @@ Use SSH port forwarding for remote viewing rather than changing its bind:
 ```bash
 ssh -L 8787:127.0.0.1:8787 <host>
 ```
+
+## Managed Docker
+
+```bash
+sudo nftfw health
+sudo nftfw config show --effective
+sudo nftfw doctor
+sudo journalctl -u nftfwd -u docker
+```
+
+NFTFW owns kernel IPv4 forwarding and all container forwarding/NAT when
+managed Docker is enabled. Docker keeps all five mutation settings false.
+Normal same-tuple network recreation is rebound automatically and creates the
+`docker_bridge_rebound` audit event. Any semantic network drift remains
+degraded and fail-closed. See `DOCKER.md`.
 
 ## Backup
 

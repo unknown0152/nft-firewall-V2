@@ -21,6 +21,7 @@ The clean-host result is:
 - IPv4 Internet through the WireGuard VPN only;
 - no physical-uplink fallback;
 - IPv6 disabled;
+- eligible Docker IPv4 bridge networks routed through the VPN only;
 - current private-LAN SSH management preserved;
 - no public inbound exposure;
 - a loopback-only read-only dashboard;
@@ -44,12 +45,19 @@ The one-file path intentionally supports a narrow first matrix:
 - one strict wg-quick-style profile with one peer and `0.0.0.0/0`;
 - nftables JSON support and no competing firewall owner;
 - no existing NFTFW state;
-- Docker absent, or installed but empty and inactive.
+- Docker absent, or reachable only through the local socket with eligible,
+  non-overlapping IPv4 bridge networks.
 
-Existing Docker/Cosmos workloads, existing NFTFW installations, multiple
-uplinks, split tunnels, provider hooks, multiple peers, and native IPv6 are
-not silently changed. They require the explicit adoption or advanced-mode
-workflow.
+Managed setup may adopt the built-in bridge and normal Compose-style bridge
+networks, including active workloads. It shows every network and ownership
+change before mutation. If Docker daemon settings must change, setup asks
+again immediately before one Docker restart. Macvlan, ipvlan, overlay, Swarm,
+Kubernetes, internal, IPv6, overlapping, malformed, or changing Docker
+topologies are refused.
+
+Existing NFTFW installations, multiple uplinks, split tunnels, provider
+hooks, multiple peers, and native IPv6 are not silently changed. They require
+the explicit adoption or advanced-mode workflow.
 
 ## Daily commands
 
@@ -60,6 +68,9 @@ sudo nftfw exposure list
 sudo nftfw lan list
 sudo nftfw config show --effective
 ```
+
+With managed Docker enabled, `health` and `config show` report the adopted
+network names and prove that kernel IPv4 forwarding is NFTFW-owned.
 
 Later exposure remains explicit and VPN-side only:
 

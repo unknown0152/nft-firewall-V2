@@ -17,6 +17,9 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/unknown0152/nft-firewall-v2/internal/config"
+	"github.com/unknown0152/nft-firewall-v2/internal/containers"
 )
 
 const maxCommandOutput = 1 << 20
@@ -41,21 +44,22 @@ func (ExecRunner) Run(ctx context.Context, name string, args ...string) ([]byte,
 }
 
 type Snapshot struct {
-	OSID                   string         `json:"os_id"`
-	OSVersion              string         `json:"os_version"`
-	Architecture           string         `json:"architecture"`
-	Uplink                 string         `json:"uplink"`
-	UplinkGateway          netip.Addr     `json:"uplink_gateway"`
-	NonLoopbackInterfaces  []string       `json:"non_loopback_interfaces"`
-	LANNetworks            []netip.Prefix `json:"lan_networks"`
-	ManagementTCP          []int          `json:"management_tcp"`
-	IPv6DefaultRoute       bool           `json:"ipv6_default_route"`
-	CompetingFirewallUnits []string       `json:"competing_firewall_units"`
-	OwnedNFTables          bool           `json:"owned_nftables"`
-	ForeignNFTables        bool           `json:"foreign_nftables"`
-	ExistingNFTFWState     bool           `json:"existing_nftfw_state"`
-	DockerPresent          bool           `json:"docker_present"`
-	DockerClean            bool           `json:"docker_clean"`
+	OSID                   string                 `json:"os_id"`
+	OSVersion              string                 `json:"os_version"`
+	Architecture           string                 `json:"architecture"`
+	Uplink                 string                 `json:"uplink"`
+	UplinkGateway          netip.Addr             `json:"uplink_gateway"`
+	NonLoopbackInterfaces  []string               `json:"non_loopback_interfaces"`
+	LANNetworks            []netip.Prefix         `json:"lan_networks"`
+	ManagementTCP          []int                  `json:"management_tcp"`
+	IPv6DefaultRoute       bool                   `json:"ipv6_default_route"`
+	CompetingFirewallUnits []string               `json:"competing_firewall_units"`
+	OwnedNFTables          bool                   `json:"owned_nftables"`
+	ForeignNFTables        bool                   `json:"foreign_nftables"`
+	ExistingNFTFWState     bool                   `json:"existing_nftfw_state"`
+	DockerPresent          bool                   `json:"docker_present"`
+	DockerClean            bool                   `json:"docker_clean"`
+	DockerNetworks         []config.DockerNetwork `json:"docker_networks"`
 }
 
 type Inspector struct {
@@ -107,7 +111,10 @@ func (i Inspector) Discover(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	dockerPresent, dockerClean := i.dockerState(ctx)
+	dockerPresent, dockerClean, dockerNetworks, dockerErr := i.dockerState(ctx)
+	if dockerErr != nil {
+		return Snapshot{}, dockerErr
+	}
 	existingState := i.existingNFTFWState()
 	snapshot := Snapshot{
 		OSID: osID, OSVersion: osVersion, Architecture: runtime.GOARCH,
@@ -117,6 +124,7 @@ func (i Inspector) Discover(ctx context.Context) (Snapshot, error) {
 		CompetingFirewallUnits: competing, OwnedNFTables: owned,
 		ForeignNFTables: foreign, ExistingNFTFWState: existingState,
 		DockerPresent: dockerPresent, DockerClean: dockerClean,
+		DockerNetworks: dockerNetworks,
 	}
 	if err := snapshot.ValidateCleanHost(); err != nil {
 		return Snapshot{}, err
@@ -150,9 +158,6 @@ func (s Snapshot) ValidateCleanHost() error {
 	}
 	if s.OwnedNFTables || s.ExistingNFTFWState {
 		return errors.New("DISCOVERY_EXISTING_NFTFW_REQUIRES_ADOPT")
-	}
-	if s.DockerPresent && !s.DockerClean {
-		return errors.New("DISCOVERY_EXISTING_DOCKER_REQUIRES_ADOPT")
 	}
 	return nil
 }
@@ -320,16 +325,43 @@ func (i Inspector) activeFirewallManagers(ctx context.Context) []string {
 	return result
 }
 
-func (i Inspector) dockerState(ctx context.Context) (bool, bool) {
-	if _, err := i.Runner.Run(ctx, "docker", "version", "--format", "{{.Server.Version}}"); err != nil {
-		return false, true
+func (i Inspector) dockerState(ctx context.Context) (bool, bool, []config.DockerNetwork, error) {
+	if _, err := i.Runner.Run(ctx, "docker", "--version"); err != nil {
+		return false, true, nil, nil
 	}
-	containers, containerErr := i.Runner.Run(ctx, "docker", "ps", "-aq")
-	networks, networkErr := i.Runner.Run(ctx, "docker", "network", "ls", "--filter", "type=custom", "-q")
+	if _, err := i.Runner.Run(ctx, "docker", "--host", "unix:///var/run/docker.sock",
+		"version", "--format", "{{.Server.Version}}"); err != nil {
+		return true, false, nil, errors.New("DISCOVERY_DOCKER_SOCKET_UNREADABLE")
+	}
+	containers, containerErr := i.Runner.Run(ctx, "docker", "--host",
+		"unix:///var/run/docker.sock", "ps", "-aq")
+	networks, networkErr := i.Runner.Run(ctx, "docker", "--host",
+		"unix:///var/run/docker.sock", "network", "ls", "--filter", "type=custom", "-q")
 	if containerErr != nil || networkErr != nil {
-		return true, false
+		return true, false, nil, errors.New("DISCOVERY_DOCKER_STATE_UNREADABLE")
 	}
-	return true, strings.TrimSpace(string(containers)) == "" && strings.TrimSpace(string(networks)) == ""
+	observer := containerspkgObserver(i.Runner)
+	discovered, err := observer.DiscoverNetworks(ctx)
+	if err != nil {
+		return true, false, nil, err
+	}
+	clean := strings.TrimSpace(string(containers)) == "" && strings.TrimSpace(string(networks)) == ""
+	return true, clean, discovered, nil
+}
+
+func containerspkgObserver(runner Runner) containers.Observer {
+	return containers.Observer{Run: func(
+		ctx context.Context, limit int64, name string, args ...string,
+	) ([]byte, error) {
+		data, err := runner.Run(ctx, name, args...)
+		if err != nil {
+			return nil, err
+		}
+		if int64(len(data)) > limit {
+			return nil, errors.New("DISCOVERY_DOCKER_OUTPUT_TOO_LARGE")
+		}
+		return data, nil
+	}}
 }
 
 func (i Inspector) existingNFTFWState() bool {

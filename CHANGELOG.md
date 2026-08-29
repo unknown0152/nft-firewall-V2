@@ -24,9 +24,18 @@
   mode, public exposure, and LAN policy.
 - Preserve 2.0.3 advanced TOML, schema-6 state, generations, snapshots,
   provenance, systemd, and package-upgrade behavior.
-- Refuse unsupported profiles, competing firewall owners, non-clean Docker,
-  prior NFTFW state, and conflicting route/rule/interface ownership before
-  setup mutation.
+- Adopt every eligible built-in or Compose-style Docker IPv4 bridge from the
+  local socket, preserve unrelated daemon JSON keys, disable Docker firewall/
+  forwarding/masquerade/proxy mutation, make NFTFW own persistent kernel IPv4
+  forwarding, validate the nftables candidate before one confirmed Docker
+  restart, and roll back exact daemon/sysctl/drop-in/unit state on failure.
+- Preserve stable Docker network provenance across a full-ID/bridge
+  recreation, automatically commit the verified bridge rebind, and keep
+  containers VPN-only with no physical-uplink or implicit published-port
+  exposure.
+- Refuse unsupported profiles, competing firewall owners, unsupported or
+  ambiguous Docker topology, prior NFTFW state, and conflicting route/rule/
+  interface ownership before setup mutation.
 - Add setup, importer, routing, discovery, intent, rollback, benchmark,
   packaging, and reproducible-candidate validation.
 

@@ -20,7 +20,9 @@ sudo nftfw setup --vpn /path/to/working-vpn.conf --dry-run
 ```
 
 Review the detected uplink, private LAN, management ports, resolver, and the
-explicit statement that public exposure is empty.
+explicit statement that public exposure is empty. If Docker is installed,
+also review every adopted bridge network, `Docker IPv4 forwarding: NFTFW
+OWNED`, and whether one Docker restart is required.
 
 ## 3. Configure
 
@@ -29,7 +31,9 @@ sudo nftfw setup --vpn /path/to/working-vpn.conf
 ```
 
 Keep the local console or a second LAN session available until setup reports
-`Status: PROTECTED`.
+`Status: PROTECTED`. Setup asks again immediately before restarting Docker
+when its daemon ownership settings changed. `--yes` accepts both confirmations
+for controlled automation.
 
 ## 4. Verify
 
@@ -48,11 +52,22 @@ Status: PROTECTED
 VPN: HEALTHY
 IPv4 Internet: VPN ONLY
 IPv6: DISABLED
+Docker: DISABLED
 Public exposure: NONE
 LAN management: PRESERVED
 Boot protection: READY
 Rollback: VERIFIED
 ```
+
+On a host with eligible Docker networks, the Docker line is:
+
+```text
+Docker: PROTECTED (N networks, IPv4 forwarding NFTFW-owned)
+```
+
+Containers remain private by default. Their IPv4 DNS, TCP, UDP, and ICMP
+egress is allowed only through the managed VPN; published ports do not become
+NFTFW public exposure.
 
 ## Later changes
 

@@ -15,6 +15,7 @@ import (
 
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
+	"github.com/unknown0152/nft-firewall-v2/internal/containers"
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
 	"github.com/unknown0152/nft-firewall-v2/internal/intent"
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
@@ -577,6 +578,134 @@ func TestRuntimeReloadsProtectedManagedConfiguration(t *testing.T) {
 	if _, err := runtime.currentConfiguration(); err == nil ||
 		!strings.Contains(err.Error(), "reload protected configuration") {
 		t.Fatalf("invalid replacement configuration was accepted: %v", err)
+	}
+}
+
+func TestManagedDockerBridgeRecreationCommitsAndPersistsRebind(t *testing.T) {
+	ctx := context.Background()
+	root := secureRuntimeTestDir(t)
+	configPath := filepath.Join(root, "nftfw.toml")
+	intentPath := filepath.Join(root, "intent.toml")
+	databasePath := filepath.Join(root, "generation-state", "state.db")
+	ledgerPath := filepath.Join(root, "provenance-ledger.db")
+	daemonPath := filepath.Join(root, "docker", "daemon.json")
+	value := intent.Intent{
+		Schema: intent.Schema, Managed: true, Uplink: "eth0",
+		VPNInterface: intent.VPNInterface,
+		LANNetworks:  []string{"192.168.1.0/24"}, ManagementTCP: []int{22},
+		VPNAddresses: []string{"10.8.0.2/32"}, EndpointHost: "vpn.example.test",
+		EndpointPort: 51820, BootstrapIPv4: []string{"198.51.100.8/32"},
+		MTU: 1420, ResolverMode: "none", DisableIPv6: true,
+		DockerEnabled: true,
+		DockerNetworks: []config.DockerNetwork{{
+			Name: "media", Driver: "bridge", BridgeInterface: "br-old",
+			DynamicBridge: true, Subnets: []string{"172.20.0.0/16"},
+			Gateways: []string{"172.20.0.1"},
+		}},
+	}
+	intentData, err := value.Render()
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated, err := value.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	generated.State.Directory = root
+	generated.State.Database = databasePath
+	generated.State.ProvenanceLedger = ledgerPath
+	configData, err := intent.RenderConfig(generated)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for path, data := range map[string][]byte{
+		configPath: configData,
+		intentPath: intentData,
+		daemonPath: []byte(
+			`{"iptables":false,"ip6tables":false,"ip-forward":false,"ip-masq":false,"userland-proxy":false}` + "\n",
+		),
+	} {
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	runner := &statefulOwnedRunner{}
+	runtime, err := Open(ctx, configPath, runner)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer runtime.Close()
+	runtime.Manager.HealthCheck = nil
+	runtime.EndpointResolver = &wireguard.Resolver{
+		Resolver:  staticEndpointLookup{addresses: []net.IP{net.ParseIP("198.51.100.8")}},
+		CachePath: filepath.Join(root, "wg-endpoints.json"),
+		Max:       64,
+	}
+	keyBytes := make([]byte, 32)
+	for index := range keyBytes {
+		keyBytes[index] = 7
+	}
+	runtime.WGController = &wireguard.Controller{Runner: staticWGCommandRunner{
+		key: base64.StdEncoding.EncodeToString(keyBytes),
+	}}
+	id := strings.Repeat("d", 64)
+	runtime.dockerObserver = func(expected []config.DockerNetwork) containers.Observer {
+		return containers.Observer{
+			DaemonConfig: daemonPath,
+			Expected:     expected,
+			Run: func(
+				_ context.Context, _ int64, name string, args ...string,
+			) ([]byte, error) {
+				command := name + " " + strings.Join(args, " ")
+				switch command {
+				case "docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}":
+					return []byte(id + "\tmedia\tbridge\n"), nil
+				case "docker --host unix:///var/run/docker.sock network inspect -- " + id:
+					return []byte(
+						`[{"Id":"` + id + `","Name":"media","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{"com.docker.network.bridge.name":"br-new"},"IPAM":{"Config":[{"Subnet":"172.20.0.0/16","Gateway":"172.20.0.1"}]}}]`,
+					), nil
+				case "ip -j link show dev br-new":
+					return []byte(`[{"ifname":"br-new"}]`), nil
+				default:
+					return nil, fmt.Errorf("unexpected Docker observation command: %s", command)
+				}
+			},
+		}
+	}
+	refreshed, err := runtime.RefreshContainerSets(ctx)
+	if err != nil || !refreshed {
+		t.Fatalf("Docker bridge recreation was not rebound: refreshed=%t err=%v", refreshed, err)
+	}
+	persisted, err := config.Load(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if persisted.DockerNetworks[0].BridgeInterface != "br-new" {
+		t.Fatalf("new Docker bridge was not persisted: %#v", persisted.DockerNetworks)
+	}
+	generation, err := runtime.Store.LastKnownGood(ctx)
+	if err != nil || generation == nil || generation.Status != "committed" {
+		t.Fatalf("Docker bridge rebind was not committed: %#v err=%v", generation, err)
+	}
+	script, err := runtime.Store.ReadScript(generation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(script, `iifname "br-new"`) ||
+		strings.Contains(script, `iifname "br-old"`) {
+		t.Fatalf("committed Docker rebind artifact is stale:\n%s", script)
+	}
+	firstGeneration := generation.ID
+	refreshed, err = runtime.RefreshContainerSets(ctx)
+	if err != nil || !refreshed {
+		t.Fatalf("idempotent Docker refresh failed: refreshed=%t err=%v", refreshed, err)
+	}
+	generation, err = runtime.Store.LastKnownGood(ctx)
+	if err != nil || generation.ID != firstGeneration {
+		t.Fatalf("idempotent Docker refresh created another generation: %#v err=%v", generation, err)
 	}
 }
 

@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"errors"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -32,6 +33,7 @@ func managedTestKey(fill byte) string {
 
 func withManagedTestEnvironment(t *testing.T) (string, string) {
 	t.Helper()
+	oldDockerDaemon, oldDockerDropIn := managedDockerDaemon, managedDockerDropIn
 	oldValues := []any{
 		managedIntentPath, managedConfigPath, managedVPNPath, setupJournalPath,
 		setupLockPath, managedStatusSock, managedControlSock, managedStateDB,
@@ -42,6 +44,8 @@ func withManagedTestEnvironment(t *testing.T) (string, string) {
 		managedChangeOldConfig, managedChangeNow, managedChangeTimeout,
 	}
 	t.Cleanup(func() {
+		managedDockerDaemon = oldDockerDaemon
+		managedDockerDropIn = oldDockerDropIn
 		managedIntentPath = oldValues[0].(string)
 		managedConfigPath = oldValues[1].(string)
 		managedVPNPath = oldValues[2].(string)
@@ -84,6 +88,10 @@ func withManagedTestEnvironment(t *testing.T) (string, string) {
 	managedGenerations = filepath.Join(managedStateRoot, "generations")
 	managedEnforcement = filepath.Join(managedStateRoot, "enforcement-enabled")
 	managedSysctl = filepath.Join(root, "etc/sysctl.d/90-nftfw-managed.conf")
+	managedDockerDaemon = filepath.Join(root, "etc/docker/daemon.json")
+	managedDockerDropIn = filepath.Join(
+		root, "etc/systemd/system/nftfwd.service.d/docker-access.conf",
+	)
 	managedChangeDir = filepath.Join(managedStateRoot, "managed-change")
 	managedChangeJournal = filepath.Join(managedChangeDir, "journal.json")
 	managedChangeOldIntent = filepath.Join(managedChangeDir, "old-intent.toml")
@@ -628,6 +636,23 @@ func TestManagedOperatorSummariesAndInternalUsage(t *testing.T) {
 	}
 	printSetupSummary(summary)
 	printProtectedSummary(summary, true)
+	summary.DockerMode = "enabled"
+	summary.DockerNetworks = []string{"bridge", "media"}
+	summary.DockerRestart = true
+	output := captureManagedOutput(t, func() {
+		printSetupSummary(summary)
+		printProtectedSummary(summary, false)
+	})
+	for _, expected := range []string{
+		"Docker networks: bridge, media",
+		"Docker IPv4 forwarding: NFTFW OWNED",
+		"Docker restart required: YES",
+		"Docker: PROTECTED (2 networks, IPv4 forwarding NFTFW-owned)",
+	} {
+		if !strings.Contains(output, expected) {
+			t.Fatalf("Docker operator summary omitted %q:\n%s", expected, output)
+		}
+	}
 	summary.PublicTCP = []int{443}
 	summary.PublicUDP = []int{53}
 	printProtectedSummary(summary, false)
@@ -644,6 +669,29 @@ func TestManagedOperatorSummariesAndInternalUsage(t *testing.T) {
 	if err := managedRecoverCommand(nil); err == nil {
 		t.Fatal("non-root managed recovery accepted")
 	}
+}
+
+func captureManagedOutput(t *testing.T, operation func()) string {
+	t.Helper()
+	original := os.Stdout
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	os.Stdout = writer
+	defer func() { os.Stdout = original }()
+	operation()
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	data, err := io.ReadAll(reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := reader.Close(); err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
 }
 
 func TestManagedChangeStateValidation(t *testing.T) {

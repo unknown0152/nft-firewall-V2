@@ -13,8 +13,11 @@ import (
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
+	"github.com/unknown0152/nft-firewall-v2/internal/config"
+	"github.com/unknown0152/nft-firewall-v2/internal/containers"
 	"github.com/unknown0152/nft-firewall-v2/internal/discovery"
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
+	"github.com/unknown0152/nft-firewall-v2/internal/intent"
 	"github.com/unknown0152/nft-firewall-v2/internal/reconcile"
 	"github.com/unknown0152/nft-firewall-v2/internal/routing"
 	"github.com/unknown0152/nft-firewall-v2/internal/wgconfig"
@@ -24,6 +27,7 @@ type systemRunner struct {
 	commands    []string
 	fail        string
 	routeDevice string
+	outputs     map[string][]byte
 }
 
 type systemRunnerFunc func(context.Context, []byte, string, ...string) ([]byte, error)
@@ -40,6 +44,9 @@ func (r *systemRunner) Run(_ context.Context, input []byte, name string, args ..
 	r.commands = append(r.commands, command)
 	if r.fail != "" && strings.Contains(command, r.fail) {
 		return nil, errors.New("injected")
+	}
+	if value, ok := r.outputs[command]; ok {
+		return append([]byte(nil), value...), nil
 	}
 	switch {
 	case command == "nft list table inet nftfw_setup_guard":
@@ -61,6 +68,12 @@ func (r *systemRunner) Run(_ context.Context, input []byte, name string, args ..
 	case strings.Contains(command, "latest-handshakes"):
 		return []byte("peer " + strconv.FormatInt(time.Now().Unix(), 10) + "\n"), nil
 	case command == "ip -j -4 route get 1.1.1.1":
+		device := r.routeDevice
+		if device == "" {
+			device = "nftfw0"
+		}
+		return []byte(`[{"dev":"` + device + `"}]`), nil
+	case strings.HasPrefix(command, "ip -j -4 route get 1.1.1.1 from "):
 		device := r.routeDevice
 		if device == "" {
 			device = "nftfw0"
@@ -108,6 +121,8 @@ func testSystem(t testing.TB, runner *systemRunner) (*System, Paths) {
 		StateDir:      filepath.Join(root, "var/lib/nftfw"),
 		RuntimeDir:    filepath.Join(root, "run/nftfw"),
 		SystemdDir:    filepath.Join(root, "etc/systemd/system"),
+		DockerDaemon:  filepath.Join(root, "etc/docker/daemon.json"),
+		DockerDropIn:  filepath.Join(root, "etc/systemd/system/nftfwd.service.d/docker-access.conf"),
 		ControlSocket: filepath.Join(root, "run/nftfw/control.sock"),
 		StatusSocket:  filepath.Join(root, "run/nftfw/status.sock"),
 	}
@@ -152,6 +167,65 @@ func testSystem(t testing.TB, runner *systemRunner) (*System, Paths) {
 	return system, paths
 }
 
+func configuredDockerPlan(
+	t *testing.T, runner *systemRunner, changed bool,
+) (*System, Plan, Paths) {
+	t.Helper()
+	system, paths := testSystem(t, runner)
+	if runner.outputs == nil {
+		runner.outputs = map[string][]byte{}
+	}
+	id := strings.Repeat("e", 64)
+	network := config.DockerNetwork{
+		Name: "media", Driver: "bridge", BridgeInterface: "br-" + id[:12],
+		DynamicBridge: true, Subnets: []string{"172.20.0.0/16"},
+		Gateways: []string{"172.20.0.1"},
+	}
+	runner.outputs["sysctl -n net.ipv4.ip_forward"] = []byte("1\n")
+	runner.outputs["docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}"] =
+		[]byte(id + "\tmedia\tbridge\n")
+	runner.outputs["docker --host unix:///var/run/docker.sock network inspect -- "+id] =
+		[]byte(`[{"Id":"` + id + `","Name":"media","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{},"IPAM":{"Config":[{"Subnet":"172.20.0.0/16","Gateway":"172.20.0.1"}]}}]`)
+	if err := os.MkdirAll(filepath.Dir(paths.DockerDaemon), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.DockerDaemon, []byte(
+		`{"iptables":false,"ip6tables":false,"ip-forward":false,"ip-masq":false,"userland-proxy":false}`+"\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.DockerDropIn), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(
+		paths.DockerDropIn, []byte(containers.ManagedSocketDropIn), 0o644,
+	); err != nil {
+		t.Fatal(err)
+	}
+	return system, Plan{
+		Summary: Summary{
+			Schema: "nftfw.setup-plan.v1", VPNInterface: "nftfw0",
+			DockerMode: "enabled", DockerNetworks: []string{"media"},
+			DockerRestart: changed,
+		},
+		PrivateData: &prepared{
+			Intent: intent.Intent{
+				Schema: intent.Schema, Managed: true, DockerEnabled: true,
+				DockerNetworks: []config.DockerNetwork{network},
+			},
+			DockerChanged: changed,
+			Route: routing.Config{
+				Interface: "nftfw0", Uplink: "eth0", Fwmark: "0xca6c",
+				Table:           routing.DefaultTable,
+				Addresses:       []netip.Prefix{netip.MustParsePrefix("10.8.0.2/32")},
+				EndpointAddress: netip.MustParseAddr("198.51.100.8"),
+				Resolver:        routing.ResolverNone,
+				RuntimeDir:      filepath.Join(paths.RuntimeDir, "setup"),
+			},
+		},
+	}, paths
+}
+
 func TestSystemExecutorCompletesSimulatedCleanHost(t *testing.T) {
 	runner := &systemRunner{}
 	system, paths := testSystem(t, runner)
@@ -182,7 +256,8 @@ func TestSystemExecutorCompletesSimulatedCleanHost(t *testing.T) {
 	}
 	joined := strings.Join(runner.commands, "\n")
 	for _, want := range []string{
-		"nft --check --file", "systemctl enable --now nftfw-rollback.timer",
+		"nft --check --file " + filepath.Join(paths.RuntimeDir, "setup-candidate.nft"),
+		"systemctl enable --now nftfw-rollback.timer",
 		"ip -4 route replace default dev nftfw0 table 51820",
 		"systemctl start nftfw-early.service",
 		"nft delete table inet nftfw_setup_guard",
@@ -190,6 +265,458 @@ func TestSystemExecutorCompletesSimulatedCleanHost(t *testing.T) {
 		if !strings.Contains(joined, want) {
 			t.Fatalf("simulated setup missing %q:\n%s", want, joined)
 		}
+	}
+}
+
+func TestManagedDockerCompliantConfigDoesNotRestart(t *testing.T) {
+	id := strings.Repeat("c", 64)
+	runner := &systemRunner{outputs: map[string][]byte{
+		"systemctl is-active --quiet docker.service": []byte("active\n"),
+		"sysctl -n net.ipv4.ip_forward":              []byte("1\n"),
+		"docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}": []byte(
+			id + "\tbridge\tbridge\n",
+		),
+		"docker --host unix:///var/run/docker.sock network inspect -- " + id: []byte(
+			`[{"Id":"` + id + `","Name":"bridge","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{},"IPAM":{"Config":[{"Subnet":"172.17.0.0/16","Gateway":"172.17.0.1"}]}}]`,
+		),
+	}}
+	system, paths := testSystem(t, runner)
+	if err := os.MkdirAll(filepath.Dir(paths.DockerDaemon), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	compliant := []byte(`{
+  "ip-forward": false,
+  "ip-masq": false,
+  "ip6tables": false,
+  "iptables": false,
+  "userland-proxy": false
+}
+`)
+	if err := os.WriteFile(paths.DockerDaemon, compliant, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	system.Discover = func(context.Context) (discovery.Snapshot, error) {
+		return discovery.Snapshot{
+			OSID: "debian", OSVersion: "13", Architecture: "amd64",
+			Uplink: "eth0", UplinkGateway: netip.MustParseAddr("192.168.1.1"),
+			LANNetworks:   []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")},
+			ManagementTCP: []int{22}, DockerPresent: true,
+			DockerNetworks: []config.DockerNetwork{{
+				Name: "bridge", Driver: "bridge", BridgeInterface: "docker0",
+				DynamicBridge: true, Subnets: []string{"172.17.0.0/16"},
+				Gateways: []string{"172.17.0.1"},
+			}},
+		}, nil
+	}
+	system.ConfirmDockerRestart = func(Summary) error {
+		return errors.New("confirmation must not be requested")
+	}
+	plan, err := system.Prepare(context.Background(), "/provider.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Summary.DockerRestart {
+		t.Fatal("compliant Docker daemon incorrectly requires restart")
+	}
+	if err := system.Install(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := system.ConfigureDocker(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, command := range runner.commands {
+		if command == "systemctl restart docker.service" {
+			t.Fatal("idempotent Docker setup restarted Docker")
+		}
+	}
+}
+
+func TestDockerCandidateCheckFailsBeforeOwnershipWrite(t *testing.T) {
+	id := strings.Repeat("d", 64)
+	runner := &systemRunner{fail: "setup-candidate.nft"}
+	system, paths := testSystem(t, runner)
+	if err := os.MkdirAll(filepath.Dir(paths.DockerDaemon), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	original := []byte(`{"iptables":true}`)
+	if err := os.WriteFile(paths.DockerDaemon, original, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	system.Discover = func(context.Context) (discovery.Snapshot, error) {
+		return discovery.Snapshot{
+			OSID: "debian", OSVersion: "13", Architecture: "amd64",
+			Uplink: "eth0", UplinkGateway: netip.MustParseAddr("192.168.1.1"),
+			LANNetworks:   []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")},
+			ManagementTCP: []int{22}, DockerPresent: true,
+			DockerNetworks: []config.DockerNetwork{{
+				Name: "bridge", Driver: "bridge", BridgeInterface: "docker0",
+				DynamicBridge: true, Subnets: []string{"172.17.0.0/16"},
+				Gateways: []string{"172.17.0.1"},
+			}},
+		}, nil
+	}
+	plan, err := system.Prepare(context.Background(), "/provider.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := system.Install(context.Background(), plan); err == nil ||
+		err.Error() != "SETUP_POLICY_CHECK_FAILED" {
+		t.Fatalf("invalid candidate did not stop install: %v", err)
+	}
+	if string(mustRead(t, paths.DockerDaemon)) != string(original) {
+		t.Fatal("Docker ownership changed before nftables candidate validation")
+	}
+	if _, err := os.Lstat(paths.DockerDropIn); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("Docker drop-in changed before candidate validation: %v", err)
+	}
+	_ = id
+}
+
+func TestInstallRejectsUnsafeDockerSocketOwnershipTarget(t *testing.T) {
+	runner := &systemRunner{}
+	system, plan, _ := configuredDockerPlan(t, runner, false)
+	system.Paths.DockerDropIn = "relative/docker-access.conf"
+	if err := system.Install(context.Background(), plan); err == nil {
+		t.Fatal("relative Docker socket ownership target accepted")
+	}
+	if len(runner.commands) != 0 {
+		t.Fatalf("command ran before Docker ownership target validation: %v", runner.commands)
+	}
+}
+
+func TestManagedDockerOwnershipForwardingAndRollback(t *testing.T) {
+	id := strings.Repeat("a", 64)
+	runner := &systemRunner{outputs: map[string][]byte{
+		"sysctl -n net.ipv4.ip_forward": []byte("1\n"),
+		"docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}": []byte(
+			id + "\tcosmos-app\tbridge\n",
+		),
+		"docker --host unix:///var/run/docker.sock network inspect -- " + id: []byte(
+			`[{"Id":"` + id + `","Name":"cosmos-app","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{},"IPAM":{"Config":[{"Subnet":"172.23.0.0/16","Gateway":"172.23.0.1"}]}}]`,
+		),
+	}}
+	system, paths := testSystem(t, runner)
+	if err := os.MkdirAll(filepath.Dir(paths.DockerDaemon), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	originalDaemon := []byte("{\n  \"data-root\": \"/srv/docker\",\n  \"iptables\": true\n}\n")
+	if err := os.WriteFile(paths.DockerDaemon, originalDaemon, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	system.Discover = func(context.Context) (discovery.Snapshot, error) {
+		return discovery.Snapshot{
+			OSID: "debian", OSVersion: "13", Architecture: "amd64",
+			Uplink: "eth0", UplinkGateway: netip.MustParseAddr("192.168.1.1"),
+			LANNetworks:   []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")},
+			ManagementTCP: []int{22}, DockerPresent: true,
+			DockerNetworks: []config.DockerNetwork{{
+				Name: "cosmos-app", Driver: "bridge",
+				BridgeInterface: "br-" + id[:12], DynamicBridge: true,
+				Subnets: []string{"172.23.0.0/16"}, Gateways: []string{"172.23.0.1"},
+			}},
+		}, nil
+	}
+	confirmed := 0
+	system.ConfirmDockerRestart = func(summary Summary) error {
+		confirmed++
+		if summary.DockerMode != "enabled" || len(summary.DockerNetworks) != 1 {
+			return errors.New("unexpected Docker summary")
+		}
+		return nil
+	}
+	plan, err := system.Prepare(context.Background(), "/provider.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if plan.Summary.DockerMode != "enabled" || !plan.Summary.DockerRestart ||
+		len(plan.Summary.DockerNetworks) != 1 {
+		t.Fatalf("Docker handoff missing from plan: %#v", plan.Summary)
+	}
+	private, err := privatePlan(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !private.Config.Integrations.DockerEnabled ||
+		len(private.Config.DockerNetworks) != 1 ||
+		len(private.Config.Interfaces) != 3 {
+		t.Fatalf("managed Docker policy not generated: %#v", private.Config)
+	}
+	backup, err := system.Backup(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := system.Install(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(mustRead(t, paths.Sysctl)), "net.ipv4.ip_forward = 1") {
+		t.Fatal("managed sysctl omitted IPv4 forwarding")
+	}
+	daemon := string(mustRead(t, paths.DockerDaemon))
+	for _, expected := range []string{
+		`"data-root": "/srv/docker"`, `"iptables": false`,
+		`"ip-forward": false`, `"ip-masq": false`,
+	} {
+		if !strings.Contains(daemon, expected) {
+			t.Fatalf("managed daemon config omitted %q: %s", expected, daemon)
+		}
+	}
+	if _, err := os.Stat(paths.DockerDropIn); err != nil {
+		t.Fatalf("Docker socket drop-in missing: %v", err)
+	}
+	if err := system.ConfigureDocker(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if confirmed != 1 ||
+		!strings.Contains(strings.Join(runner.commands, "\n"), "systemctl restart docker.service") {
+		t.Fatalf("Docker restart was not explicitly confirmed: confirmed=%d commands=%v", confirmed, runner.commands)
+	}
+	system.ValidateHook = nil
+	system.Connectivity = func(context.Context) error { return nil }
+	system.DNSLookup = func(context.Context, string) ([]string, error) {
+		return []string{"198.51.100.1"}, nil
+	}
+	if err := system.Validate(context.Background(), plan, 7); err != nil {
+		t.Fatalf("managed Docker final validation failed: %v", err)
+	}
+	if err := system.Rollback(context.Background(), plan, Journal{
+		Phase: PhaseDocker, BackupDir: backup,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if string(mustRead(t, paths.DockerDaemon)) != string(originalDaemon) {
+		t.Fatal("rollback did not restore the exact Docker daemon config")
+	}
+	if _, err := os.Stat(paths.DockerDropIn); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("rollback did not remove the new Docker access drop-in: %v", err)
+	}
+}
+
+func TestConfigureDockerRequiresImmediateRestartApproval(t *testing.T) {
+	id := strings.Repeat("b", 64)
+	runner := &systemRunner{outputs: map[string][]byte{
+		"sysctl -n net.ipv4.ip_forward": []byte("1\n"),
+	}}
+	system, paths := testSystem(t, runner)
+	if err := os.MkdirAll(filepath.Dir(paths.DockerDaemon), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.DockerDaemon, []byte(`{"iptables":true}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	system.Discover = func(context.Context) (discovery.Snapshot, error) {
+		return discovery.Snapshot{
+			OSID: "debian", OSVersion: "13", Architecture: "amd64",
+			Uplink: "eth0", UplinkGateway: netip.MustParseAddr("192.168.1.1"),
+			LANNetworks:   []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")},
+			ManagementTCP: []int{22}, DockerPresent: true,
+			DockerNetworks: []config.DockerNetwork{{
+				Name: "bridge", Driver: "bridge", BridgeInterface: "docker0",
+				DynamicBridge: true, Subnets: []string{"172.17.0.0/16"},
+				Gateways: []string{"172.17.0.1"},
+			}},
+		}, nil
+	}
+	plan, err := system.Prepare(context.Background(), "/provider.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := system.Install(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := system.ConfigureDocker(context.Background(), plan); err == nil ||
+		err.Error() != "SETUP_DOCKER_RESTART_CONFIRMATION_REQUIRED" {
+		t.Fatalf("unapproved Docker restart accepted: %v", err)
+	}
+	for _, command := range runner.commands {
+		if command == "systemctl restart docker.service" {
+			t.Fatal("Docker restarted without immediate approval")
+		}
+	}
+	_ = id
+}
+
+func TestConfigureDockerFailureBranches(t *testing.T) {
+	t.Run("daemon-config", func(t *testing.T) {
+		runner := &systemRunner{}
+		system, plan, paths := configuredDockerPlan(t, runner, false)
+		if err := os.Remove(paths.DockerDaemon); err != nil {
+			t.Fatal(err)
+		}
+		if err := system.ConfigureDocker(context.Background(), plan); err == nil {
+			t.Fatal("missing managed Docker daemon configuration accepted")
+		}
+	})
+
+	t.Run("socket-drop-in", func(t *testing.T) {
+		runner := &systemRunner{}
+		system, plan, paths := configuredDockerPlan(t, runner, false)
+		if err := os.WriteFile(paths.DockerDropIn, []byte("[Service]\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		if err := system.ConfigureDocker(context.Background(), plan); err == nil {
+			t.Fatal("modified Docker socket drop-in accepted")
+		}
+	})
+
+	t.Run("confirmation", func(t *testing.T) {
+		runner := &systemRunner{}
+		system, plan, _ := configuredDockerPlan(t, runner, true)
+		system.ConfirmDockerRestart = func(Summary) error { return errors.New("declined") }
+		if err := system.ConfigureDocker(context.Background(), plan); err == nil || err.Error() != "declined" {
+			t.Fatalf("Docker restart refusal was not preserved: %v", err)
+		}
+	})
+
+	t.Run("restart", func(t *testing.T) {
+		runner := &systemRunner{fail: "systemctl restart docker.service"}
+		system, plan, _ := configuredDockerPlan(t, runner, true)
+		system.ConfirmDockerRestart = func(Summary) error { return nil }
+		if err := system.ConfigureDocker(context.Background(), plan); err == nil ||
+			err.Error() != "SETUP_DOCKER_RESTART_FAILED" {
+			t.Fatalf("Docker restart failure was not bounded: %v", err)
+		}
+	})
+
+	t.Run("post-restart-ownership", func(t *testing.T) {
+		base := &systemRunner{}
+		system, plan, paths := configuredDockerPlan(t, base, true)
+		system.ConfirmDockerRestart = func(Summary) error { return nil }
+		system.Runner = systemRunnerFunc(func(
+			ctx context.Context, input []byte, name string, args ...string,
+		) ([]byte, error) {
+			output, err := base.Run(ctx, input, name, args...)
+			if name == "systemctl" && strings.Join(args, " ") == "restart docker.service" {
+				if removeErr := os.Remove(paths.DockerDaemon); removeErr != nil {
+					return nil, removeErr
+				}
+			}
+			return output, err
+		})
+		if err := system.ConfigureDocker(context.Background(), plan); err == nil {
+			t.Fatal("Docker daemon ownership loss after restart accepted")
+		}
+	})
+
+	t.Run("inactive", func(t *testing.T) {
+		runner := &systemRunner{}
+		system, plan, _ := configuredDockerPlan(t, runner, false)
+		if err := system.ConfigureDocker(context.Background(), plan); err == nil ||
+			err.Error() != "SETUP_DOCKER_INACTIVE" {
+			t.Fatalf("inactive Docker accepted: %v", err)
+		}
+	})
+
+	t.Run("forwarding", func(t *testing.T) {
+		runner := &systemRunner{}
+		system, plan, _ := configuredDockerPlan(t, runner, false)
+		runner.outputs["systemctl is-active --quiet docker.service"] = []byte("active\n")
+		runner.outputs["sysctl -n net.ipv4.ip_forward"] = []byte("0\n")
+		if err := system.ConfigureDocker(context.Background(), plan); err == nil ||
+			err.Error() != "SETUP_DOCKER_IPV4_FORWARDING_FAILED" {
+			t.Fatalf("disabled forwarding accepted: %v", err)
+		}
+	})
+
+	t.Run("topology", func(t *testing.T) {
+		runner := &systemRunner{}
+		system, plan, _ := configuredDockerPlan(t, runner, false)
+		runner.outputs["systemctl is-active --quiet docker.service"] = []byte("active\n")
+		runner.outputs["docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}"] = nil
+		if err := system.ConfigureDocker(context.Background(), plan); err == nil ||
+			err.Error() != "SETUP_DOCKER_TOPOLOGY_CHANGED" {
+			t.Fatalf("missing Docker topology accepted: %v", err)
+		}
+	})
+
+	t.Run("oversized-topology", func(t *testing.T) {
+		runner := &systemRunner{}
+		system, plan, _ := configuredDockerPlan(t, runner, false)
+		runner.outputs["systemctl is-active --quiet docker.service"] = []byte("active\n")
+		runner.outputs["docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}"] =
+			make([]byte, (1<<20)+1)
+		if err := system.ConfigureDocker(context.Background(), plan); err == nil ||
+			err.Error() != "SETUP_DOCKER_TOPOLOGY_CHANGED" {
+			t.Fatalf("oversized Docker topology accepted: %v", err)
+		}
+	})
+}
+
+func TestManagedDockerValidationFailureBranches(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*testing.T, *System, *systemRunner, Paths)
+		code   string
+	}{
+		{
+			name: "daemon-config",
+			mutate: func(t *testing.T, _ *System, _ *systemRunner, paths Paths) {
+				if err := os.Remove(paths.DockerDaemon); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "socket-drop-in",
+			mutate: func(t *testing.T, _ *System, _ *systemRunner, paths Paths) {
+				if err := os.WriteFile(paths.DockerDropIn, []byte("[Service]\n"), 0o644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "forwarding",
+			mutate: func(_ *testing.T, _ *System, runner *systemRunner, _ Paths) {
+				runner.outputs["sysctl -n net.ipv4.ip_forward"] = []byte("0\n")
+			},
+			code: "SETUP_DOCKER_IPV4_FORWARDING_FAILED",
+		},
+		{
+			name: "topology",
+			mutate: func(_ *testing.T, _ *System, runner *systemRunner, _ Paths) {
+				runner.outputs["docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}"] = nil
+			},
+			code: "SETUP_DOCKER_VALIDATION_FAILED",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &systemRunner{}
+			system, plan, paths := configuredDockerPlan(t, runner, false)
+			system.ValidateHook = nil
+			system.Connectivity = func(context.Context) error { return nil }
+			test.mutate(t, system, runner, paths)
+			err := system.Validate(context.Background(), plan, 7)
+			if err == nil {
+				t.Fatal("invalid managed Docker state accepted")
+			}
+			if test.code != "" && err.Error() != test.code {
+				t.Fatalf("error=%v want=%s", err, test.code)
+			}
+		})
+	}
+}
+
+func TestDockerRouteValidationRequiresManagedVPN(t *testing.T) {
+	runner := &systemRunner{routeDevice: "eth0"}
+	system, _ := testSystem(t, runner)
+	err := system.validateDockerRouting(context.Background(), []containers.Network{{
+		Name: "media", BridgeInterface: "br-media",
+		CIDR: "172.20.0.0/24", Gateway: "172.20.0.1",
+	}}, "nftfw0")
+	if err == nil || err.Error() != "SETUP_DOCKER_ROUTE_VALIDATION_FAILED" {
+		t.Fatalf("physical Docker route accepted: %v", err)
+	}
+	source, err := dockerRouteSource("172.20.0.0/30", "172.20.0.1")
+	if err != nil || source.String() != "172.20.0.2" {
+		t.Fatalf("unexpected Docker route probe source: %s %v", source, err)
+	}
+	if _, err := dockerRouteSource("172.20.0.0/31", "172.20.0.1"); err == nil {
+		t.Fatal("Docker route probe accepted a subnet without a separate probe address")
+	}
+	if err := system.validateDockerRouting(context.Background(), []containers.Network{{
+		Name: "media", BridgeInterface: "br-media", CIDR: "invalid", Gateway: "172.20.0.1",
+	}}, "nftfw0"); err == nil || err.Error() != "SETUP_DOCKER_ROUTE_SOURCE_INVALID" {
+		t.Fatalf("invalid Docker route source was not bounded: %v", err)
 	}
 }
 
@@ -524,6 +1051,38 @@ func TestPrepareFailsBeforeMutationForInvalidInputs(t *testing.T) {
 	}
 }
 
+func TestPrepareRejectsUnsafeManagedDockerOwnershipTarget(t *testing.T) {
+	runner := &systemRunner{}
+	system, paths := testSystem(t, runner)
+	id := strings.Repeat("f", 64)
+	system.Discover = func(context.Context) (discovery.Snapshot, error) {
+		return discovery.Snapshot{
+			OSID: "debian", OSVersion: "13", Architecture: "amd64",
+			Uplink: "eth0", UplinkGateway: netip.MustParseAddr("192.168.1.1"),
+			LANNetworks:   []netip.Prefix{netip.MustParsePrefix("192.168.1.0/24")},
+			ManagementTCP: []int{22}, DockerPresent: true,
+			DockerNetworks: []config.DockerNetwork{{
+				Name: "media", Driver: "bridge", BridgeInterface: "br-" + id[:12],
+				DynamicBridge: true, Subnets: []string{"172.20.0.0/16"},
+				Gateways: []string{"172.20.0.1"},
+			}},
+		}, nil
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.DockerDaemon), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(filepath.Dir(paths.DockerDaemon), "operator.json")
+	if err := os.WriteFile(source, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(source, paths.DockerDaemon); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := system.Prepare(context.Background(), "/provider.conf"); err == nil {
+		t.Fatal("symlinked Docker ownership target accepted")
+	}
+}
+
 func TestAdditionalSystemFailureBranches(t *testing.T) {
 	tests := []struct {
 		name      string
@@ -723,7 +1282,7 @@ func TestPhaseTunnelClassification(t *testing.T) {
 			t.Fatalf("phase %s should permit tunnel cleanup", phase)
 		}
 	}
-	for _, phase := range []Phase{PhaseInspect, PhaseBackup, PhaseGuard, PhaseInstall, PhaseRuntime, PhaseApply} {
+	for _, phase := range []Phase{PhaseInspect, PhaseBackup, PhaseGuard, PhaseInstall, PhaseDocker, PhaseRuntime, PhaseApply} {
 		if phaseMayHaveTunnel(phase) {
 			t.Fatalf("phase %s unexpectedly permits tunnel cleanup", phase)
 		}

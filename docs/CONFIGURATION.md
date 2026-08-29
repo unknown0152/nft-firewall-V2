@@ -202,10 +202,11 @@ gateways = ["172.19.0.1"]
 ```
 
 Docker integration reads the local Docker socket from the privileged daemon;
-socket access is effectively root-equivalent. It is disabled by two separate
-gates: `docker_enabled` defaults to false, and the packaged systemd service
-hides the socket even if configuration is changed. After accepting this trust
-boundary, an operator must explicitly install the supplied drop-in:
+socket access is effectively root-equivalent. In advanced mode it is disabled
+by two separate gates: `docker_enabled` defaults to false, and the packaged
+systemd service hides the socket even if configuration is changed. After
+accepting this trust boundary, an advanced-mode operator must explicitly
+install the supplied drop-in:
 
 ```bash
 sudo install -d -m 0755 /etc/systemd/system/nftfwd.service.d
@@ -234,19 +235,30 @@ and explicitly contains:
 }
 ```
 
+Managed `nftfw setup --vpn` performs the strict daemon JSON merge, sysctl
+ownership, exact drop-in installation, confirmed Docker restart, topology
+validation, and rollback transaction automatically. The managed operator does
+not supply this TOML.
+
 Each Docker entry is an immutable authorization tuple: configured network
-name, `bridge` driver, explicit `com.docker.network.bridge.name`, and parallel
-canonical subnet/gateway arrays. The bridge must also be a declared
+name, `bridge` driver, current Linux bridge binding, and parallel canonical
+subnet/gateway arrays. The bridge must also be a declared
 `container` interface whose CIDRs exactly match the configured subnets. Names,
 bridge interfaces, subnets, and gateways cannot collide. A Docker-generated
 network ID is used only to keep one inspection race-consistent; it may change
 after an approved recreation when the complete stable tuple is unchanged.
-Missing options, generated bridge names, extra routed bridges, or observed
-tuple drift are rejected.
+Managed entries set `dynamic_bridge = true` and use stable
+`provenance_name = "docker:<network>"`; the daemon commits and persists a new
+generation when only the observed bridge changes. Fixed advanced-mode entries
+retain `dynamic_bridge = false`. Missing bridges, extra routed bridges, mode
+changes, or observed tuple drift are rejected.
 
 Restart Docker after changing its settings only under the approved deployment
 procedure. V2 then observes the exact authorized bridge tuple and owns its
-forwarding/NAT. The dashboard never receives Docker socket access.
+forwarding/NAT. Docker's `ip-forward = false` leaves kernel forwarding
+ownership to NFTFW; managed routing requires the separately persisted runtime
+value `net.ipv4.ip_forward = 1`. The dashboard never receives Docker socket
+access.
 
 ## Threat feeds
 

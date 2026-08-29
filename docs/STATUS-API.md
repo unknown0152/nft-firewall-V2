@@ -18,6 +18,9 @@ valid interpretations.
 | `policy_checksum` | string | Compatibility alias of `policy_hash` |
 | `claims_desired_revision` | non-negative integer | Durable revision of the latest intended runtime claim set |
 | `claims_applied_revision` | non-negative integer | Last runtime claim revision confirmed in the kernel; health is degraded unless it equals `claims_desired_revision` |
+| `docker_enabled` | boolean | Managed intent owns Docker bridge routing |
+| `docker_network_count` | non-negative integer | Number of stable managed Docker network identities |
+| `ipv4_forwarding` | boolean | Kernel `net.ipv4.ip_forward` is exactly `1` when managed Docker is enabled |
 | `protected` | boolean | Built-in `/api/status` proxy only: independently derived fail-closed display decision |
 
 An external dashboard may display **Protected** only when all of these checks
@@ -46,3 +49,5 @@ as independently checking the typed fields and hash identities above.
 example when a threat feed is temporarily unavailable but its last known-good
 claims and the verified kernel policy remain installed. This distinction lets
 operators diagnose the subsystem without weakening the overall health gate.
+Managed Docker also degrades status when its network count is zero or IPv4
+forwarding is not ready.

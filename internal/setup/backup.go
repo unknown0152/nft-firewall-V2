@@ -2,6 +2,7 @@ package setup
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -28,6 +29,7 @@ type backupManifest struct {
 type backupFile struct {
 	Path   string      `json:"path"`
 	Backup string      `json:"backup,omitempty"`
+	SHA256 string      `json:"sha256,omitempty"`
 	Exists bool        `json:"exists"`
 	Mode   os.FileMode `json:"mode,omitempty"`
 	UID    int         `json:"uid,omitempty"`
@@ -68,7 +70,12 @@ func createBackup(ctx context.Context, runner routing.Runner, directory string, 
 		if err := copyRegular(path, filepath.Join(directory, name), info.Mode().Perm()); err != nil {
 			return backupManifest{}, err
 		}
+		digest, err := digestRegular(filepath.Join(directory, name))
+		if err != nil {
+			return backupManifest{}, err
+		}
 		item.Exists, item.Backup, item.Mode = true, name, info.Mode().Perm()
+		item.SHA256 = digest
 		item.UID, item.GID = int(stat.Uid), int(stat.Gid)
 		manifest.Files = append(manifest.Files, item)
 	}
@@ -103,8 +110,14 @@ func restoreBackup(ctx context.Context, runner routing.Runner, directory string)
 		if item.Exists {
 			source := filepath.Join(directory, item.Backup)
 			data, err := os.ReadFile(source)
-			if err != nil {
+			if err != nil || len(data) > 4<<20 {
 				return errors.New("SETUP_BACKUP_RESTORE_READ_FAILED")
+			}
+			if item.SHA256 != "" {
+				sum := sha256.Sum256(data)
+				if fmt.Sprintf("%x", sum[:]) != item.SHA256 {
+					return errors.New("SETUP_BACKUP_RESTORE_CHECKSUM_FAILED")
+				}
 			}
 			if err := writeAtomic(item.Path, data, item.Mode); err != nil {
 				return err
@@ -155,6 +168,9 @@ func restoreBackup(ctx context.Context, runner routing.Runner, directory string)
 		action := "stop"
 		if state.Active {
 			action = "start"
+			if unit == "docker.service" {
+				action = "restart"
+			}
 		}
 		if _, err := runner.Run(ctx, nil, "systemctl", action, unit); err != nil {
 			return errors.New("SETUP_BACKUP_RESTORE_UNIT_FAILED")
@@ -165,6 +181,7 @@ func restoreBackup(ctx context.Context, runner routing.Runner, directory string)
 
 func restoreUnitOrder(units []string) []string {
 	rank := map[string]int{
+		"docker.service":                  5,
 		"nftfw-early.service":             10,
 		"nftfw-enforcement-ready.service": 20,
 		"nftfwd.service":                  30,
@@ -209,7 +226,27 @@ func readBackup(directory string) (backupManifest, error) {
 		manifest.Path != directory {
 		return backupManifest{}, errors.New("SETUP_BACKUP_MANIFEST_INVALID")
 	}
+	for _, item := range manifest.Files {
+		if item.Exists && item.SHA256 != "" &&
+			(len(item.SHA256) != sha256.Size*2 || strings.Trim(item.SHA256, "0123456789abcdef") != "") {
+			return backupManifest{}, errors.New("SETUP_BACKUP_MANIFEST_INVALID")
+		}
+	}
 	return manifest, nil
+}
+
+func digestRegular(path string) (string, error) {
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return "", errors.New("SETUP_BACKUP_DIGEST_FAILED")
+	}
+	defer file.Close()
+	hash := sha256.New()
+	written, err := io.Copy(hash, io.LimitReader(file, (4<<20)+1))
+	if err != nil || written > 4<<20 {
+		return "", errors.New("SETUP_BACKUP_DIGEST_FAILED")
+	}
+	return fmt.Sprintf("%x", hash.Sum(nil)), nil
 }
 
 func copyRegular(source, destination string, mode os.FileMode) error {

@@ -8,13 +8,10 @@ import (
 	"fmt"
 	"io"
 	"net/netip"
-	"os"
 	"os/exec"
-	"path/filepath"
 	"regexp"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
@@ -32,6 +29,7 @@ type Observer struct {
 	DockerBinary string
 	DaemonConfig string
 	Expected     []config.DockerNetwork
+	Run          func(context.Context, int64, string, ...string) ([]byte, error)
 }
 
 const localDockerHost = "unix:///var/run/docker.sock"
@@ -44,53 +42,11 @@ func (o Observer) FirewallPolicy() (bool, string, error) {
 	if path == "" {
 		path = "/etc/docker/daemon.json"
 	}
-	info, err := os.Lstat(path)
-	if err != nil {
-		return false, "Docker daemon config unavailable; Docker firewall ownership is unknown", err
-	}
-	if info.Mode()&os.ModeSymlink != 0 || !info.Mode().IsRegular() {
-		return false, "Docker daemon config must be a regular, non-symlink file", errors.New("unsafe daemon config path")
-	}
-	if info.Mode().Perm()&0o022 != 0 || info.Size() > 1<<20 {
-		return false, "Docker daemon config must be bounded and not group/other writable", errors.New("unsafe daemon config permissions or size")
-	}
-	stat, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
-		return false, "Docker daemon config must be owned by the service user", errors.New("unsafe daemon config ownership")
-	}
-	abs, err := filepath.Abs(path)
-	if err != nil {
-		return false, "Docker daemon config path is invalid", err
-	}
-	resolved, err := filepath.EvalSymlinks(abs)
-	if err != nil || resolved != abs {
-		return false, "Docker daemon config path contains a symlink", errors.New("unsafe daemon config path")
-	}
-	parent, err := os.Stat(filepath.Dir(abs))
-	if err != nil || !parent.IsDir() || parent.Mode().Perm()&0o022 != 0 {
-		return false, "Docker daemon config parent is unsafe", errors.New("unsafe daemon config parent")
-	}
-	parentStat, ok := parent.Sys().(*syscall.Stat_t)
-	if !ok || int64(parentStat.Uid) != int64(os.Geteuid()) {
-		return false, "Docker daemon config parent has unsafe ownership", errors.New("unsafe daemon config parent ownership")
-	}
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
-	if err != nil {
-		return false, "Docker daemon config unavailable; Docker firewall ownership is unknown", err
-	}
-	b, err := io.ReadAll(io.LimitReader(f, (1<<20)+1))
-	closeErr := f.Close()
-	if err != nil || closeErr != nil || len(b) > 1<<20 {
-		return false, "Docker daemon config could not be read safely", errors.New("bounded Docker daemon config read failed")
-	}
-	var d map[string]any
-	if err := json.Unmarshal(b, &d); err != nil {
-		return false, "docker daemon config is malformed", err
-	}
-	for _, option := range []string{"iptables", "ip6tables", "ip-forward", "ip-masq", "userland-proxy"} {
-		if d[option] != false {
-			return false, fmt.Sprintf("docker option %s must be explicitly false", option), nil
+	if err := ValidateManagedDaemonConfig(path); err != nil {
+		if strings.HasPrefix(err.Error(), "DOCKER_DAEMON_OPTION_NOT_OWNED_") {
+			return false, err.Error(), nil
 		}
+		return false, err.Error(), err
 	}
 	return true, "docker firewall, forwarding, masquerade, and userland proxy ownership disabled", nil
 }
@@ -114,7 +70,7 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 	}
 	ctx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
-	out, err := boundedOutput(ctx, 128<<10, bin, "--host", localDockerHost, "network", "ls", "--no-trunc", "--format", "{{.ID}}\t{{.Name}}\t{{.Driver}}")
+	out, err := o.output(ctx, 128<<10, bin, "--host", localDockerHost, "network", "ls", "--no-trunc", "--format", "{{.ID}}\t{{.Name}}\t{{.Driver}}")
 	if err != nil {
 		return nil, err
 	}
@@ -125,6 +81,7 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 	}
 	seenNames := map[string]bool{}
 	seenIDs := map[string]bool{}
+	seenBridges := map[string]string{}
 	for _, summary := range names {
 		fields := strings.Split(summary, "\t")
 		if len(fields) != 3 {
@@ -152,22 +109,11 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 		if !authorized {
 			return nil, fmt.Errorf("undeclared routed Docker bridge %q", name)
 		}
-		raw, err := boundedOutput(ctx, 1<<20, bin, "--host", localDockerHost, "network", "inspect", "--", id)
+		raw, err := o.output(ctx, 1<<20, bin, "--host", localDockerHost, "network", "inspect", "--", id)
 		if err != nil {
 			return nil, fmt.Errorf("inspect docker network %s by immutable observation ID: %w", name, err)
 		}
-		var items []struct {
-			ID      string            `json:"Id"`
-			Name    string            `json:"Name"`
-			Driver  string            `json:"Driver"`
-			Options map[string]string `json:"Options"`
-			IPAM    struct {
-				Config []struct {
-					Subnet  string `json:"Subnet"`
-					Gateway string `json:"Gateway"`
-				} `json:"Config"`
-			} `json:"IPAM"`
-		}
+		var items []inspectedNetwork
 		if err := json.Unmarshal(raw, &items); err != nil {
 			return nil, fmt.Errorf("decode docker network %s: %w", name, err)
 		}
@@ -175,10 +121,26 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 			return nil, fmt.Errorf("decode docker network %s: expected one object, got %d", name, len(items))
 		}
 		item := items[0]
-		bridgeName := item.Options["com.docker.network.bridge.name"]
-		if item.ID != id || item.Name != name || item.Driver != driver || item.Driver != wanted.Driver || bridgeName != wanted.BridgeInterface {
+		bridgeName := observedBridgeName(item.ID, item.Name, item.Options)
+		expectedIPv6 := false
+		for _, subnet := range wanted.Subnets {
+			prefix, parseErr := netip.ParsePrefix(subnet)
+			expectedIPv6 = expectedIPv6 || parseErr == nil && prefix.Addr().Is6()
+		}
+		if item.ID != id || item.Name != name || item.Driver != driver ||
+			item.Driver != wanted.Driver || !linuxInterfaceName.MatchString(bridgeName) ||
+			(!wanted.DynamicBridge && bridgeName != wanted.BridgeInterface) ||
+			item.Internal == nil || item.EnableIPv6 == nil ||
+			*item.Internal || *item.EnableIPv6 != expectedIPv6 {
 			return nil, fmt.Errorf("docker network %s changed during inspection or its stable identity drifted", name)
 		}
+		if prior, duplicate := seenBridges[bridgeName]; duplicate && prior != name {
+			return nil, fmt.Errorf("docker bridge interface %s is shared by networks %s and %s", bridgeName, prior, name)
+		}
+		if _, err := o.output(ctx, 64<<10, "ip", "-j", "link", "show", "dev", bridgeName); err != nil {
+			return nil, fmt.Errorf("docker network %s bridge interface %s is absent", name, bridgeName)
+		}
+		seenBridges[bridgeName] = name
 		expectedIPAM, err := canonicalIPAM(wanted.Subnets, wanted.Gateways)
 		if err != nil {
 			return nil, fmt.Errorf("expected docker network %s: %w", name, err)
@@ -215,6 +177,13 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 		return result[i].CIDR < result[j].CIDR
 	})
 	return result, nil
+}
+
+func (o Observer) output(ctx context.Context, limit int64, bin string, args ...string) ([]byte, error) {
+	if o.Run != nil {
+		return o.Run(ctx, limit, bin, args...)
+	}
+	return boundedOutput(ctx, limit, bin, args...)
 }
 
 func canonicalIPAM(subnets, gateways []string) (map[string]string, error) {

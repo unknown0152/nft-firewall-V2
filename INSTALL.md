@@ -34,8 +34,9 @@ run:
 sudo nftfw setup --vpn /path/to/working-vpn.conf
 ```
 
-NFTFW prints the discovered plan and asks once for confirmation. For
-noninteractive provisioning:
+NFTFW prints the discovered plan and asks for confirmation. When Docker daemon
+ownership settings must change, it asks again immediately before one Docker
+restart. For noninteractive provisioning:
 
 ```bash
 sudo nftfw setup --vpn /path/to/working-vpn.conf --yes
@@ -48,8 +49,10 @@ sudo nftfw setup --vpn /path/to/working-vpn.conf --dry-run
 ```
 
 Setup fails before mutation when the OS, route, LAN, resolver, firewall
-ownership, Docker state, existing NFTFW state, reserved routing identities, or
-VPN profile cannot be proved safe.
+ownership, Docker topology, existing NFTFW state, reserved routing identities,
+or VPN profile cannot be proved safe. Eligible Docker IPv4 bridges are adopted
+automatically; the plan names them and states that NFTFW will own kernel IPv4
+forwarding while Docker's own forwarding/firewall mutation remains disabled.
 
 ## Verify
 
@@ -73,10 +76,12 @@ state, advanced TOML, generations, snapshots, the enforcement pointer,
 provenance ledger, unit state, and existing exposure. It does not convert an
 advanced host to managed routing.
 
-An existing NFTFW, Docker, Cosmos, or application host is not eligible for
-automatic clean setup. Use the documented upgrade/adoption workflow and a
-separately reviewed live migration plan. Do not delete state or disable a
-firewall manager to bypass refusal.
+An existing NFTFW host is not eligible for automatic clean setup. Docker and
+application workloads are eligible only when every Docker network satisfies
+the managed bridge contract in `docs/DOCKER.md`; unsupported network drivers,
+IPv6, internal networks, overlap, ambiguity, or an unreadable local socket
+stop setup before mutation. Do not delete state or disable a firewall manager
+to bypass refusal.
 
 ## Source builds
 
@@ -108,5 +113,7 @@ and remains nonactivating.
 | `/var/lib/nftfw/generation-state/state.db` | Generation and runtime state |
 | `/var/lib/nftfw/provenance-ledger.db` | Monotonic interface identities |
 | `/var/lib/nftfw/setup/` | Setup journal, verified backups, and result |
+| `/etc/docker/daemon.json` | Semantically merged Docker ownership settings when adopted |
+| `/etc/sysctl.d/90-nftfw-managed.conf` | Managed IPv4 forwarding and IPv6 disablement |
 | `/run/nftfw/control.sock` | Root-only mutation API |
 | `/run/nftfw/status.sock` | Read-only status API |

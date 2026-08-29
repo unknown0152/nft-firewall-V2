@@ -14,7 +14,7 @@
 | Resolver | `resolvectl` or `resolvconf` when profile DNS is present |
 | IPv6 | Disabled by managed setup |
 | Public inbound | None initially |
-| Docker | Absent, or installed but empty/inactive; integration remains off |
+| Docker | Absent, or local-socket Docker with eligible IPv4 bridge networks |
 
 Setup refuses before mutation when the topology cannot be proved to match this
 matrix.
@@ -28,13 +28,19 @@ matrix.
 - UFW, firewalld, nftables.service, netfilter-persistent, or foreign nftables
   tables;
 - existing NFTFW state or deterministic routing identities;
-- active Docker, Cosmos, Kubernetes, Podman, or application workloads;
+- macvlan, ipvlan, overlay, Swarm, Kubernetes, Podman, internal-only, IPv6,
+  overlapping, malformed, or changing Docker networks;
 - public administration or automatic public SSH;
 - native IPv6 or VPN IPv6.
 
 These cases require an explicit advanced/adoption design and their own
 validation. Refusal is not a prompt to disable security controls or erase
 state.
+
+Normal Docker workloads on the built-in bridge or Compose-style user-defined
+bridges are supported when every current bridge, canonical IPv4 subnet, and
+gateway is unambiguous and non-overlapping. Setup adopts all eligible bridge
+networks together; it never selects only a convenient subset.
 
 ## Advanced mode
 

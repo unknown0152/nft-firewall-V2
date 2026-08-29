@@ -27,6 +27,6 @@ MemoryDenyWriteExecute=yes
 RestrictNamespaces=yes
 SystemCallArchitectures=native
 RestrictAddressFamilies=AF_UNIX AF_INET AF_NETLINK
-ReadWritePaths=/etc/nftfw -/etc/wireguard /etc/sysctl.d /etc/systemd/system /var/lib/nftfw /run/nftfw -/run/resolvconf -/run/systemd/resolve
+ReadWritePaths=/etc/nftfw -/etc/wireguard -/etc/docker /etc/sysctl.d /etc/systemd/system /var/lib/nftfw /run/nftfw -/run/resolvconf -/run/systemd/resolve
 CapabilityBoundingSet=CAP_CHOWN CAP_NET_ADMIN
 AmbientCapabilities=CAP_CHOWN CAP_NET_ADMIN

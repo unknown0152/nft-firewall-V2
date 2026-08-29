@@ -9,7 +9,10 @@ nftfw setup rollback [--expired]
 ```
 
 `setup` is single-writer locked. A healthy repeat with the same profile is a
-no-op. A different profile or unhealthy prior managed state is refused.
+no-op. A different profile or unhealthy prior managed state is refused. The
+dry-run lists adopted Docker networks, NFTFW IPv4-forwarding ownership, and
+whether one Docker restart is required. Interactive setup asks again
+immediately before that restart; `--yes` accepts both confirmations.
 
 ## Tunnel
 
@@ -65,7 +68,9 @@ sudo nftfw backup verify DIRECTORY [--json]
 The managed bundle includes generated configuration, non-secret intent,
 root-only VPN profile, sysctl state file, generation database, provenance
 ledger, enforcement pointer, and immutable generation artifacts. The
-manifest contains only checksums, sizes, modes, and timestamps.
+manifest contains only checksums, sizes, modes, and timestamps. When managed
+Docker is enabled, it also includes the exact managed `daemon.json` and
+Docker-socket drop-in.
 
 Advanced-mode commands (`config validate`, `doctor`, `plan`, `apply`,
 `commit`, `rollback`, claims, and state operations) remain supported.

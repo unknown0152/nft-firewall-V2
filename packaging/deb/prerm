@@ -16,6 +16,11 @@ if [ -d /run/systemd/system ]; then
                 nftfw-rollback.timer nftfw-rollback.service nftfwd.service \
                 nftfw-enforcement-ready.service nftfw-early.service \
                 >/dev/null 2>&1 || true
+            if [ -r /usr/lib/nftfw/docker-handoff.sh ]; then
+                # shellcheck source=scripts/docker-handoff.sh
+                . /usr/lib/nftfw/docker-handoff.sh
+                nftfw_remove_managed_docker_dropin ""
+            fi
             ;;
     esac
 fi

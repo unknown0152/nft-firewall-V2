@@ -91,7 +91,9 @@ func Compile(in Input, generation uint64) (Artifact, error) {
 	sum := sha256.Sum256([]byte(script))
 	assignments := make([]provenance.Assignment, 0, len(in.Policy.Config.Interfaces))
 	for _, configured := range sortedInterfaces(in.Policy.Config.Interfaces) {
-		assignments = append(assignments, provenance.Assignment{Name: configured.Name, ID: configured.ProvenanceID})
+		assignments = append(assignments, provenance.Assignment{
+			Name: config.InterfaceProvenanceName(configured), ID: configured.ProvenanceID,
+		})
 	}
 	return Artifact{Generation: generation, Script: script, Checksum: hex.EncodeToString(sum[:]), Provenance: assignments}, nil
 }

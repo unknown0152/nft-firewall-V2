@@ -47,9 +47,27 @@ func cleanDiscoveryRunner() *fakeRunner {
 			"systemctl is-active --quiet ufw.service":                  errors.New("inactive"),
 			"systemctl is-active --quiet nftables.service":             errors.New("inactive"),
 			"systemctl is-active --quiet netfilter-persistent.service": errors.New("inactive"),
-			"docker version --format {{.Server.Version}}":              errors.New("not installed"),
+			"docker --version": errors.New("not installed"),
+			"docker --host unix:///var/run/docker.sock version --format {{.Server.Version}}": errors.New("not installed"),
 		},
 	}
+}
+
+func addCleanDocker(runner *fakeRunner) {
+	delete(runner.errors, "docker --version")
+	runner.outputs["docker --version"] = []byte("Docker version 29.0.0\n")
+	delete(runner.errors, "docker --host unix:///var/run/docker.sock version --format {{.Server.Version}}")
+	runner.outputs["docker --host unix:///var/run/docker.sock version --format {{.Server.Version}}"] = []byte("29.0.0\n")
+	runner.outputs["docker --host unix:///var/run/docker.sock ps -aq"] = nil
+	runner.outputs["docker --host unix:///var/run/docker.sock network ls --filter type=custom -q"] = nil
+	id := strings.Repeat("a", 64)
+	runner.outputs["docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}"] =
+		[]byte(id + "\tbridge\tbridge\n" +
+			strings.Repeat("b", 64) + "\thost\thost\n" +
+			strings.Repeat("c", 64) + "\tnone\tnull\n")
+	runner.outputs["docker --host unix:///var/run/docker.sock network inspect -- "+id] =
+		[]byte(`[{"Id":"` + id + `","Name":"bridge","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{},"IPAM":{"Config":[{"Subnet":"172.17.0.0/16","Gateway":"172.17.0.1"}]}}]`)
+	runner.outputs["ip -j link show dev docker0"] = []byte(`[{"ifname":"docker0"}]`)
 }
 
 func discoveryRoot(t *testing.T) string {
@@ -85,10 +103,7 @@ func TestInspectorDiscoverClassifiesDockerIPv6AndManagers(t *testing.T) {
 	runner.outputs["ip -j -6 route show default"] = []byte(
 		`[{"gateway":"2001:db8::1","dev":"enp1s0"}]`,
 	)
-	delete(runner.errors, "docker version --format {{.Server.Version}}")
-	runner.outputs["docker version --format {{.Server.Version}}"] = []byte("29.0.0\n")
-	runner.outputs["docker ps -aq"] = nil
-	runner.outputs["docker network ls --filter type=custom -q"] = nil
+	addCleanDocker(runner)
 	delete(runner.errors, "systemctl is-active --quiet ufw.service")
 	_, err := (Inspector{Runner: runner, Root: discoveryRoot(t)}).Discover(context.Background())
 	if err == nil || err.Error() != "DISCOVERY_COMPETING_FIREWALL" {
@@ -100,7 +115,9 @@ func TestInspectorDiscoverClassifiesDockerIPv6AndManagers(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !snapshot.IPv6DefaultRoute || !snapshot.DockerPresent || !snapshot.DockerClean {
+	if !snapshot.IPv6DefaultRoute || !snapshot.DockerPresent || !snapshot.DockerClean ||
+		len(snapshot.DockerNetworks) != 1 ||
+		snapshot.DockerNetworks[0].BridgeInterface != "docker0" {
 		t.Fatalf("optional state was not classified: %#v", snapshot)
 	}
 }
@@ -152,19 +169,27 @@ func TestInspectorHelpersAndExistingState(t *testing.T) {
 		t.Fatal("existing NFTFW state was missed")
 	}
 
-	delete(runner.errors, "docker version --format {{.Server.Version}}")
-	runner.outputs["docker version --format {{.Server.Version}}"] = []byte("29")
-	runner.errors["docker ps -aq"] = errors.New("unreadable")
-	present, clean := inspector.dockerState(context.Background())
-	if !present || clean {
-		t.Fatalf("unreadable Docker state classified clean: present=%t clean=%t", present, clean)
+	delete(runner.errors, "docker --version")
+	runner.outputs["docker --version"] = []byte("Docker version 29\n")
+	delete(runner.errors, "docker --host unix:///var/run/docker.sock version --format {{.Server.Version}}")
+	runner.outputs["docker --host unix:///var/run/docker.sock version --format {{.Server.Version}}"] = []byte("29")
+	runner.errors["docker --host unix:///var/run/docker.sock ps -aq"] = errors.New("unreadable")
+	present, clean, networks, err := inspector.dockerState(context.Background())
+	if !present || clean || len(networks) != 0 || err == nil {
+		t.Fatalf("unreadable Docker state classified clean: present=%t clean=%t networks=%v err=%v", present, clean, networks, err)
 	}
-	delete(runner.errors, "docker ps -aq")
-	runner.outputs["docker ps -aq"] = []byte("container\n")
-	runner.outputs["docker network ls --filter type=custom -q"] = nil
-	present, clean = inspector.dockerState(context.Background())
-	if !present || clean {
-		t.Fatalf("non-empty Docker state classified clean: present=%t clean=%t", present, clean)
+	delete(runner.errors, "docker --host unix:///var/run/docker.sock ps -aq")
+	runner.outputs["docker --host unix:///var/run/docker.sock ps -aq"] = []byte("container\n")
+	runner.outputs["docker --host unix:///var/run/docker.sock network ls --filter type=custom -q"] = nil
+	id := strings.Repeat("d", 64)
+	runner.outputs["docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}"] =
+		[]byte(id + "\tbridge\tbridge\n")
+	runner.outputs["docker --host unix:///var/run/docker.sock network inspect -- "+id] =
+		[]byte(`[{"Id":"` + id + `","Name":"bridge","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{},"IPAM":{"Config":[{"Subnet":"172.17.0.0/16","Gateway":"172.17.0.1"}]}}]`)
+	runner.outputs["ip -j link show dev docker0"] = []byte(`[{"ifname":"docker0"}]`)
+	present, clean, networks, err = inspector.dockerState(context.Background())
+	if !present || clean || err != nil || len(networks) != 1 {
+		t.Fatalf("non-empty Docker state rejected: present=%t clean=%t networks=%v err=%v", present, clean, networks, err)
 	}
 }
 

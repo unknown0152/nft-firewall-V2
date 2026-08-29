@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -14,10 +15,13 @@ import (
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
+	"github.com/unknown0152/nft-firewall-v2/internal/compiler"
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
+	"github.com/unknown0152/nft-firewall-v2/internal/containers"
 	"github.com/unknown0152/nft-firewall-v2/internal/discovery"
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
 	"github.com/unknown0152/nft-firewall-v2/internal/intent"
+	"github.com/unknown0152/nft-firewall-v2/internal/policy"
 	"github.com/unknown0152/nft-firewall-v2/internal/reconcile"
 	"github.com/unknown0152/nft-firewall-v2/internal/routing"
 	"github.com/unknown0152/nft-firewall-v2/internal/wgconfig"
@@ -31,6 +35,8 @@ type Paths struct {
 	StateDir      string
 	RuntimeDir    string
 	SystemdDir    string
+	DockerDaemon  string
+	DockerDropIn  string
 	ControlSocket string
 	StatusSocket  string
 }
@@ -41,38 +47,44 @@ func DefaultPaths() Paths {
 		VPN: intent.VPNConfig, Sysctl: "/etc/sysctl.d/90-nftfw-managed.conf",
 		StateDir: "/var/lib/nftfw", RuntimeDir: "/run/nftfw",
 		SystemdDir:    "/etc/systemd/system",
+		DockerDaemon:  "/etc/docker/daemon.json",
+		DockerDropIn:  "/etc/systemd/system/nftfwd.service.d/docker-access.conf",
 		ControlSocket: "/run/nftfw/control.sock", StatusSocket: "/run/nftfw/status.sock",
 	}
 }
 
 type System struct {
-	Paths             Paths
-	Runner            routing.Runner
-	Discover          func(context.Context) (discovery.Snapshot, error)
-	ReadProfile       func(string) (wgconfig.Profile, wgconfig.Summary, error)
-	Resolve           func(context.Context, string) ([]netip.Addr, error)
-	Resolver          func(context.Context, routing.Runner, bool) (routing.ResolverMode, error)
-	Control           func(context.Context, api.Request) (any, error)
-	Status            func(context.Context) (health.Snapshot, error)
-	ValidateHook      func(context.Context, prepared, uint64) error
-	Connectivity      func(context.Context) error
-	DNSLookup         func(context.Context, string) ([]string, error)
-	ValidationTimeout time.Duration
-	ValidationPoll    time.Duration
-	Now               func() time.Time
+	Paths                Paths
+	Runner               routing.Runner
+	Discover             func(context.Context) (discovery.Snapshot, error)
+	ReadProfile          func(string) (wgconfig.Profile, wgconfig.Summary, error)
+	Resolve              func(context.Context, string) ([]netip.Addr, error)
+	Resolver             func(context.Context, routing.Runner, bool) (routing.ResolverMode, error)
+	Control              func(context.Context, api.Request) (any, error)
+	Status               func(context.Context) (health.Snapshot, error)
+	ValidateHook         func(context.Context, prepared, uint64) error
+	Connectivity         func(context.Context) error
+	DNSLookup            func(context.Context, string) ([]string, error)
+	ConfirmDockerRestart func(Summary) error
+	ValidationTimeout    time.Duration
+	ValidationPoll       time.Duration
+	Now                  func() time.Time
 }
 
 type prepared struct {
-	Profile    wgconfig.Profile
-	Intent     intent.Intent
-	Config     config.Config
-	IntentData []byte
-	ConfigData []byte
-	VPNData    []byte
-	GuardData  []byte
-	SysctlData []byte
-	Route      routing.Config
-	BackupDir  string
+	Profile       wgconfig.Profile
+	Intent        intent.Intent
+	Config        config.Config
+	IntentData    []byte
+	ConfigData    []byte
+	VPNData       []byte
+	GuardData     []byte
+	SysctlData    []byte
+	DockerData    []byte
+	DockerChanged bool
+	PolicyData    []byte
+	Route         routing.Config
+	BackupDir     string
 }
 
 func (s *System) Prepare(ctx context.Context, vpnPath string) (Plan, error) {
@@ -113,6 +125,21 @@ func (s *System) Prepare(ctx context.Context, vpnPath string) (Plan, error) {
 	configData, err := intent.RenderConfig(managedConfig)
 	if err != nil {
 		return Plan{}, err
+	}
+	effective, err := policy.Compile(managedConfig)
+	if err != nil {
+		return Plan{}, errors.New("SETUP_POLICY_COMPILATION_FAILED")
+	}
+	var dockerIPv4 []string
+	for _, network := range managedConfig.DockerNetworks {
+		dockerIPv4 = append(dockerIPv4, network.Subnets...)
+	}
+	artifact, err := compiler.Compile(compiler.Input{
+		Policy: effective, BootstrapV4: managedConfig.WireGuard.BootstrapIPs,
+		DockerNets: dockerIPv4,
+	}, 0)
+	if err != nil {
+		return Plan{}, errors.New("SETUP_POLICY_COMPILATION_FAILED")
 	}
 	vpnData, err := profile.NormalizedWGQuick(intent.VPNInterface)
 	if err != nil {
@@ -157,15 +184,28 @@ func (s *System) Prepare(ctx context.Context, vpnPath string) (Plan, error) {
 		ipv6Interfaces = []string{snapshot.Uplink}
 	}
 	sort.Strings(ipv6Interfaces)
+	var dockerData []byte
+	dockerChanged := false
+	if managedIntent.DockerEnabled {
+		dockerData, dockerChanged, err = containers.ManagedDaemonConfig(s.Paths.DockerDaemon)
+		if err != nil {
+			return Plan{}, err
+		}
+	}
 	private := &prepared{
 		Profile: profile, Intent: managedIntent, Config: managedConfig,
 		IntentData: intentData, ConfigData: configData, VPNData: vpnData,
-		GuardData: guardData, SysctlData: renderSysctl(ipv6Interfaces),
-		Route: routeConfig,
+		GuardData: guardData, SysctlData: renderSysctl(ipv6Interfaces, managedIntent.DockerEnabled),
+		DockerData: dockerData, DockerChanged: dockerChanged,
+		PolicyData: []byte(artifact.Script), Route: routeConfig,
 	}
 	dockerMode := "disabled"
-	if snapshot.DockerPresent && snapshot.DockerClean {
-		dockerMode = "clean-detected-not-adopted"
+	var dockerNames []string
+	if managedIntent.DockerEnabled {
+		dockerMode = "enabled"
+		for _, network := range managedIntent.DockerNetworks {
+			dockerNames = append(dockerNames, network.Name)
+		}
 	}
 	return Plan{
 		VPNSource: vpnPath,
@@ -176,6 +216,7 @@ func (s *System) Prepare(ctx context.Context, vpnPath string) (Plan, error) {
 			ManagementTCP: managedIntent.ManagementTCP,
 			PublicTCP:     managedIntent.PublicTCP, PublicUDP: managedIntent.PublicUDP,
 			IPv6Mode: "disabled", DockerMode: dockerMode,
+			DockerNetworks: dockerNames, DockerRestart: dockerChanged,
 			ResolverMode: string(resolverMode), SourceModeWarning: profileSummary.SourceWorldReadable,
 		},
 		PrivateData: private,
@@ -194,8 +235,8 @@ func (s *System) Backup(ctx context.Context, plan Plan) (string, error) {
 	}
 	directory := filepath.Join(s.Paths.StateDir, "setup", "backups", now().UTC().Format("20060102T150405.000000000Z"))
 	manifest, err := createBackup(
-		ctx, s.Runner, directory, s.touchedFiles(), managedUnits(),
-		managedSysctls(plan.Summary.IPv6Interfaces),
+		ctx, s.Runner, directory, s.touchedFiles(plan), managedUnits(plan.Summary.DockerMode == "enabled"),
+		managedSysctls(plan.Summary.IPv6Interfaces, plan.Summary.DockerMode == "enabled"),
 	)
 	if err != nil {
 		return "", err
@@ -238,6 +279,26 @@ func (s *System) Install(ctx context.Context, plan Plan) error {
 	if err != nil {
 		return err
 	}
+	if private.Intent.DockerEnabled {
+		if err := containers.ValidateManagedSocketDropInTarget(s.Paths.DockerDropIn); err != nil {
+			return err
+		}
+	}
+	candidatePath := filepath.Join(s.Paths.RuntimeDir, "setup-candidate.nft")
+	if err := writeAtomic(candidatePath, private.PolicyData, 0o600); err != nil {
+		return err
+	}
+	defer os.Remove(candidatePath)
+	if _, err := s.Runner.Run(ctx, nil, "nft", "--check", "--file", candidatePath); err != nil {
+		return errors.New("SETUP_POLICY_CHECK_FAILED")
+	}
+	if private.Intent.DockerEnabled {
+		current, changed, err := containers.ManagedDaemonConfig(s.Paths.DockerDaemon)
+		if err != nil || changed != private.DockerChanged ||
+			!bytes.Equal(current, private.DockerData) {
+			return errors.New("SETUP_DOCKER_CONFIG_CHANGED_AFTER_PLAN")
+		}
+	}
 	files := []struct {
 		path string
 		data []byte
@@ -250,6 +311,20 @@ func (s *System) Install(ctx context.Context, plan Plan) error {
 		{filepath.Join(s.Paths.SystemdDir, "nftfwd.service.d", "50-nftfw-final-early.conf"), []byte(finalEarlyDropIn), 0o644},
 		{filepath.Join(s.Paths.SystemdDir, "nftfw-rollback.service.d", "50-nftfw-final-early.conf"), []byte(finalEarlyDropIn), 0o644},
 	}
+	if private.Intent.DockerEnabled {
+		files = append(files,
+			struct {
+				path string
+				data []byte
+				mode os.FileMode
+			}{s.Paths.DockerDaemon, private.DockerData, 0o600},
+			struct {
+				path string
+				data []byte
+				mode os.FileMode
+			}{s.Paths.DockerDropIn, []byte(containers.ManagedSocketDropIn), 0o644},
+		)
+	}
 	for _, file := range files {
 		if err := writeAtomic(file.path, file.data, file.mode); err != nil {
 			return err
@@ -258,6 +333,9 @@ func (s *System) Install(ctx context.Context, plan Plan) error {
 	settings := map[string]string{
 		"net.ipv6.conf.default.disable_ipv6": "1",
 		"net.ipv6.conf.all.forwarding":       "0",
+	}
+	if private.Intent.DockerEnabled {
+		settings["net.ipv4.ip_forward"] = "1"
 	}
 	for _, name := range plan.Summary.IPv6Interfaces {
 		settings["net.ipv6.conf."+name+".disable_ipv6"] = "1"
@@ -276,6 +354,71 @@ func (s *System) Install(ctx context.Context, plan Plan) error {
 		"nftfw-setup-rollback.service", "nftfw-setup-rollback.timer",
 		"nftfw-vpn.service", "nftfw-web.service"); err != nil {
 		return errors.New("SETUP_SYSTEMD_VERIFY_FAILED")
+	}
+	if private.Intent.DockerEnabled {
+		if err := containers.ValidateManagedDaemonConfig(s.Paths.DockerDaemon); err != nil {
+			return err
+		}
+		if err := containers.ValidateManagedSocketDropIn(s.Paths.DockerDropIn); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *System) ConfigureDocker(ctx context.Context, plan Plan) error {
+	s.defaults()
+	private, err := privatePlan(plan)
+	if err != nil {
+		return err
+	}
+	if !private.Intent.DockerEnabled {
+		return nil
+	}
+	if err := containers.ValidateManagedDaemonConfig(s.Paths.DockerDaemon); err != nil {
+		return err
+	}
+	if err := containers.ValidateManagedSocketDropIn(s.Paths.DockerDropIn); err != nil {
+		return err
+	}
+	if private.DockerChanged {
+		if s.ConfirmDockerRestart == nil {
+			return errors.New("SETUP_DOCKER_RESTART_CONFIRMATION_REQUIRED")
+		}
+		if err := s.ConfirmDockerRestart(plan.Summary); err != nil {
+			return err
+		}
+		if _, err := s.Runner.Run(ctx, nil, "systemctl", "restart", "docker.service"); err != nil {
+			return errors.New("SETUP_DOCKER_RESTART_FAILED")
+		}
+	} else if _, err := s.Runner.Run(ctx, nil, "systemctl", "is-active", "--quiet", "docker.service"); err != nil {
+		return errors.New("SETUP_DOCKER_INACTIVE")
+	}
+	if err := containers.ValidateManagedDaemonConfig(s.Paths.DockerDaemon); err != nil {
+		return err
+	}
+	if err := containers.ValidateManagedSocketDropIn(s.Paths.DockerDropIn); err != nil {
+		return err
+	}
+	forwarding, err := s.Runner.Run(ctx, nil, "sysctl", "-n", "net.ipv4.ip_forward")
+	if err != nil || strings.TrimSpace(string(forwarding)) != "1" {
+		return errors.New("SETUP_DOCKER_IPV4_FORWARDING_FAILED")
+	}
+	observer := containers.Observer{
+		Expected: private.Intent.DockerNetworks,
+		Run: func(ctx context.Context, limit int64, name string, args ...string) ([]byte, error) {
+			data, err := s.Runner.Run(ctx, nil, name, args...)
+			if err != nil {
+				return nil, err
+			}
+			if int64(len(data)) > limit {
+				return nil, errors.New("SETUP_DOCKER_OUTPUT_TOO_LARGE")
+			}
+			return data, nil
+		},
+	}
+	if _, err := observer.Networks(ctx); err != nil {
+		return errors.New("SETUP_DOCKER_TOPOLOGY_CHANGED")
 	}
 	return nil
 }
@@ -379,7 +522,76 @@ func (s *System) Validate(ctx context.Context, plan Plan, generation uint64) err
 			return errors.New("SETUP_VPN_DNS_FAILED")
 		}
 	}
+	if private.Intent.DockerEnabled {
+		if err := containers.ValidateManagedDaemonConfig(s.Paths.DockerDaemon); err != nil {
+			return err
+		}
+		if err := containers.ValidateManagedSocketDropIn(s.Paths.DockerDropIn); err != nil {
+			return err
+		}
+		forwarding, err := s.Runner.Run(ctx, nil, "sysctl", "-n", "net.ipv4.ip_forward")
+		if err != nil || strings.TrimSpace(string(forwarding)) != "1" {
+			return errors.New("SETUP_DOCKER_IPV4_FORWARDING_FAILED")
+		}
+		observer := containers.Observer{
+			Expected: private.Intent.DockerNetworks,
+			Run: func(ctx context.Context, limit int64, name string, args ...string) ([]byte, error) {
+				data, err := s.Runner.Run(ctx, nil, name, args...)
+				if err != nil {
+					return nil, err
+				}
+				if int64(len(data)) > limit {
+					return nil, errors.New("SETUP_DOCKER_OUTPUT_TOO_LARGE")
+				}
+				return data, nil
+			},
+		}
+		observed, err := observer.Networks(ctx)
+		if err != nil {
+			return errors.New("SETUP_DOCKER_VALIDATION_FAILED")
+		}
+		if err := s.validateDockerRouting(ctx, observed, plan.Summary.VPNInterface); err != nil {
+			return err
+		}
+	}
 	return nil
+}
+
+func (s *System) validateDockerRouting(
+	ctx context.Context, networks []containers.Network, vpnInterface string,
+) error {
+	for _, network := range networks {
+		source, err := dockerRouteSource(network.CIDR, network.Gateway)
+		if err != nil {
+			return errors.New("SETUP_DOCKER_ROUTE_SOURCE_INVALID")
+		}
+		route, err := s.Runner.Run(
+			ctx, nil, "ip", "-j", "-4", "route", "get", "1.1.1.1",
+			"from", source.String(), "iif", network.BridgeInterface,
+		)
+		if err != nil || routeDevice(route) != vpnInterface {
+			return errors.New("SETUP_DOCKER_ROUTE_VALIDATION_FAILED")
+		}
+	}
+	return nil
+}
+
+func dockerRouteSource(cidr, rawGateway string) (netip.Addr, error) {
+	prefix, err := netip.ParsePrefix(cidr)
+	gateway, gatewayErr := netip.ParseAddr(rawGateway)
+	if err != nil || gatewayErr != nil || !prefix.Addr().Is4() ||
+		!gateway.Is4() || prefix.Bits() == 0 || prefix.Bits() > 30 {
+		return netip.Addr{}, errors.New("invalid Docker route source")
+	}
+	prefix = prefix.Masked()
+	candidate := prefix.Addr().Next()
+	if candidate == gateway {
+		candidate = candidate.Next()
+	}
+	if !candidate.IsValid() || !prefix.Contains(candidate) || candidate == gateway {
+		return netip.Addr{}, errors.New("invalid Docker route source")
+	}
+	return candidate, nil
 }
 
 func (s *System) Commit(ctx context.Context, _ Plan, generation uint64) error {
@@ -549,6 +761,12 @@ func (s *System) defaults() {
 	if s.Paths.SystemdDir == "" {
 		s.Paths.SystemdDir = defaults.SystemdDir
 	}
+	if s.Paths.DockerDaemon == "" {
+		s.Paths.DockerDaemon = defaults.DockerDaemon
+	}
+	if s.Paths.DockerDropIn == "" {
+		s.Paths.DockerDropIn = defaults.DockerDropIn
+	}
 	if s.Paths.ControlSocket == "" {
 		s.Paths.ControlSocket = defaults.ControlSocket
 	}
@@ -590,12 +808,16 @@ func (s *System) status(ctx context.Context) (health.Snapshot, error) {
 	return snapshot, nil
 }
 
-func (s *System) touchedFiles() []string {
-	return []string{
+func (s *System) touchedFiles(plan Plan) []string {
+	result := []string{
 		s.Paths.VPN, s.Paths.Intent, s.Paths.Config, s.Paths.Sysctl,
 		filepath.Join(s.Paths.SystemdDir, "nftfwd.service.d", "50-nftfw-final-early.conf"),
 		filepath.Join(s.Paths.SystemdDir, "nftfw-rollback.service.d", "50-nftfw-final-early.conf"),
 	}
+	if plan.Summary.DockerMode == "enabled" {
+		result = append(result, s.Paths.DockerDaemon, s.Paths.DockerDropIn)
+	}
+	return result
 }
 
 func privatePlan(plan Plan) (*prepared, error) {
@@ -643,9 +865,12 @@ func routeDevice(data []byte) string {
 	return routes[0].Device
 }
 
-func renderSysctl(interfaces []string) []byte {
+func renderSysctl(interfaces []string, dockerEnabled bool) []byte {
 	var builder strings.Builder
 	builder.WriteString("# Managed by NFT Firewall V2.\n")
+	if dockerEnabled {
+		builder.WriteString("net.ipv4.ip_forward = 1\n")
+	}
 	builder.WriteString("net.ipv6.conf.default.disable_ipv6 = 1\n")
 	for _, name := range interfaces {
 		builder.WriteString("net.ipv6.conf." + name + ".disable_ipv6 = 1\n")
@@ -654,18 +879,25 @@ func renderSysctl(interfaces []string) []byte {
 	return []byte(builder.String())
 }
 
-func managedUnits() []string {
-	return []string{
+func managedUnits(dockerEnabled bool) []string {
+	result := []string{
 		"nftfw-early.service", "nftfw-enforcement-ready.service", "nftfwd.service",
 		"nftfw-rollback.timer", "nftfw-web.service", "nftfw-vpn.service",
 		"nftfw-setup-rollback.timer", "nftfw-managed-rollback.timer",
 	}
+	if dockerEnabled {
+		result = append(result, "docker.service")
+	}
+	return result
 }
 
-func managedSysctls(interfaces []string) []string {
+func managedSysctls(interfaces []string, dockerEnabled bool) []string {
 	result := []string{
 		"net.ipv6.conf.default.disable_ipv6",
 		"net.ipv6.conf.all.forwarding",
+	}
+	if dockerEnabled {
+		result = append(result, "net.ipv4.ip_forward")
 	}
 	for _, name := range interfaces {
 		result = append(result, "net.ipv6.conf."+name+".disable_ipv6")

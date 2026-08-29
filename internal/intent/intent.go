@@ -27,26 +27,35 @@ const (
 	VPNConfig    = "/etc/wireguard/nftfw0.conf"
 )
 
+var managedDockerReservedIPv4 = []netip.Prefix{
+	netip.MustParsePrefix("0.0.0.0/8"),
+	netip.MustParsePrefix("127.0.0.0/8"),
+	netip.MustParsePrefix("169.254.0.0/16"),
+	netip.MustParsePrefix("224.0.0.0/4"),
+	netip.MustParsePrefix("240.0.0.0/4"),
+}
+
 type Intent struct {
-	Schema        string   `toml:"schema"`
-	Managed       bool     `toml:"managed"`
-	Uplink        string   `toml:"uplink"`
-	VPNInterface  string   `toml:"vpn_interface"`
-	LANNetworks   []string `toml:"lan_networks"`
-	ManagementTCP []int    `toml:"management_tcp"`
-	LANAllowTCP   []int    `toml:"lan_allow_tcp"`
-	LANAllowUDP   []int    `toml:"lan_allow_udp"`
-	PublicTCP     []int    `toml:"public_tcp"`
-	PublicUDP     []int    `toml:"public_udp"`
-	VPNAddresses  []string `toml:"vpn_addresses"`
-	EndpointHost  string   `toml:"endpoint_host"`
-	EndpointPort  int      `toml:"endpoint_port"`
-	BootstrapIPv4 []string `toml:"bootstrap_ipv4"`
-	DNS           []string `toml:"dns"`
-	MTU           int      `toml:"mtu"`
-	ResolverMode  string   `toml:"resolver_mode"`
-	DisableIPv6   bool     `toml:"disable_ipv6"`
-	DockerEnabled bool     `toml:"docker_enabled"`
+	Schema         string                 `toml:"schema"`
+	Managed        bool                   `toml:"managed"`
+	Uplink         string                 `toml:"uplink"`
+	VPNInterface   string                 `toml:"vpn_interface"`
+	LANNetworks    []string               `toml:"lan_networks"`
+	ManagementTCP  []int                  `toml:"management_tcp"`
+	LANAllowTCP    []int                  `toml:"lan_allow_tcp"`
+	LANAllowUDP    []int                  `toml:"lan_allow_udp"`
+	PublicTCP      []int                  `toml:"public_tcp"`
+	PublicUDP      []int                  `toml:"public_udp"`
+	VPNAddresses   []string               `toml:"vpn_addresses"`
+	EndpointHost   string                 `toml:"endpoint_host"`
+	EndpointPort   int                    `toml:"endpoint_port"`
+	BootstrapIPv4  []string               `toml:"bootstrap_ipv4"`
+	DNS            []string               `toml:"dns"`
+	MTU            int                    `toml:"mtu"`
+	ResolverMode   string                 `toml:"resolver_mode"`
+	DisableIPv6    bool                   `toml:"disable_ipv6"`
+	DockerEnabled  bool                   `toml:"docker_enabled"`
+	DockerNetworks []config.DockerNetwork `toml:"docker_networks"`
 }
 
 func New(snapshot discovery.Snapshot, profile wgconfig.Profile, bootstrap []netip.Addr) (Intent, error) {
@@ -61,7 +70,8 @@ func New(snapshot discovery.Snapshot, profile wgconfig.Profile, bootstrap []neti
 		VPNInterface: VPNInterface, ManagementTCP: uniquePorts(snapshot.ManagementTCP),
 		EndpointHost: profile.Peer.EndpointHost, EndpointPort: int(profile.Peer.EndpointPort),
 		DisableIPv6: true, MTU: profile.MTU,
-		DockerEnabled: snapshot.DockerPresent && snapshot.DockerClean,
+		DockerEnabled:  snapshot.DockerPresent && len(snapshot.DockerNetworks) > 0,
+		DockerNetworks: append([]config.DockerNetwork(nil), snapshot.DockerNetworks...),
 	}
 	for _, prefix := range snapshot.LANNetworks {
 		result.LANNetworks = append(result.LANNetworks, prefix.Masked().String())
@@ -133,7 +143,90 @@ func (i Intent) Validate() error {
 		i.ResolverMode != "resolvectl" && i.ResolverMode != "resolvconf" {
 		return errors.New("INTENT_RESOLVER_INVALID")
 	}
+	if i.DockerEnabled != (len(i.DockerNetworks) > 0) {
+		return errors.New("INTENT_DOCKER_STATE_INVALID")
+	}
+	if err := validateManagedDockerIsolation(i); err != nil {
+		return err
+	}
 	return nil
+}
+
+func validateManagedDockerIsolation(i Intent) error {
+	var lan, vpn, bootstrap []netip.Prefix
+	for _, raw := range i.LANNetworks {
+		prefix, _ := netip.ParsePrefix(raw)
+		lan = append(lan, prefix.Masked())
+	}
+	for _, raw := range i.VPNAddresses {
+		prefix, _ := netip.ParsePrefix(raw)
+		vpn = append(vpn, prefix.Masked())
+	}
+	for _, raw := range i.BootstrapIPv4 {
+		prefix, _ := netip.ParsePrefix(raw)
+		bootstrap = append(bootstrap, prefix.Masked())
+	}
+	type ownedPrefix struct {
+		name   string
+		prefix netip.Prefix
+	}
+	var docker []ownedPrefix
+	for _, network := range i.DockerNetworks {
+		for _, raw := range network.Subnets {
+			prefix, err := netip.ParsePrefix(strings.TrimSpace(raw))
+			if err != nil || !prefix.Addr().Is4() || prefix.Bits() == 0 ||
+				prefix.String() != prefix.Masked().String() {
+				return errors.New("INTENT_DOCKER_SUBNET_INVALID")
+			}
+			prefix = prefix.Masked()
+			for _, reserved := range managedDockerReservedIPv4 {
+				if prefix.Overlaps(reserved) {
+					return errors.New("INTENT_DOCKER_SUBNET_OVERLAPS_RESERVED")
+				}
+			}
+			for _, existing := range lan {
+				if prefix.Overlaps(existing) {
+					return errors.New("INTENT_DOCKER_SUBNET_OVERLAPS_LAN")
+				}
+			}
+			for _, existing := range vpn {
+				if prefix.Overlaps(existing) {
+					return errors.New("INTENT_DOCKER_SUBNET_OVERLAPS_VPN")
+				}
+			}
+			for _, existing := range bootstrap {
+				if prefix.Overlaps(existing) {
+					return errors.New("INTENT_DOCKER_SUBNET_OVERLAPS_BOOTSTRAP")
+				}
+			}
+			for _, existing := range docker {
+				if prefix.Overlaps(existing.prefix) {
+					return fmt.Errorf("INTENT_DOCKER_SUBNET_OVERLAP_%s_%s",
+						sanitizeIntentCode(existing.name), sanitizeIntentCode(network.Name))
+				}
+			}
+			docker = append(docker, ownedPrefix{name: network.Name, prefix: prefix})
+		}
+	}
+	return nil
+}
+
+func sanitizeIntentCode(value string) string {
+	var builder strings.Builder
+	for _, character := range strings.ToUpper(value) {
+		if character >= 'A' && character <= 'Z' || character >= '0' && character <= '9' {
+			builder.WriteRune(character)
+		} else {
+			builder.WriteByte('_')
+		}
+		if builder.Len() >= 32 {
+			break
+		}
+	}
+	if builder.Len() == 0 {
+		return "UNKNOWN"
+	}
+	return builder.String()
 }
 
 func (i Intent) Config() (config.Config, error) {
@@ -175,8 +268,34 @@ func (i Intent) Config() (config.Config, error) {
 	c.WireGuard.BootstrapHosts = nil
 	c.WireGuard.ConfigPath = VPNConfig
 	c.WireGuard.TCPMSS = tcpMSS(i.MTU)
-	c.Integrations.DockerEnabled = false
-	c.DockerNetworks = nil
+	if i.DockerEnabled {
+		var dockerInterfaces []string
+		var dockerNetworks []string
+		for index, network := range i.DockerNetworks {
+			provenanceID := index + 3
+			if provenanceID > 254 {
+				return config.Config{}, errors.New("INTENT_DOCKER_NETWORK_LIMIT")
+			}
+			c.Interfaces = append(c.Interfaces, config.Interface{
+				Name: network.BridgeInterface, Role: "container", Zone: "containers",
+				CIDRs:          append([]string(nil), network.Subnets...),
+				ProvenanceName: "docker:" + network.Name,
+				ProvenanceID:   uint8(provenanceID),
+			})
+			dockerInterfaces = append(dockerInterfaces, network.BridgeInterface)
+			dockerNetworks = append(dockerNetworks, network.Subnets...)
+		}
+		c.Zones = append(c.Zones, config.Zone{
+			Name: "containers", Networks: uniqueStrings(dockerNetworks),
+			Interfaces: uniqueStrings(dockerInterfaces),
+		})
+		c.Policies = append(c.Policies, config.Policy{
+			Name: "containers-all-outbound", From: "containers", To: "any",
+			Service: "all-outbound", Action: "allow",
+		})
+		c.Integrations.DockerEnabled = true
+		c.DockerNetworks = cloneDockerNetworks(i.DockerNetworks)
+	}
 	if err := config.Validate(c); err != nil {
 		return config.Config{}, fmt.Errorf("generated managed configuration: %w", err)
 	}
@@ -307,6 +426,43 @@ func (i *Intent) canonicalize() {
 	i.LANAllowUDP = uniquePorts(i.LANAllowUDP)
 	i.PublicTCP = uniquePorts(i.PublicTCP)
 	i.PublicUDP = uniquePorts(i.PublicUDP)
+	sort.Slice(i.DockerNetworks, func(a, b int) bool {
+		return i.DockerNetworks[a].Name < i.DockerNetworks[b].Name
+	})
+	for index := range i.DockerNetworks {
+		canonicalizeDockerIPAM(&i.DockerNetworks[index])
+	}
+}
+
+func canonicalizeDockerIPAM(network *config.DockerNetwork) {
+	if network == nil || len(network.Subnets) != len(network.Gateways) {
+		return
+	}
+	type pair struct {
+		subnet  string
+		gateway string
+	}
+	pairs := make([]pair, len(network.Subnets))
+	for index := range network.Subnets {
+		pairs[index] = pair{
+			subnet:  strings.TrimSpace(network.Subnets[index]),
+			gateway: strings.TrimSpace(network.Gateways[index]),
+		}
+	}
+	sort.Slice(pairs, func(a, b int) bool { return pairs[a].subnet < pairs[b].subnet })
+	for index, value := range pairs {
+		network.Subnets[index], network.Gateways[index] = value.subnet, value.gateway
+	}
+}
+
+func cloneDockerNetworks(values []config.DockerNetwork) []config.DockerNetwork {
+	result := make([]config.DockerNetwork, len(values))
+	for index, value := range values {
+		result[index] = value
+		result[index].Subnets = append([]string(nil), value.Subnets...)
+		result[index].Gateways = append([]string(nil), value.Gateways...)
+	}
+	return result
 }
 
 func addServicePolicy(c *config.Config, name, protocol string, ports []int, from, to, policyName string) {

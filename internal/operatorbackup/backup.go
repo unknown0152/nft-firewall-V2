@@ -19,6 +19,7 @@ import (
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
+	"github.com/unknown0152/nft-firewall-v2/internal/containers"
 	"github.com/unknown0152/nft-firewall-v2/internal/intent"
 	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
@@ -32,14 +33,16 @@ const (
 )
 
 type Paths struct {
-	Config      string
-	Intent      string
-	VPN         string
-	Sysctl      string
-	StateDB     string
-	Ledger      string
-	Generations string
-	Enforcement string
+	Config       string
+	Intent       string
+	VPN          string
+	Sysctl       string
+	StateDB      string
+	Ledger       string
+	Generations  string
+	Enforcement  string
+	DockerDaemon string
+	DockerDropIn string
 }
 
 type Record struct {
@@ -111,6 +114,23 @@ func (c Creator) Create(ctx context.Context, destination string) (Manifest, erro
 	for _, item := range required {
 		if err := copyProtected(item.source, filepath.Join(temporary, item.target)); err != nil {
 			return Manifest{}, err
+		}
+	}
+	managedIntent, err := intent.Load(c.Paths.Intent)
+	if err != nil {
+		return Manifest{}, errors.New("BACKUP_INTENT_INVALID")
+	}
+	if managedIntent.DockerEnabled {
+		for _, item := range []struct {
+			source string
+			target string
+		}{
+			{c.Paths.DockerDaemon, "docker/daemon.json"},
+			{c.Paths.DockerDropIn, "systemd/nftfwd-docker-access.conf"},
+		} {
+			if err := copyProtected(item.source, filepath.Join(temporary, item.target)); err != nil {
+				return Manifest{}, err
+			}
 		}
 	}
 	for _, item := range []struct {
@@ -215,8 +235,19 @@ func Verify(ctx context.Context, directory string) (Manifest, error) {
 	if _, err := config.Load(filepath.Join(directory, "nftfw.toml")); err != nil {
 		return Manifest{}, errors.New("BACKUP_CONFIG_INVALID")
 	}
-	if _, err := intent.Load(filepath.Join(directory, "intent.toml")); err != nil {
+	managedIntent, err := intent.Load(filepath.Join(directory, "intent.toml"))
+	if err != nil {
 		return Manifest{}, errors.New("BACKUP_INTENT_INVALID")
+	}
+	if managedIntent.DockerEnabled {
+		if err := containers.ValidateManagedDaemonConfig(filepath.Join(directory, "docker", "daemon.json")); err != nil {
+			return Manifest{}, errors.New("BACKUP_DOCKER_CONFIG_INVALID")
+		}
+		if err := containers.ValidateManagedSocketDropIn(
+			filepath.Join(directory, "systemd", "nftfwd-docker-access.conf"),
+		); err != nil {
+			return Manifest{}, errors.New("BACKUP_DOCKER_DROPIN_INVALID")
+		}
 	}
 	if _, _, err := wgconfig.ReadManaged(filepath.Join(directory, "nftfw0.conf")); err != nil {
 		return Manifest{}, errors.New("BACKUP_VPN_INVALID")

@@ -6,7 +6,9 @@ and nonactivating package contracts.
 
 Installing 2.1.0 does not convert an existing host to managed mode, import a
 VPN, transfer route ownership, restart services, interrupt the tunnel, or
-apply a firewall. Those are separate adoption operations.
+apply a firewall. It also does not rewrite `daemon.json`, enable kernel
+forwarding, install the Docker socket drop-in, or restart Docker. Those are
+separate managed-setup/adoption operations.
 
 ## Supported package path
 
@@ -111,3 +113,11 @@ Adoption requires a topology-specific dry run and a separately approved live
 plan because it transfers WireGuard, DNS, policy-route, sysctl, and boot
 ownership. Do not delete the existing database, ledger, enforcement pointer,
 or nftables tables to imitate a clean host.
+
+On a new managed host, Docker adoption is part of that same setup transaction.
+It is not performed by package upgrade. Existing advanced-mode Docker tuples
+remain unchanged and retain their fixed bridge semantics unless explicitly
+configured otherwise. Managed mode adds stable `docker:<network>` provenance,
+NFTFW-owned IPv4 forwarding, strict daemon JSON merge, the socket drop-in, and
+automatic same-tuple bridge recreation handling without changing the schema-6
+generation database contract.

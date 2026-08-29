@@ -21,6 +21,7 @@ Release approval status: STAGE_R_CANDIDATE_ONLY
 The 2.1.0 source is accepted only for intrinsically quarantined Stage R
 candidate construction and independent comparison. The approved source scope
 includes Go 1.27, one-file managed setup, strict VPN import, managed routing,
+strict managed Docker IPv4 bridge adoption and forwarding ownership,
 CLI/dashboard changes, package source, documentation, benchmarks, tests, and
 local nondeployable candidate builds.
 

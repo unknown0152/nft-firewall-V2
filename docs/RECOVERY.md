@@ -27,11 +27,61 @@ exact pending generation, restores files, sysctls, unit state, routes, DNS,
 and resolver ownership, then removes the temporary guard. It never flushes the
 ruleset.
 
+When Docker was adopted, the setup backup also contains a SHA-256 for the
+exact prior `daemon.json`, the Docker socket drop-in state, the previous
+`net.ipv4.ip_forward` value, and Docker enabled/active state. A failure before,
+during, or after the confirmed Docker restart restores those exact resources
+while the temporary setup guard still blocks physical container forwarding.
+Checksum failure stops restoration with
+`SETUP_BACKUP_RESTORE_CHECKSUM_FAILED`.
+
 If the firewall generation committed but the process died before recording
 that fact in the setup journal, recovery verifies the active committed
 generation and continues forward to boot readiness. If commit state cannot be
 proved, it reports `SETUP_COMMIT_STATE_UNKNOWN` and does not perform a
 destructive rollback.
+
+Docker-specific setup failures are actionable and remain pre-commit:
+
+- `SETUP_POLICY_CHECK_FAILED`: the generated nftables candidate did not pass
+  before Docker ownership change;
+- `SETUP_DOCKER_CONFIG_CHANGED_AFTER_PLAN`: `daemon.json` changed after the
+  reviewed plan;
+- `SETUP_DOCKER_RESTART_FAILED`: the one confirmed Docker restart failed;
+- `SETUP_DOCKER_IPV4_FORWARDING_FAILED`: kernel forwarding is not exactly
+  `1`;
+- `SETUP_DOCKER_TOPOLOGY_CHANGED` or
+  `SETUP_DOCKER_VALIDATION_FAILED`: an authorized network tuple or bridge
+  changed.
+
+Do not retry by enabling Docker iptables or adding a broad forwarding rule.
+Let rollback complete, inspect Docker through `docs/DOCKER.md`, and run a new
+dry-run.
+
+## Docker runtime rebind
+
+The daemon checks Docker topology on its regular refresh loop. A network
+recreation with the same authorized name, driver, canonical subnet/gateway
+tuple, and a new race-consistent full ID may produce a new Linux bridge name.
+NFTFW marks Docker degraded, compiles and commits a new generation for the new
+bridge, atomically persists the generated binding, republishes mutable claims,
+and then records Docker healthy.
+
+The firewall generation is committed before the generated binding is
+published. If the daemon dies or the file write fails in between, the old
+generated binding causes the next refresh to repeat the safe rebind; the
+already-active generation remains fail-closed. A semantic tuple change,
+undeclared bridge, missing bridge, or invalid daemon ownership never enters
+the rebind path.
+
+```bash
+sudo nftfw health
+sudo nftfw config show --effective
+sudo journalctl -u nftfwd -u docker
+```
+
+Look for the `docker_bridge_rebound` audit event and a healthy Docker
+integration state. Do not edit `bridge_interface` manually.
 
 ## Managed exposure or LAN change interruption
 

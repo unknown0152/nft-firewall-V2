@@ -7,4 +7,6 @@ fi
 
 if [ "${1:-}" = purge ]; then
     echo "NFT Firewall V2 state remains in /var/lib/nftfw; remove it only after an explicit backup and policy handoff."
+elif [ "${1:-}" = remove ]; then
+    echo "Docker daemon and sysctl ownership remain fail-closed; see /var/lib/nftfw/setup/UNINSTALL_HANDOFF."
 fi

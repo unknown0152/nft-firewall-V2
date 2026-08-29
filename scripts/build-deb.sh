@@ -163,6 +163,7 @@ done
 for binary in nftfw nftfwd nftfw-web; do
     install -m 0755 "$root_dir/dist/$binary-linux-$arch" "$stage/usr/lib/nftfw/$binary"
 done
+install -m 0644 "$root_dir/scripts/docker-handoff.sh" "$stage/usr/lib/nftfw/docker-handoff.sh"
 ln -s ../lib/nftfw/nftfw "$stage/usr/sbin/nftfw"
 systemd_units=(
     nftfw-early.service

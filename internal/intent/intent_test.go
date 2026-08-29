@@ -9,6 +9,7 @@ import (
 	"testing"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/compiler"
+	"github.com/unknown0152/nft-firewall-v2/internal/config"
 	"github.com/unknown0152/nft-firewall-v2/internal/discovery"
 	"github.com/unknown0152/nft-firewall-v2/internal/policy"
 	"github.com/unknown0152/nft-firewall-v2/internal/wgconfig"
@@ -73,6 +74,96 @@ func TestGeneratedConfigIsValidAndVPNOnly(t *testing.T) {
 		if !strings.Contains(artifact.Script, want) {
 			t.Fatalf("managed policy missing %q", want)
 		}
+	}
+}
+
+func TestGeneratedDockerConfigOwnsVPNOnlyForwarding(t *testing.T) {
+	value := fixture(t)
+	value.DockerEnabled = true
+	value.DockerNetworks = []config.DockerNetwork{{
+		Name: "cosmos-app", Driver: "bridge", BridgeInterface: "br-cosmos",
+		DynamicBridge: true, Subnets: []string{"172.23.0.0/16"},
+		Gateways: []string{"172.23.0.1"},
+	}}
+	c, err := value.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !c.Integrations.DockerEnabled || len(c.DockerNetworks) != 1 ||
+		len(c.Interfaces) != 3 ||
+		config.InterfaceProvenanceName(c.Interfaces[2]) != "docker:cosmos-app" {
+		t.Fatalf("managed Docker configuration missing: %#v", c)
+	}
+	effective, err := policy.Compile(c)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := compiler.Compile(compiler.Input{
+		Policy: effective, BootstrapV4: c.WireGuard.BootstrapIPs,
+		DockerNets: []string{"172.23.0.0/16"},
+	}, 1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`iifname "br-cosmos" ip saddr 172.23.0.0/16 oifname "nftfw0"`,
+		`iifname "br-cosmos" ip saddr 172.23.0.0/16 oifname "eth0" drop`,
+		`iifname "br-cosmos" ip saddr 172.23.0.0/16 oifname "nftfw0" masquerade`,
+		`nftfw-policy:containers-all-outbound`,
+	} {
+		if !strings.Contains(artifact.Script, expected) {
+			t.Fatalf("Docker policy missing %q:\n%s", expected, artifact.Script)
+		}
+	}
+}
+
+func TestManagedDockerSubnetsRejectIsolationOverlaps(t *testing.T) {
+	tests := []struct {
+		name   string
+		subnet string
+		code   string
+	}{
+		{"LAN", "192.168.1.0/25", "INTENT_DOCKER_SUBNET_OVERLAPS_LAN"},
+		{"VPN", "10.8.0.0/24", "INTENT_DOCKER_SUBNET_OVERLAPS_VPN"},
+		{"bootstrap", "198.51.100.0/24", "INTENT_DOCKER_SUBNET_OVERLAPS_BOOTSTRAP"},
+		{"loopback", "127.20.0.0/16", "INTENT_DOCKER_SUBNET_OVERLAPS_RESERVED"},
+		{"link-local", "169.254.20.0/24", "INTENT_DOCKER_SUBNET_OVERLAPS_RESERVED"},
+		{"multicast", "224.20.0.0/16", "INTENT_DOCKER_SUBNET_OVERLAPS_RESERVED"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := fixture(t)
+			value.DockerEnabled = true
+			value.DockerNetworks = []config.DockerNetwork{{
+				Name: "media", Driver: "bridge", BridgeInterface: "br-media",
+				DynamicBridge: true, Subnets: []string{test.subnet},
+				Gateways: []string{strings.TrimSuffix(test.subnet, "0/24") + "1"},
+			}}
+			if err := value.Validate(); err == nil || err.Error() != test.code {
+				t.Fatalf("overlap accepted or wrong code: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedDockerSubnetsRejectEachOther(t *testing.T) {
+	value := fixture(t)
+	value.DockerEnabled = true
+	value.DockerNetworks = []config.DockerNetwork{
+		{
+			Name: "one", Driver: "bridge", BridgeInterface: "br-one",
+			DynamicBridge: true, Subnets: []string{"172.20.0.0/16"},
+			Gateways: []string{"172.20.0.1"},
+		},
+		{
+			Name: "two", Driver: "bridge", BridgeInterface: "br-two",
+			DynamicBridge: true, Subnets: []string{"172.20.1.0/24"},
+			Gateways: []string{"172.20.1.1"},
+		},
+	}
+	if err := value.Validate(); err == nil ||
+		err.Error() != "INTENT_DOCKER_SUBNET_OVERLAP_ONE_TWO" {
+		t.Fatalf("overlapping Docker networks accepted: %v", err)
 	}
 }
 
@@ -168,6 +259,7 @@ func TestIntentValidationRejectsUnsafeFields(t *testing.T) {
 		func(i *Intent) { i.ManagementTCP = []int{22, 22} },
 		func(i *Intent) { i.DisableIPv6 = false },
 		func(i *Intent) { i.ResolverMode = "unknown" },
+		func(i *Intent) { i.DockerEnabled = true },
 	}
 	for index, mutate := range mutations {
 		candidate := base
@@ -217,6 +309,30 @@ func BenchmarkConfigGeneration(b *testing.B) {
 	value := fixture(b)
 	b.ReportAllocs()
 	for b.Loop() {
+		if _, err := value.Config(); err != nil {
+			b.Fatal(err)
+		}
+	}
+}
+
+func BenchmarkManagedDockerConfigGeneration(b *testing.B) {
+	value := fixture(b)
+	value.DockerEnabled = true
+	value.DockerNetworks = []config.DockerNetwork{
+		{
+			Name: "bridge", Driver: "bridge", BridgeInterface: "docker0",
+			DynamicBridge: true, Subnets: []string{"172.17.0.0/16"},
+			Gateways: []string{"172.17.0.1"},
+		},
+		{
+			Name: "media", Driver: "bridge", BridgeInterface: "br-media",
+			DynamicBridge: true, Subnets: []string{"172.20.0.0/16"},
+			Gateways: []string{"172.20.0.1"},
+		},
+	}
+	b.ReportAllocs()
+	b.ResetTimer()
+	for range b.N {
 		if _, err := value.Config(); err != nil {
 			b.Fatal(err)
 		}
