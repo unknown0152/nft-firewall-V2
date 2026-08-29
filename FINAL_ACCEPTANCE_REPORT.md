@@ -45,6 +45,10 @@ live installation, firewall application, VPN interruption, or deployment.
 - Managed Docker clean-host setup accepts eligible empty bridges only and
   revalidates that no running or retained workload appeared immediately before
   ownership-file publication.
+- Exact v2.0.3 static advanced Docker entries preserve their bridge, tuple,
+  configuration bytes, historical interface-name provenance, and ledger ID.
+  Only managed dynamic entries with exact `docker:<network>` provenance may
+  automatically rebind; neither mode can fall back to the other.
 - Managed file publication and kernel generation recovery remain separate,
   independently timed, and exact-generation scoped.
 - Existing-host adoption planning has no mutation path, repeats protected
@@ -62,10 +66,11 @@ approval bound to that frozen source commit and comparison SHA-256. Any local
 tag, remote publication, or current-server deployment requires still later
 identity-bound approval.
 
-The latest approved R2 attempt hard-stopped before managed setup mutation when
-the supported clean guest exposed iproute2's missing-table status behavior;
-source review also found non-clean Docker state was classified but not
-refused. It is not acceptance evidence. The corrected source requires a new
-identity-bound E-R2 approval and complete renewed run.
+The latest approved R2 attempt passed the preceding disposable source,
+package, database, namespace leak, host-safe-apply, and service-chaos gates,
+then hard-stopped in the bundled Docker lifecycle when an exact v2.0.3-style
+static advanced configuration was rejected for its historical interface-name
+provenance. It is not complete acceptance evidence. The corrected source
+requires a new identity-bound E-R2 approval and complete renewed run.
 
 R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED

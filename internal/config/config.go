@@ -733,6 +733,14 @@ func validateDockerNetworks(networks []DockerNetwork, interfaces map[string]Inte
 		if !exists || configuredInterface.Role != "container" {
 			return fmt.Errorf("docker network %s bridge_interface %q must be a declared container interface", network.Name, network.BridgeInterface)
 		}
+		provenanceName := InterfaceProvenanceName(configuredInterface)
+		managedProvenanceName := "docker:" + network.Name
+		if network.DynamicBridge && provenanceName != managedProvenanceName {
+			return fmt.Errorf("docker network %s dynamic bridge requires provenance_name %q", network.Name, managedProvenanceName)
+		}
+		if !network.DynamicBridge && provenanceName != network.BridgeInterface && provenanceName != managedProvenanceName {
+			return fmt.Errorf("docker network %s static bridge has incompatible provenance_name %q", network.Name, provenanceName)
+		}
 		if len(network.Subnets) == 0 || len(network.Subnets) != len(network.Gateways) {
 			return fmt.Errorf("docker network %s requires one explicit gateway for every subnet", network.Name)
 		}

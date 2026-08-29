@@ -407,6 +407,56 @@ func TestValidateDockerStableTupleAndVPNNAT(t *testing.T) {
 	}
 }
 
+func TestValidateDockerStaticAndDynamicProvenanceModes(t *testing.T) {
+	base, err := Load(writeConfig(t, validTOML))
+	if err != nil {
+		t.Fatal(err)
+	}
+	base.Interfaces = append(base.Interfaces, Interface{
+		Name: "br-media", Role: "container", Zone: "containers", ProvenanceID: 3,
+		CIDRs: []string{"172.19.0.0/16"},
+	})
+	base.Zones = append(base.Zones, Zone{
+		Name: "containers", Interfaces: []string{"br-media"}, Networks: []string{"172.19.0.0/16"},
+	})
+	base.Integrations.DockerEnabled = true
+	base.DockerNetworks = []DockerNetwork{{
+		Name: "media", Driver: "bridge", BridgeInterface: "br-media",
+		Subnets: []string{"172.19.0.0/16"}, Gateways: []string{"172.19.0.1"},
+	}}
+	if err := Validate(base); err != nil {
+		t.Fatalf("legacy static provenance was rejected: %v", err)
+	}
+
+	managedStatic := base
+	managedStatic.Interfaces = append([]Interface(nil), base.Interfaces...)
+	managedStatic.Interfaces[2].ProvenanceName = "docker:media"
+	if err := Validate(managedStatic); err != nil {
+		t.Fatalf("strict static Docker provenance was rejected: %v", err)
+	}
+
+	managedDynamic := managedStatic
+	managedDynamic.DockerNetworks = append([]DockerNetwork(nil), managedStatic.DockerNetworks...)
+	managedDynamic.DockerNetworks[0].DynamicBridge = true
+	if err := Validate(managedDynamic); err != nil {
+		t.Fatalf("strict managed dynamic provenance was rejected: %v", err)
+	}
+
+	legacyDynamic := base
+	legacyDynamic.DockerNetworks = append([]DockerNetwork(nil), base.DockerNetworks...)
+	legacyDynamic.DockerNetworks[0].DynamicBridge = true
+	if err := Validate(legacyDynamic); err == nil {
+		t.Fatal("dynamic Docker bridge accepted legacy interface-name provenance")
+	}
+
+	customStatic := base
+	customStatic.Interfaces = append([]Interface(nil), base.Interfaces...)
+	customStatic.Interfaces[2].ProvenanceName = "custom:media"
+	if err := Validate(customStatic); err == nil {
+		t.Fatal("static Docker bridge accepted an unrelated provenance identity")
+	}
+}
+
 func TestWireGuardBootstrapRequiresHostPrefixes(t *testing.T) {
 	c, err := Load(writeConfig(t, validTOML))
 	if err != nil {

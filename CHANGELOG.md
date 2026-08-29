@@ -38,6 +38,10 @@
   recreation, automatically commit the verified bridge rebind, and keep
   containers VPN-only with no physical-uplink or implicit published-port
   exposure.
+- Preserve v2.0.3 static advanced Docker bridge bindings, interface-name
+  provenance, and ledger IDs without rewriting them, while restricting
+  automatic bridge rebinding to managed dynamic entries with exact
+  `docker:<network>` provenance.
 - Refuse unsupported profiles, competing firewall owners, unsupported or
   ambiguous Docker topology, prior NFTFW state, and conflicting route/rule/
   interface ownership before setup mutation.

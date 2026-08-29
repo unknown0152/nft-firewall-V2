@@ -2,7 +2,7 @@
 set -Eeuo pipefail
 
 if [[ ${EUID:-$(id -u)} -ne 0 ]]; then echo "BLOCKED: Docker acceptance requires root"; exit 77; fi
-for tool in docker jq nft ip; do command -v "$tool" >/dev/null || { echo "BLOCKED: missing $tool"; exit 77; }; done
+for tool in docker ip jq nft sha256sum; do command -v "$tool" >/dev/null || { echo "BLOCKED: missing $tool"; exit 77; }; done
 systemctl is-active --quiet docker.service || { echo "BLOCKED: Docker service is inactive"; exit 77; }
 
 root_dir=$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)
@@ -115,9 +115,19 @@ TOML
 }
 write_config 172.30.55.0/24 172.30.55.1
 chmod 0600 "$config"
+legacy_static_config_hash=$(sha256sum "$config" | awk '{print $1}')
+if grep -Eq '^[[:space:]]*(dynamic_bridge|provenance_name)[[:space:]]*=' "$config"; then
+    echo "FAIL: v2.0.3 compatibility fixture unexpectedly uses managed Docker provenance"
+    exit 1
+fi
 local_cli=(env NFTFW_CONFIG="$config" NFTFW_CONTROL_SOCKET="$lab_tmp/missing.sock" NFTFW_LOCAL=1 "$nftfw")
 "${local_cli[@]}" plan --json --show-nft >"$lab_tmp/plan-first.json"
 jq -er '.nft_transaction' "$lab_tmp/plan-first.json" | grep -F '172.30.55.0/24' >/dev/null || { echo "FAIL: V2 did not observe the Docker network"; exit 1; }
+[[ $(sha256sum "$config" | awk '{print $1}') == "$legacy_static_config_hash" ]] || {
+    echo "FAIL: planning rewrote the legacy static Docker configuration"
+    exit 1
+}
+echo "DOCKER LEGACY STATIC PROVENANCE COMPATIBILITY: PASS"
 echo "DOCKER NETWORK OBSERVATION: PASS"
 
 docker restart "$container" >/dev/null

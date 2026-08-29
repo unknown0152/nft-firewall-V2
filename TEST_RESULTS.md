@@ -5,7 +5,7 @@ Source disposition: **STAGE_R_CANDIDATE_ONLY**
 Validation date: 2026-08-29
 
 Reopened source baseline:
-`67d2759b517bf633dba7c6f1eb544c18415d3328`
+`6b04225c6866d13bea632a48f0185f88731be45b`
 
 This tracked report is the pre-build source snapshot. The later frozen commit,
 candidate build evidence, candidate comparison, R2 evidence, tag, and any
@@ -29,7 +29,7 @@ publication decision must remain external and checksummed.
 | ShellCheck | PASS |
 | Stage R source/package/systemd contracts | PASS |
 | Staged systemd verification | PASS |
-| Overall statement coverage | PASS, 76.5% |
+| Overall statement coverage | PASS, 76.6% |
 | `internal/setup` coverage | PASS, 90.0% |
 | `internal/wgconfig` coverage | PASS, 90.6% |
 | `internal/intent` coverage | PASS, 92.6% |
@@ -54,6 +54,10 @@ publication decision must remain external and checksummed.
   topology/route revalidation; and exact rollback.
 - Stable Docker authorization provenance across a race-consistent full-ID and
   Linux-bridge rebind, including transactional generation publication.
+- Exact v2.0.3 static advanced Docker compatibility: unchanged bridge/tuple,
+  historical interface-name provenance, ledger ID, and configuration bytes;
+  strict isolation from managed dynamic `docker:<network>` rebinding; mixed
+  static/dynamic operation; and non-mutating mismatch refusal.
 - Explicit dry-run-only existing-host adoption planning with exact schema-6
   state/pointer/snapshot/provenance and live-policy fingerprint verification,
   double observation,
@@ -75,23 +79,24 @@ publication decision must remain external and checksummed.
 ## Performance source results
 
 The repeated 10-sample source matrix remained inside the Amendment E budgets
-on the reference NUC. Observed maxima included 0.004811 ms provider parsing,
-0.014579 ms managed Docker config generation, 0.029652 ms strict daemon merge,
-0.013649 ms Docker topology projection, 0.006676 ms managed route decoding,
-0.001380 ms Docker workload-ID classification, 0.062205 ms standard
-compilation, 32.645070 ms 10,000-policy compilation, 0.019173 ms canonical
-fingerprinting, 0.355702 ms no-op reconciliation, 0.000299 ms dashboard status
-projection, and 0.001941 ms adoption worksheet generation. No measured
+on the reference NUC. Observed maxima included 0.004399 ms provider parsing,
+0.015816 ms managed Docker config generation, 0.030212 ms strict daemon merge,
+0.013306 ms Docker topology projection, 0.006836 ms managed route decoding,
+0.001380 ms Docker workload-ID classification, 0.067118 ms standard
+compilation, 33.665237 ms 10,000-policy compilation, 0.019527 ms canonical
+fingerprinting, 0.346539 ms no-op reconciliation, 0.000301 ms dashboard status
+projection, and 0.001925 ms adoption worksheet generation. No measured
 operation regressed by more than 10% from the prior recorded matrix.
 Performance evidence is not privileged network proof.
 
 ## Not executed under Stage E-R
 
-The latest approval-bound E-R2 attempt built and inspected private packages,
-then hard-stopped before managed setup mutation because Debian 13 reports an
-absent table 51820 with valid empty JSON but command status 2. Mandatory source
-review also found the clean-host Docker classification was not enforced. That
-run is not privileged acceptance evidence. A renewed E-R2 run has not been
+The latest approval-bound E-R2 attempt passed disposable source, private
+package, database, namespace leak, host-safe-apply, and service-chaos gates.
+It then hard-stopped in the bundled Docker lifecycle because the managed
+dynamic projector rejected an exact v2.0.3-style static advanced Docker
+configuration with historical interface-name provenance. That partial run is
+not complete privileged acceptance evidence. A renewed E-R2 run has not been
 executed and requires new approval bound to the replacement frozen source and
 candidate comparison.
 

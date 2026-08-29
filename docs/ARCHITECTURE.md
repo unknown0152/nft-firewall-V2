@@ -79,9 +79,14 @@ supply one.
 Runtime claim, endpoint, and unchanged Docker subnet sets are updated
 atomically without rebuilding unrelated policy. A stable Docker tuple that is
 recreated on a new Linux bridge requires a new committed generation because
-the interface-and-prefix guard and provenance rules are bridge-bound. Managed
-mode applies that rebind, persists the regenerated configuration, and records
-the integration healthy only after both steps succeed. Temporary trusted sets
+the interface-and-prefix guard and provenance rules are bridge-bound. Only a
+managed `dynamic_bridge = true` entry with exact `docker:<network>` provenance
+may take that path. A legacy static advanced entry instead requires the exact
+configured bridge and tuple, preserves its historical interface-name
+provenance and ledger ID without rewriting configuration, and refuses bridge
+recreation. The two projection branches cannot fall back to each other.
+Managed mode persists a verified rebind and records the integration healthy
+only after both steps succeed. Temporary trusted sets
 use nftables kernel timeouts and are reconstructed from still-valid SQLite
 leases after daemon restart. Trusted elements are intentionally absent from
 committed snapshots, preventing expired access from replaying at boot.
@@ -161,7 +166,11 @@ inspect -> checksum backup -> temporary guard -> install/check candidate
 Discovery queries only the local Docker socket and stores no generated Docker
 network ID as durable authorization. Managed intent contains the network name,
 bridge driver, canonical IPv4 subnet/gateway pairs, dynamic bridge binding,
-and stable provenance name `docker:<network>`.
+and exact stable provenance name `docker:<network>`. Runtime projection treats
+that managed identity separately from compatible v2.0.3 advanced entries:
+static entries retain the configured bridge, tuple, historical interface-name
+identity, and provenance ID byte-for-byte, while any mismatch refuses before
+policy mutation.
 
 Clean-host discovery sandwiches strict network observation between two
 running/all-container observations. Eligible empty built-in and custom bridges

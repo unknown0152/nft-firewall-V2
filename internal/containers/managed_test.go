@@ -5,6 +5,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -430,5 +431,179 @@ func TestProjectObservedConfigPreservesStableProvenance(t *testing.T) {
 	if !strings.Contains(artifact.Script, `iifname "br-new"`) ||
 		strings.Contains(artifact.Script, `iifname "br-old"`) {
 		t.Fatalf("compiled artifact did not rebind the observed bridge:\n%s", artifact.Script)
+	}
+}
+
+func legacyStaticDockerConfig() config.Config {
+	source := config.Defaults()
+	source.Interfaces = []config.Interface{
+		{Name: "eth0", Role: "uplink", Zone: "uplink", ProvenanceID: 1},
+		{Name: "wg0", Role: "vpn", Zone: "vpn", ProvenanceID: 2},
+		{
+			Name: "br-legacy", Role: "container", Zone: "containers",
+			CIDRs: []string{"172.24.0.0/16"}, ProvenanceID: 3,
+		},
+	}
+	source.Zones = []config.Zone{
+		{Name: "uplink", Interfaces: []string{"eth0"}},
+		{Name: "vpn", Interfaces: []string{"wg0"}},
+		{Name: "containers", Interfaces: []string{"br-legacy"}, Networks: []string{"172.24.0.0/16"}},
+	}
+	source.Services = []config.Service{{Name: "all", Protocol: "any"}}
+	source.Policies = []config.Policy{
+		{Name: "containers-out", From: "containers", To: "any", Service: "all", Action: "allow"},
+	}
+	source.Integrations.DockerEnabled = true
+	source.DockerNetworks = []config.DockerNetwork{{
+		Name: "legacy", Driver: "bridge", BridgeInterface: "br-legacy",
+		Subnets: []string{"172.24.0.0/16"}, Gateways: []string{"172.24.0.1"},
+	}}
+	return source
+}
+
+func legacyStaticObservation() []Network {
+	return []Network{{
+		Name: "legacy", Driver: "bridge", BridgeInterface: "br-legacy",
+		CIDR: "172.24.0.0/16", Gateway: "172.24.0.1",
+	}}
+}
+
+func TestProjectObservedConfigPreservesLegacyStaticAdvancedConfig(t *testing.T) {
+	source := legacyStaticDockerConfig()
+	if err := config.Validate(source); err != nil {
+		t.Fatal(err)
+	}
+	projected, err := ProjectObservedConfig(source, legacyStaticObservation())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(projected, source) {
+		t.Fatalf("legacy static projection changed the advanced config:\nbefore=%#v\nafter=%#v", source, projected)
+	}
+	container := projected.Interfaces[2]
+	if config.InterfaceProvenanceName(container) != "br-legacy" ||
+		container.ProvenanceName != "" || container.ProvenanceID != 3 {
+		t.Fatalf("legacy provenance identity changed: %#v", container)
+	}
+	effective, err := policy.Compile(projected)
+	if err != nil {
+		t.Fatal(err)
+	}
+	artifact, err := compiler.Compile(compiler.Input{
+		Policy: effective, DockerNets: []string{"172.24.0.0/16"},
+	}, 9)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(artifact.Script, `iifname "br-legacy"`) {
+		t.Fatalf("legacy static bridge was not compiled:\n%s", artifact.Script)
+	}
+}
+
+func TestProjectObservedConfigDynamicCannotUseLegacyFallback(t *testing.T) {
+	source := legacyStaticDockerConfig()
+	source.DockerNetworks[0].DynamicBridge = true
+	_, err := ProjectObservedConfig(source, []Network{{
+		Name: "legacy", Driver: "bridge", BridgeInterface: "br-new",
+		CIDR: "172.24.0.0/16", Gateway: "172.24.0.1",
+	}})
+	if err == nil || !strings.Contains(err.Error(), "DOCKER_PROVENANCE_INTERFACE_MISSING_LEGACY") {
+		t.Fatalf("dynamic bridge used the legacy provenance fallback: %v", err)
+	}
+}
+
+func TestProjectObservedConfigStaticCannotTranslateProvenanceIdentity(t *testing.T) {
+	source := legacyStaticDockerConfig()
+	source.Interfaces[2].ProvenanceName = "custom:legacy"
+	_, err := ProjectObservedConfig(source, legacyStaticObservation())
+	if err == nil || !strings.Contains(err.Error(), "DOCKER_STATIC_PROVENANCE_INVALID_LEGACY") {
+		t.Fatalf("static projection translated an unrelated provenance identity: %v", err)
+	}
+	if source.Interfaces[2].Name != "br-legacy" ||
+		source.Interfaces[2].ProvenanceName != "custom:legacy" || source.Interfaces[2].ProvenanceID != 3 {
+		t.Fatalf("failed projection mutated provenance: %#v", source.Interfaces[2])
+	}
+}
+
+func TestProjectObservedConfigMixedStaticAndDynamicPreservesLedgerIdentities(t *testing.T) {
+	source := legacyStaticDockerConfig()
+	source.Interfaces = append(source.Interfaces, config.Interface{
+		Name: "br-old", Role: "container", Zone: "containers",
+		CIDRs: []string{"172.25.0.0/16"}, ProvenanceName: "docker:managed",
+		ProvenanceID: 4,
+	})
+	source.Zones[2].Interfaces = append(source.Zones[2].Interfaces, "br-old")
+	source.Zones[2].Networks = append(source.Zones[2].Networks, "172.25.0.0/16")
+	source.DockerNetworks = append(source.DockerNetworks, config.DockerNetwork{
+		Name: "managed", Driver: "bridge", BridgeInterface: "br-old",
+		DynamicBridge: true, Subnets: []string{"172.25.0.0/16"},
+		Gateways: []string{"172.25.0.1"},
+	})
+	if err := config.Validate(source); err != nil {
+		t.Fatal(err)
+	}
+	projected, err := ProjectObservedConfig(source, []Network{
+		{
+			Name: "legacy", Driver: "bridge", BridgeInterface: "br-legacy",
+			CIDR: "172.24.0.0/16", Gateway: "172.24.0.1",
+		},
+		{
+			Name: "managed", Driver: "bridge", BridgeInterface: "br-new",
+			CIDR: "172.25.0.0/16", Gateway: "172.25.0.1",
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	before := map[string]uint8{}
+	for _, configured := range source.Interfaces {
+		before[config.InterfaceProvenanceName(configured)] = configured.ProvenanceID
+	}
+	after := map[string]uint8{}
+	for _, configured := range projected.Interfaces {
+		after[config.InterfaceProvenanceName(configured)] = configured.ProvenanceID
+	}
+	if !reflect.DeepEqual(before, after) {
+		t.Fatalf("projection changed ledger identities: before=%v after=%v", before, after)
+	}
+	if projected.Interfaces[2].Name != "br-legacy" || projected.Interfaces[2].ProvenanceName != "" ||
+		projected.Interfaces[3].Name != "br-new" ||
+		projected.Interfaces[3].ProvenanceName != "docker:managed" {
+		t.Fatalf("mixed projection crossed static/dynamic ownership: %#v", projected.Interfaces)
+	}
+	if source.Interfaces[3].Name != "br-old" {
+		t.Fatal("projection mutated the source config")
+	}
+	if !reflect.DeepEqual(projected.Zones[2].Interfaces, []string{"br-legacy", "br-new"}) {
+		t.Fatalf("mixed zone binding was not projected deterministically: %v", projected.Zones[2].Interfaces)
+	}
+}
+
+func TestProjectObservedConfigRefusesTupleAndObservationDriftWithoutMutation(t *testing.T) {
+	tests := map[string]func([]Network) []Network{
+		"bridge":    func(values []Network) []Network { values[0].BridgeInterface = "br-drift"; return values },
+		"driver":    func(values []Network) []Network { values[0].Driver = "overlay"; return values },
+		"subnet":    func(values []Network) []Network { values[0].CIDR = "172.26.0.0/16"; return values },
+		"gateway":   func(values []Network) []Network { values[0].Gateway = "172.24.0.2"; return values },
+		"duplicate": func(values []Network) []Network { return append(values, values[0]) },
+		"missing":   func([]Network) []Network { return nil },
+		"unauthorized": func(values []Network) []Network {
+			return append(values, Network{
+				Name: "extra", Driver: "bridge", BridgeInterface: "br-extra",
+				CIDR: "172.27.0.0/16", Gateway: "172.27.0.1",
+			})
+		},
+	}
+	for name, mutate := range tests {
+		t.Run(name, func(t *testing.T) {
+			source := legacyStaticDockerConfig()
+			before := legacyStaticDockerConfig()
+			if _, err := ProjectObservedConfig(source, mutate(legacyStaticObservation())); err == nil {
+				t.Fatal("Docker observation drift was accepted")
+			}
+			if !reflect.DeepEqual(source, before) {
+				t.Fatal("failed projection mutated the protected source config")
+			}
+		})
 	}
 }

@@ -81,13 +81,22 @@ managed VPN. The compiler emits exact interface-and-prefix guards, explicit
 physical-uplink drops, VPN-only masquerade, and default-deny forwarding. NFTFW
 never enables a broad `FORWARD` accept.
 
-Docker network IDs are observation-only. The durable authorization identity
-is the network name, bridge driver, canonical subnet/gateway tuple, and stable
-NFTFW provenance name. When Docker recreates an authorized network with a new
-full ID and Linux bridge, the daemon re-observes the unchanged tuple, compiles
-and commits a new generation bound to the new bridge, persists the generated
-binding, and records Docker healthy. Semantic drift or an added undeclared
-bridge degrades the integration and leaves forwarding fail-closed.
+Docker network IDs are observation-only. Managed entries set
+`dynamic_bridge = true`; their durable authorization identity is the network
+name, bridge driver, canonical subnet/gateway tuple, and exact stable NFTFW
+provenance name `docker:<network>`. When Docker recreates such an authorized
+network with a new full ID and Linux bridge, the daemon re-observes the
+unchanged tuple, compiles and commits a new generation bound to the new
+bridge, persists the generated binding, and records Docker healthy.
+
+Legacy advanced-mode entries remain static. An omitted or false
+`dynamic_bridge` retains the historical interface-name provenance and its
+existing ledger ID only when the configured bridge and complete
+name/driver/subnet/gateway tuple are unchanged. Observation never rewrites a
+static entry. A recreated static bridge, arbitrary provenance name, cross-mode
+fallback, semantic drift, or added undeclared bridge is refused and leaves
+forwarding fail-closed; make any intended advanced-mode migration as a
+separately reviewed configuration change.
 
 Docker-published ports are not public NFTFW exposure. Public VPN-side access
 still requires an explicit `nftfw expose`/NAT policy.

@@ -8,6 +8,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"sync"
 	"testing"
@@ -706,6 +707,79 @@ func TestManagedDockerBridgeRecreationCommitsAndPersistsRebind(t *testing.T) {
 	generation, err = runtime.Store.LastKnownGood(ctx)
 	if err != nil || generation.ID != firstGeneration {
 		t.Fatalf("idempotent Docker refresh created another generation: %#v err=%v", generation, err)
+	}
+}
+
+func TestAdvancedLegacyStaticDockerProjectionDoesNotRewriteConfig(t *testing.T) {
+	root := secureRuntimeTestDir(t)
+	daemonPath := filepath.Join(root, "docker", "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(daemonPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(daemonPath, []byte(
+		`{"iptables":false,"ip6tables":false,"ip-forward":false,"ip-masq":false,"userland-proxy":false}`+"\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	source := config.Defaults()
+	source.Interfaces = []config.Interface{
+		{Name: "eth0", Role: "uplink", Zone: "uplink", ProvenanceID: 1},
+		{Name: "wg0", Role: "vpn", Zone: "vpn", ProvenanceID: 2},
+		{
+			Name: "br-legacy", Role: "container", Zone: "containers",
+			CIDRs: []string{"172.24.0.0/16"}, ProvenanceID: 3,
+		},
+	}
+	source.Zones = []config.Zone{
+		{Name: "uplink", Interfaces: []string{"eth0"}},
+		{Name: "vpn", Interfaces: []string{"wg0"}},
+		{Name: "containers", Interfaces: []string{"br-legacy"}, Networks: []string{"172.24.0.0/16"}},
+	}
+	source.Services = []config.Service{{Name: "all", Protocol: "any"}}
+	source.Policies = []config.Policy{{
+		Name: "containers-out", From: "containers", To: "any", Service: "all", Action: "allow",
+	}}
+	source.Integrations.DockerEnabled = true
+	source.DockerNetworks = []config.DockerNetwork{{
+		Name: "legacy", Driver: "bridge", BridgeInterface: "br-legacy",
+		Subnets: []string{"172.24.0.0/16"}, Gateways: []string{"172.24.0.1"},
+	}}
+	if err := config.Validate(source); err != nil {
+		t.Fatal(err)
+	}
+	id := strings.Repeat("e", 64)
+	runtime := &Runtime{Config: source}
+	runtime.dockerObserver = func(expected []config.DockerNetwork) containers.Observer {
+		return containers.Observer{
+			DaemonConfig: daemonPath,
+			Expected:     expected,
+			Run: func(_ context.Context, _ int64, name string, args ...string) ([]byte, error) {
+				command := name + " " + strings.Join(args, " ")
+				switch command {
+				case "docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}":
+					return []byte(id + "\tlegacy\tbridge\n"), nil
+				case "docker --host unix:///var/run/docker.sock network inspect -- " + id:
+					return []byte(
+						`[{"Id":"` + id + `","Name":"legacy","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{"com.docker.network.bridge.name":"br-legacy"},"IPAM":{"Config":[{"Subnet":"172.24.0.0/16","Gateway":"172.24.0.1"}]}}]`,
+					), nil
+				case "ip -j link show dev br-legacy":
+					return []byte(`[{"ifname":"br-legacy"}]`), nil
+				default:
+					return nil, fmt.Errorf("unexpected Docker observation command: %s", command)
+				}
+			},
+		}
+	}
+	projected, err := runtime.projectDockerConfiguration(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(projected.Config, source) ||
+		config.InterfaceProvenanceName(projected.Config.Interfaces[2]) != "br-legacy" {
+		t.Fatalf("runtime rewrote a legacy static Docker config: %#v", projected.Config)
+	}
+	if !reflect.DeepEqual(runtime.Config, source) {
+		t.Fatal("runtime projection mutated its source configuration")
 	}
 }
 

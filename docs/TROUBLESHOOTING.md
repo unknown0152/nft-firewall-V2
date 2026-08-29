@@ -73,6 +73,13 @@ Common pre-mutation codes include:
   bootstrap, reserved, or another Docker range;
 - `DOCKER_NETWORK_BRIDGE_MISSING_*`: Docker reports a bridge that is absent
   from the host.
+- `DOCKER_STATIC_PROVENANCE_INVALID_*`: a static advanced entry no longer
+  uses its historical interface-name identity or the exact
+  `docker:<network>` identity;
+- `DOCKER_PROVENANCE_INTERFACE_MISSING_*`: the configured Docker network has
+  no matching container interface for its permitted provenance mode. Managed
+  dynamic entries require exact `docker:<network>` provenance; legacy static
+  entries require their unchanged configured bridge and historical identity.
 
 Do not edit the generated bridge name, enable Docker iptables, or remove a
 network merely to bypass the code. Correct the Docker topology, then repeat
@@ -97,10 +104,12 @@ sudo journalctl -u nftfwd -u docker
 
 Healthy managed Docker requires the exact five false daemon settings, the
 exact socket drop-in, `net.ipv4.ip_forward = 1`, every authorized network, and
-its current Linux bridge. A stable network recreation is rebound
-automatically. Name, driver, subnet, gateway, mode, multiplicity, or unknown
-bridge changes stay degraded and fail-closed until a new semantic setup plan
-is confirmed.
+its current Linux bridge. Only a managed dynamic network with exact
+`docker:<network>` provenance is rebound automatically. A legacy static
+advanced network retains its configured bridge and historical provenance; a
+bridge recreation is refused rather than silently migrated. Name, driver,
+subnet, gateway, mode, provenance, multiplicity, or unknown bridge changes
+stay degraded and fail-closed until a new semantic setup plan is confirmed.
 
 ## Managed profile mismatch
 

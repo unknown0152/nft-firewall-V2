@@ -251,8 +251,11 @@ after an approved recreation when the complete stable tuple is unchanged.
 Managed entries set `dynamic_bridge = true` and use stable
 `provenance_name = "docker:<network>"`; the daemon commits and persists a new
 generation when only the observed bridge changes. Fixed advanced-mode entries
-retain `dynamic_bridge = false`. Missing bridges, extra routed bridges, mode
-changes, or observed tuple drift are rejected.
+retain `dynamic_bridge = false` and may retain only their historical
+interface-name provenance or the exact stable `docker:<network>` identity.
+They are never rebound or rewritten by observation. Missing or recreated
+static bridges, arbitrary provenance names, cross-mode fallback, extra routed
+bridges, mode changes, or observed tuple drift are rejected.
 
 Restart Docker after changing its settings only under the approved deployment
 procedure. V2 then observes the exact authorized bridge tuple and owns its

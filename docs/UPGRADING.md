@@ -134,7 +134,12 @@ or nftables tables to imitate a clean host.
 On a new managed host, Docker adoption is part of that same setup transaction.
 It is not performed by package upgrade. Existing advanced-mode Docker tuples
 remain unchanged and retain their fixed bridge semantics unless explicitly
-configured otherwise. Managed mode adds stable `docker:<network>` provenance,
-NFTFW-owned IPv4 forwarding, strict daemon JSON merge, the socket drop-in, and
-automatic same-tuple bridge recreation handling without changing the schema-6
-generation database contract.
+configured otherwise. In particular, a v2.0.3 static entry retains its
+historical interface-name provenance and ledger ID; 2.1.0 does not silently
+translate it to `docker:<network>` or rebind it after bridge recreation.
+Managed mode adds `dynamic_bridge = true`, exact stable `docker:<network>`
+provenance, NFTFW-owned IPv4 forwarding, strict daemon JSON merge, the socket
+drop-in, and automatic same-tuple bridge recreation handling without changing
+the schema-6 generation database contract. Converting an existing static
+advanced entry to managed ownership requires a separately approved Stage E-L
+transaction.

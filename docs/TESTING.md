@@ -51,7 +51,12 @@ forwarding, bridge recreation, uninstall handoff, numeric all-table routing
 preflight for absent/populated/malformed/failed observations, adoption-planner
 command grammar, exact schema-6 read-only inspection, deterministic/redacted
 worksheet generation, no-mutation tree comparison, feed parsing, explanation,
-safe apply, and rollback.
+safe apply, and rollback. Docker projection regressions additionally prove
+that an exact v2.0.3 static advanced configuration retains its bridge,
+interface-name provenance, ledger ID, and bytes; managed dynamic entries alone
+may rebind with exact `docker:<network>` provenance; mixed configurations keep
+both identity models isolated; and every tuple/observation mismatch is
+non-mutating.
 
 Twelve fuzz targets cover config decoding, API decoding, policy explanation, runtime
 prefix compilation, nft transaction validation/fingerprinting, claim
@@ -98,6 +103,12 @@ numeric all-table JSON, while populated/malformed/oversized/failed queries
 still refuse. Docker cases must prove empty built-in and eligible empty custom
 bridges are accepted, running and retained containers are refused without
 identity leakage, and a changing observation stops before ownership mutation.
+
+The Amendment J extension reruns the bundled lifecycle with an exact
+v2.0.3-style static advanced Docker fixture. Its first plan must leave the
+configuration hash unchanged, while managed dynamic recreation, mixed
+static/dynamic networks, tuple mismatch, provenance mismatch, and ledger
+preservation retain their separate fail-closed contracts.
 
 Success includes exactly:
 

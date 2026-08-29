@@ -523,25 +523,57 @@ func sanitizeErrorName(value string) string {
 	return builder.String()
 }
 
-// ProjectObservedConfig updates only dynamic Docker bridge bindings after
-// Observer.Networks has proved the stable name/driver/subnet/gateway tuple.
-// The immutable provenance identity and ID remain unchanged.
+// ProjectObservedConfig updates only managed dynamic Docker bridge bindings
+// after Observer.Networks has proved the stable name/driver/subnet/gateway
+// tuple. Legacy advanced-mode static bindings retain their historical bridge
+// name, interface-name provenance identity, and provenance ID unchanged.
 func ProjectObservedConfig(source config.Config, observed []Network) (config.Config, error) {
 	if !source.Integrations.DockerEnabled {
 		return source, nil
 	}
 	type projection struct {
-		bridge  string
-		subnets []string
+		bridge string
+		driver string
+		ipam   map[string]string
+	}
+	authorized := make(map[string]bool, len(source.DockerNetworks))
+	for _, network := range source.DockerNetworks {
+		authorized[network.Name] = true
 	}
 	byName := map[string]projection{}
 	for _, network := range observed {
+		if !authorized[network.Name] {
+			return config.Config{}, fmt.Errorf("DOCKER_NETWORK_UNAUTHORIZED_%s",
+				sanitizeErrorName(network.Name))
+		}
+		if network.Driver != "bridge" || !linuxInterfaceName.MatchString(network.BridgeInterface) {
+			return config.Config{}, fmt.Errorf("DOCKER_NETWORK_OBSERVATION_INVALID_%s",
+				sanitizeErrorName(network.Name))
+		}
+		pair, err := canonicalIPAM([]string{network.CIDR}, []string{network.Gateway})
+		if err != nil {
+			return config.Config{}, fmt.Errorf("DOCKER_NETWORK_IPAM_INVALID_%s",
+				sanitizeErrorName(network.Name))
+		}
 		current := byName[network.Name]
 		if current.bridge != "" && current.bridge != network.BridgeInterface {
 			return config.Config{}, errors.New("DOCKER_NETWORK_BRIDGE_AMBIGUOUS")
 		}
+		if current.driver != "" && current.driver != network.Driver {
+			return config.Config{}, errors.New("DOCKER_NETWORK_DRIVER_AMBIGUOUS")
+		}
+		if current.ipam == nil {
+			current.ipam = map[string]string{}
+		}
+		for subnet, gateway := range pair {
+			if _, duplicate := current.ipam[subnet]; duplicate {
+				return config.Config{}, fmt.Errorf("DOCKER_NETWORK_IPAM_AMBIGUOUS_%s",
+					sanitizeErrorName(network.Name))
+			}
+			current.ipam[subnet] = gateway
+		}
 		current.bridge = network.BridgeInterface
-		current.subnets = append(current.subnets, network.CIDR)
+		current.driver = network.Driver
 		byName[network.Name] = current
 	}
 	result := source
@@ -555,13 +587,51 @@ func ProjectObservedConfig(source config.Config, observed []Network) (config.Con
 		if !ok || !linuxInterfaceName.MatchString(current.bridge) {
 			return config.Config{}, fmt.Errorf("DOCKER_NETWORK_ABSENT_%s", sanitizeErrorName(network.Name))
 		}
-		sort.Strings(current.subnets)
+		if current.driver != network.Driver {
+			return config.Config{}, fmt.Errorf("DOCKER_NETWORK_DRIVER_DRIFT_%s",
+				sanitizeErrorName(network.Name))
+		}
+		expectedIPAM, err := canonicalIPAM(network.Subnets, network.Gateways)
+		if err != nil || !sameIPAM(expectedIPAM, current.ipam) {
+			return config.Config{}, fmt.Errorf("DOCKER_NETWORK_IPAM_DRIFT_%s",
+				sanitizeErrorName(network.Name))
+		}
 		oldBridge := network.BridgeInterface
-		if !network.DynamicBridge && oldBridge != current.bridge {
-			return config.Config{}, fmt.Errorf("DOCKER_NETWORK_BRIDGE_DRIFT_%s", sanitizeErrorName(network.Name))
+		if !network.DynamicBridge {
+			if oldBridge != current.bridge {
+				return config.Config{}, fmt.Errorf("DOCKER_NETWORK_BRIDGE_DRIFT_%s",
+					sanitizeErrorName(network.Name))
+			}
+			interfaceIndex, found := interfaceIndexByName(result.Interfaces, oldBridge)
+			if !found {
+				return config.Config{}, fmt.Errorf("DOCKER_PROVENANCE_INTERFACE_MISSING_%s",
+					sanitizeErrorName(network.Name))
+			}
+			configured := result.Interfaces[interfaceIndex]
+			identity := config.InterfaceProvenanceName(configured)
+			if configured.Role != "container" {
+				return config.Config{}, errors.New("DOCKER_PROVENANCE_ROLE_INVALID")
+			}
+			if identity != oldBridge && identity != "docker:"+network.Name {
+				return config.Config{}, fmt.Errorf("DOCKER_STATIC_PROVENANCE_INVALID_%s",
+					sanitizeErrorName(network.Name))
+			}
+			// The observer already proved the complete tuple. Do not rewrite any
+			// part of a legacy static advanced-mode binding.
+			continue
+		}
+		subnets := make([]string, 0, len(current.ipam))
+		for subnet := range current.ipam {
+			subnets = append(subnets, subnet)
+		}
+		sort.Strings(subnets)
+		gateways := make([]string, len(subnets))
+		for index, subnet := range subnets {
+			gateways[index] = current.ipam[subnet]
 		}
 		network.BridgeInterface = current.bridge
-		network.Subnets = append([]string(nil), current.subnets...)
+		network.Subnets = append([]string(nil), subnets...)
+		network.Gateways = append([]string(nil), gateways...)
 		found := false
 		for interfaceIndex := range result.Interfaces {
 			configured := &result.Interfaces[interfaceIndex]
@@ -572,7 +642,7 @@ func ProjectObservedConfig(source config.Config, observed []Network) (config.Con
 				return config.Config{}, errors.New("DOCKER_PROVENANCE_ROLE_INVALID")
 			}
 			configured.Name = current.bridge
-			configured.CIDRs = append([]string(nil), current.subnets...)
+			configured.CIDRs = append([]string(nil), subnets...)
 			found = true
 			break
 		}
@@ -596,4 +666,13 @@ func ProjectObservedConfig(source config.Config, observed []Network) (config.Con
 		return config.Config{}, fmt.Errorf("project observed Docker bindings: %w", err)
 	}
 	return result, nil
+}
+
+func interfaceIndexByName(interfaces []config.Interface, name string) (int, bool) {
+	for index := range interfaces {
+		if interfaces[index].Name == name {
+			return index, true
+		}
+	}
+	return 0, false
 }
