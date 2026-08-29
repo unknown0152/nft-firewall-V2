@@ -7,7 +7,7 @@ Validation date: 2026-08-29
 Target version: `2.1.0`
 
 Reopened source baseline:
-`34b6d413f467b6d0f01d7c1626c025ea03298f0e`
+`a04358669edd3c2a75cda6ecd56ffc336bad09a8`
 
 The frozen source commit, independent candidate parents, and comparison digest
 are created after this source report and are therefore recorded only in the
@@ -20,6 +20,7 @@ its own commit.
 | Managed one-file setup/import/routing | PASS | Unit, race, source-contract, and failure-path tests |
 | Managed Docker forwarding/adoption | PASS | Strict local topology, semantic ownership, VPN-only policy, rebind, status, handoff, and exact rollback tests |
 | Existing-host adoption planner | PASS | Explicit dry-run grammar, exact schema-6/provenance readers, double observation, redaction, and no-mutation fixture |
+| Privileged-umask security fixtures | PASS | Explicit unsafe modes plus isolated `umask 0077` acceptance/refusal regression and full-suite rerun |
 | Managed policy mutation/recovery | PASS | Protected reload, exact generation query, checksummed file journal, and independent watchdog tests |
 | Configuration/compiler/provenance | PASS | Unit, fuzz, vet, staticcheck, gosec, and source contracts |
 | Coverage | PASS | Overall 76.4%; setup 90.0%; import 90.6%; intent 92.3%; routing 90.2%; adoption 91.1% |
@@ -29,7 +30,7 @@ its own commit.
 | Benchmarks | PASS | Ten-sample source matrix collected; reference operations remain inside Amendment E budgets |
 | Quarantined candidate builds | NOT EXECUTED | Must be built twice from the later frozen clean commit |
 | Candidate comparison | NOT EXECUTED | Requires both independent protected-parent candidates |
-| Privileged R2 | NOT EXECUTED | Requires separate E-R2 approval |
+| Privileged R2 | FAIL, HARD STOPPED | The first approved run exposed the ambient-umask fixture defect before package construction; a renewed run is NOT EXECUTED and requires new identity-bound approval |
 | Release tag/publication/deployment | NOT AUTHORIZED | Explicitly outside Stage E-R |
 
 No package was installed and no live firewall, VPN, route, resolver, systemd,

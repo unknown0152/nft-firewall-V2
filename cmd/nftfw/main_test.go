@@ -7,10 +7,12 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
 	"strings"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -445,8 +447,60 @@ func TestSecurePathHelpers(t *testing.T) {
 	if err := os.WriteFile(secret, []byte("secret"), 0o644); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Chmod(secret, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assertFileMode(t, secret, 0o644)
 	if err := secureSecretFile(secret); err == nil {
 		t.Fatal("world-readable secret accepted")
+	}
+}
+
+func TestSecureSecretFileUnderUmask0077(t *testing.T) {
+	const helperEnvironment = "NFTFW_TEST_UMASK_0077_HELPER"
+	if os.Getenv(helperEnvironment) != "1" {
+		command := exec.Command(os.Args[0], "-test.run=^TestSecureSecretFileUnderUmask0077$", "-test.count=1")
+		command.Env = append(os.Environ(), helperEnvironment+"=1")
+		output, err := command.CombinedOutput()
+		if err != nil {
+			t.Fatalf("umask 0077 helper failed: %v\n%s", err, output)
+		}
+		return
+	}
+
+	previousUmask := syscall.Umask(0o077)
+	t.Cleanup(func() { syscall.Umask(previousUmask) })
+
+	secret := filepath.Join(t.TempDir(), "secret")
+	if err := os.WriteFile(secret, []byte("secret"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assertFileMode(t, secret, 0o600)
+	if os.Geteuid() == 0 {
+		if err := secureSecretFile(secret); err != nil {
+			t.Fatalf("root-owned mode-0600 secret rejected: %v", err)
+		}
+	} else if err := secureSecretFile(secret); err == nil || err.Error() != "file must be owned by root" {
+		t.Fatalf("unprivileged ownership contract changed: %v", err)
+	}
+
+	if err := os.Chmod(secret, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	assertFileMode(t, secret, 0o644)
+	if err := secureSecretFile(secret); err == nil {
+		t.Fatal("explicitly world-readable secret accepted under umask 0077")
+	}
+}
+
+func assertFileMode(t testing.TB, path string, want os.FileMode) {
+	t.Helper()
+	info, err := os.Stat(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := info.Mode().Perm(); got != want {
+		t.Fatalf("unexpected mode for %s: got %#o, want %#o", path, got, want)
 	}
 }
 

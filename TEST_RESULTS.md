@@ -5,7 +5,7 @@ Source disposition: **STAGE_R_CANDIDATE_ONLY**
 Validation date: 2026-08-29
 
 Reopened source baseline:
-`34b6d413f467b6d0f01d7c1626c025ea03298f0e`
+`a04358669edd3c2a75cda6ecd56ffc336bad09a8`
 
 This tracked report is the pre-build source snapshot. The later frozen commit,
 candidate build evidence, candidate comparison, R2 evidence, tag, and any
@@ -19,6 +19,7 @@ publication decision must remain external and checksummed.
 | Formatting and diff checks | PASS |
 | Module verification and tidy diff | PASS |
 | Full unit/regression suite | PASS |
+| Full unit/regression suite with `umask 0077` | PASS, disposable unprivileged environment |
 | Race suite | PASS |
 | Vet | PASS |
 | Staticcheck v0.8.1 | PASS |
@@ -62,24 +63,33 @@ publication decision must remain external and checksummed.
 - Managed status/dashboard projection and fail-closed status-v2 consumers.
 - Package nonactivation, unit ownership, candidate quarantine, and release
   evidence separation.
+- Security-sensitive mode-refusal fixtures set and verify their intended mode;
+  an isolated `umask 0077` regression proves mode-`0600` handling and explicit
+  mode-`0644` refusal without changing the runtime helper.
 
 ## Performance source results
 
-The 10-sample source matrix remained inside the Amendment E budgets on the
-reference NUC. Observed maxima included 0.006 ms provider parsing, 0.016 ms
-managed Docker config generation, 0.032 ms strict daemon merge, 0.014 ms
-Docker topology projection, 0.078 ms standard compilation, 34.7 ms
-10,000-policy compilation, 0.022 ms canonical fingerprinting, 0.361 ms no-op
-reconciliation, 0.001 ms dashboard status projection, and 0.046 ms adoption
+The repeated 10-sample source matrix remained inside the Amendment E budgets
+on the reference NUC. Observed maxima included 0.026 ms provider parsing,
+0.051 ms managed Docker config generation, 0.123 ms strict daemon merge,
+0.103 ms Docker topology projection, 0.159 ms standard compilation, 56.5 ms
+10,000-policy compilation, 0.178 ms canonical fingerprinting, 0.835 ms no-op
+reconciliation, 0.016 ms dashboard status projection, and 0.021 ms adoption
 worksheet generation. Performance evidence is not privileged network proof.
 
 ## Not executed under Stage E-R
+
+The first approval-bound E-R2 attempt hard-stopped before private package
+construction when its privileged `umask 0077` source rerun exposed the test
+fixture defect corrected here. That failed run is not privileged acceptance
+evidence. A renewed E-R2 run has not been executed and requires new approval
+bound to the replacement frozen source and candidate comparison.
 
 | Gate | Result |
 | --- | --- |
 | Two protected-parent candidate builds | NOT EXECUTED in this source snapshot |
 | External byte-for-byte candidate comparison | NOT EXECUTED |
-| Debian install/upgrade/remove in disposable VMs | NOT EXECUTED |
+| Renewed Debian install/upgrade/remove in disposable VMs | NOT EXECUTED |
 | Privileged namespace/network/leak matrix | NOT EXECUTED |
 | Clean-server setup and reboot matrix | NOT EXECUTED |
 | Privileged Docker ownership/traffic/rollback matrix | NOT EXECUTED |

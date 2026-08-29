@@ -16,6 +16,7 @@ make fmt-check
 go mod verify
 go mod tidy -diff
 go test ./...
+(umask 0077; go test ./...)
 go test -race ./...
 go vet ./...
 staticcheck ./...
@@ -29,6 +30,13 @@ bash ./tests/stage-r/run.sh
 The systemd preflight uses temporary unit copies and staged executables, so it
 can validate a fresh-host source installation before final paths exist and
 without installing or starting anything.
+
+The isolated `umask 0077` regression creates a mode-`0600` secret under the
+restrictive mask. Root execution requires acceptance; unprivileged execution
+requires the separate root-ownership refusal. Both paths then explicitly set
+and verify mode `0644` before asserting refusal. The full unprivileged suite is
+also rerun under `umask 0077`; no security refusal fixture may depend on the
+invoking shell's ambient mask.
 
 The Stage R runner checks package nonactivation, the early/ready/rollback
 dependency graph, packaged CLI contracts, release-candidate metadata, and

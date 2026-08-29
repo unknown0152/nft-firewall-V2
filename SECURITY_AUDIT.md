@@ -7,10 +7,12 @@ web, installers, tests, dependencies, Git history, and release contents.
 
 Current source disposition: **2.1.0 STAGE_R_CANDIDATE_ONLY**.
 The amended 2.1.0 source-only Stage E-R matrix passed; independent candidate
-comparison, privileged R2, tag validation, publication, and deployment have
-not yet been authorized or executed. The findings below through NFV2-030
-record the tagged 2.0.1 audit history; NFV2-031 through NFV2-041 record the
-accepted 2.0.2/2.0.3 release work; NFV2-042 onward records 2.1.0 source work.
+comparison remains a post-freeze external gate. The first privileged R2 run
+hard-stopped on NFV2-049 before package construction; a renewed R2 run, tag
+validation, publication, and deployment have not been executed. The findings
+below through NFV2-030 record the tagged 2.0.1 audit history; NFV2-031 through
+NFV2-041 record the accepted 2.0.2/2.0.3 release work; NFV2-042 onward records
+2.1.0 source work.
 Consolidated current results are listed in `TEST_RESULTS.md`. This document
 does not select or authorize a target host's policy or topology.
 
@@ -83,6 +85,7 @@ and post-tag gates.
 | NFV2-046 | A recreated Docker network changes its full ID and Linux bridge, so a static binding could silently become stale or tempt name-only authorization | HIGH | Authorize the stable name/driver/subnet/gateway tuple, race-bind one observation by full ID, and transactionally compile/commit/persist the newly observed bridge before restoring claims | CLOSED; end-to-end recreation and idempotence regressions PASS, privileged R2 NOT EXECUTED |
 | NFV2-047 | Managed Docker ownership introduces root-sensitive daemon JSON, socket-access, forwarding, and uninstall handoff boundaries | HIGH | Strict no-follow/owner/mode/size/duplicate-key reads, semantic merge, checksummed exact rollback, narrow socket drop-in, and fail-closed uninstall handoff that removes only exact managed content | CLOSED; tamper/failure/rollback/package lifecycle tests PASS, privileged R2 NOT EXECUTED |
 | NFV2-048 | The frozen 2.1.0 CLI documented `setup adopt` for existing hosts but implemented no such action | HIGH | Add an explicit dry-run-only planner structurally separate from setup mutation; verify exact schema-6 state/pointer/snapshot/provenance, the committed live-policy fingerprint, and bounded host topology twice; emit only a deterministic redacted worksheet; refuse execution pending a separate Stage E-L plan | CLOSED; command/refusal/redaction/race/exact-fixture/no-mutation source proof PASS, privileged R2 NOT EXECUTED |
+| NFV2-049 | A security test created its intended mode-`0644` refusal fixture with `os.WriteFile` and therefore inherited the privileged runner's `umask 0077` as mode `0600` | MEDIUM | Explicitly set and verify the unsafe fixture mode; add an isolated `umask 0077` regression covering protected-mode handling, root ownership, and explicit world-readable refusal without changing the runtime helper | CLOSED; targeted and full-suite normal/`umask 0077` source proof PASS, renewed privileged R2 NOT EXECUTED |
 
 ## Adversarial review areas
 
@@ -133,7 +136,8 @@ unresolved high/critical implementation findings.
 The amended 2.1.0 source passed Go 1.27.0 unit/race/vet/module/fmt, staticcheck
 v0.8.1, govulncheck v1.7.0, gosec v2.29.0, eleven bounded fuzz targets,
 complete shell analysis, Stage R source/guard/comparator contracts, staged
-systemd verification, and the coverage/benchmark gates. Candidate
+systemd verification, the full suite under `umask 0077`, and the
+coverage/benchmark gates. Candidate
 source/history/extracted-tree scans and two-parent comparison are generated
 only after the clean source freeze. Privileged R2, tagged package/archive
 inspection, post-tag validation, publication, and deployment are not current

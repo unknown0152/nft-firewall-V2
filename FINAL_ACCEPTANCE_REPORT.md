@@ -12,7 +12,7 @@ Release approval status: STAGE_R_CANDIDATE_ONLY
 | Build disposition | `@RELEASE_DISPOSITION@` |
 | Artifact label | `@RELEASE_ARTIFACT_LABEL@` |
 | Source-only Stage E-R | PASS |
-| Privileged Stage E-R2 | NOT EXECUTED |
+| Privileged Stage E-R2 | FAIL, HARD STOPPED; renewed run NOT EXECUTED |
 | Publication | NOT AUTHORIZED |
 | Deployment | NOT AUTHORIZED |
 
@@ -35,6 +35,9 @@ live installation, firewall application, VPN interruption, or deployment.
 
 - Full unit, race, vet, staticcheck, govulncheck, gosec, module, formatting,
   ShellCheck, fuzz, source-contract, systemd, coverage, and benchmark gates.
+- Explicit mode fixtures and an isolated `umask 0077` regression preserve the
+  mode-`0600`/root-ownership acceptance boundary and mode-`0644` refusal; the
+  complete suite also passes with `umask 0077` in an unprivileged environment.
 - Overall statement coverage at least 75%, with all five new core packages at
   or above 90%.
 - Managed file publication and kernel generation recovery remain separate,
@@ -53,5 +56,10 @@ candidate parents and emit an external
 approval bound to that frozen source commit and comparison SHA-256. Any local
 tag, remote publication, or current-server deployment requires still later
 identity-bound approval.
+
+The first approved R2 attempt hard-stopped before private package construction
+when its privileged source rerun exposed an ambient-umask-dependent test
+fixture. It is not acceptance evidence. The corrected source requires a new
+identity-bound E-R2 approval and complete renewed run.
 
 R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED
