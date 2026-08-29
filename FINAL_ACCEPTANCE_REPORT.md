@@ -22,8 +22,9 @@ The 2.1.0 source is accepted only for intrinsically quarantined Stage R
 candidate construction and independent comparison. The approved source scope
 includes Go 1.27, one-file managed setup, strict VPN import, managed routing,
 strict managed Docker IPv4 bridge adoption and forwarding ownership,
-CLI/dashboard changes, package source, documentation, benchmarks, tests, and
-local nondeployable candidate builds.
+the explicit dry-run-only existing-host adoption planner, CLI/dashboard
+changes, package source, documentation, benchmarks, tests, and local
+nondeployable candidate builds.
 
 The candidate binaries permit only their quarantine-safe behavior, candidate
 daemon/web processes refuse startup, and candidate Debian packages refuse
@@ -34,10 +35,13 @@ live installation, firewall application, VPN interruption, or deployment.
 
 - Full unit, race, vet, staticcheck, govulncheck, gosec, module, formatting,
   ShellCheck, fuzz, source-contract, systemd, coverage, and benchmark gates.
-- Overall statement coverage at least 75%, with all four new core packages at
+- Overall statement coverage at least 75%, with all five new core packages at
   or above 90%.
 - Managed file publication and kernel generation recovery remain separate,
   independently timed, and exact-generation scoped.
+- Existing-host adoption planning has no mutation path, repeats protected
+  observation, and refuses actual conversion pending a separate Stage E-L
+  plan.
 - No VPN key, provider identity, public topology, token, or live secret is
   present in tracked source evidence.
 

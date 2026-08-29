@@ -24,6 +24,10 @@
   mode, public exposure, and LAN policy.
 - Preserve 2.0.3 advanced TOML, schema-6 state, generations, snapshots,
   provenance, systemd, and package-upgrade behavior.
+- Add `nftfw setup adopt --vpn PATH --dry-run` as a deterministic, redacted,
+  double-observed worksheet for compatible existing 2.0.3 advanced-mode
+  state. It is structurally read-only; actual conversion remains a separately
+  approved Stage E-L operation and invocation without `--dry-run` refuses.
 - Adopt every eligible built-in or Compose-style Docker IPv4 bridge from the
   local socket, preserve unrelated daemon JSON keys, disable Docker firewall/
   forwarding/masquerade/proxy mutation, make NFTFW own persistent kernel IPv4

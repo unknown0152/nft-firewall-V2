@@ -28,6 +28,13 @@ func (b *Backend) Fingerprint(ctx context.Context) (string, error) {
 	return hex.EncodeToString(hash.Sum(nil)), nil
 }
 
+// CanonicalOwnedTableJSON is the pure, read-only canonicalizer used by
+// verification-only components that deliberately do not hold a Backend and
+// therefore cannot reach its mutation methods.
+func CanonicalOwnedTableJSON(data []byte, table Table) ([]byte, error) {
+	return canonicalOwnedJSON(data, table)
+}
+
 func canonicalOwnedJSON(data []byte, table Table) ([]byte, error) {
 	var document struct {
 		Nftables []map[string]any `json:"nftables"`

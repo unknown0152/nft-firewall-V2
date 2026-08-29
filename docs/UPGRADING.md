@@ -109,8 +109,25 @@ checksums until post-upgrade validation completes.
 ## Managed-mode adoption
 
 The clean-server `nftfw setup --vpn` command refuses an existing 2.0.3 host.
-Adoption requires a topology-specific dry run and a separately approved live
-plan because it transfers WireGuard, DNS, policy-route, sysctl, and boot
+Generate the topology-specific worksheet after the inert package upgrade:
+
+```bash
+sudo nftfw setup adopt --vpn /path/to/working-vpn.conf --dry-run
+sudo nftfw setup adopt --vpn /path/to/working-vpn.conf --dry-run --json
+```
+
+The planner verifies the exact schema-6 generation, pointer/snapshot,
+provenance, current units, routing/resolver, exposure-port summary, and eligible
+Docker topology twice. Its output contains ownership transfers, interruptions,
+backup inputs, rollback boundaries, and the explicit statements
+`live_state_changed: false` and `rollback_required: false`. It omits provider
+keys, endpoint/address values, public IPs/domains, container/image/volume IDs,
+and Docker network names.
+
+2.1.0 deliberately provides no generic adoption executor. Invocation without
+`--dry-run` returns `ADOPTION_EXECUTION_REQUIRES_SEPARATE_LIVE_PLAN`. Actual
+conversion requires a separately approved Stage E-L transaction because it
+transfers WireGuard, DNS, policy-route, sysctl, firewall, Docker, and boot
 ownership. Do not delete the existing database, ledger, enforcement pointer,
 or nftables tables to imitate a clean host.
 

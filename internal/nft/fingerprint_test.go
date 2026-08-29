@@ -6,7 +6,7 @@ func TestCanonicalFingerprintIgnoresOnlyVolatileState(t *testing.T) {
 	table := Table{Family: "inet", Name: "nftfw_filter"}
 	first := []byte(`{"nftables":[{"metainfo":{"version":"1"}},{"table":{"family":"inet","name":"nftfw_filter","handle":1}},{"set":{"family":"inet","table":"nftfw_filter","name":"blocked_v4","handle":2,"type":"ipv4_addr","elem":["203.0.113.1"]}},{"rule":{"family":"inet","table":"nftfw_filter","chain":"input","handle":3,"comment":"nftfw:block-v4","expr":[{"counter":{"packets":1,"bytes":64}},{"drop":null}]}}]}`)
 	second := []byte(`{"nftables":[{"metainfo":{"version":"2"}},{"table":{"family":"inet","name":"nftfw_filter","handle":91}},{"set":{"family":"inet","table":"nftfw_filter","name":"blocked_v4","handle":92,"type":"ipv4_addr","elem":["198.51.100.2"]}},{"rule":{"family":"inet","table":"nftfw_filter","chain":"input","handle":93,"comment":"nftfw:block-v4","expr":[{"counter":{"packets":900,"bytes":9000}},{"drop":null}]}}]}`)
-	a, err := canonicalOwnedJSON(first, table)
+	a, err := CanonicalOwnedTableJSON(first, table)
 	if err != nil {
 		t.Fatal(err)
 	}

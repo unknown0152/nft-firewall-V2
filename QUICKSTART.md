@@ -4,6 +4,17 @@ This path is for a clean Debian 13 amd64 or arm64 server with one IPv4 uplink,
 local-console or directly connected private-LAN recovery, and one supported
 WireGuard provider profile.
 
+If NFTFW state already exists, do not use this clean-host procedure. After a
+supported inert 2.0.3-to-2.1.0 package upgrade, inspect a future conversion
+without changing the host:
+
+```bash
+sudo nftfw setup adopt --vpn /path/to/working-vpn.conf --dry-run
+```
+
+That command only prints a redacted local worksheet. Omitting `--dry-run`
+refuses; managed-mode conversion requires a separately approved live plan.
+
 ## 1. Install
 
 ```bash

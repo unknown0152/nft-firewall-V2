@@ -5,7 +5,7 @@ Source disposition: **STAGE_R_CANDIDATE_ONLY**
 Validation date: 2026-08-29
 
 Reopened source baseline:
-`5e02c0a4a9f14cd5d5d9077a951eac7a77d1ecf1`
+`34b6d413f467b6d0f01d7c1626c025ea03298f0e`
 
 This tracked report is the pre-build source snapshot. The later frozen commit,
 candidate build evidence, candidate comparison, R2 evidence, tag, and any
@@ -24,15 +24,16 @@ publication decision must remain external and checksummed.
 | Staticcheck v0.8.1 | PASS |
 | govulncheck v1.7.0 | PASS, no reachable vulnerabilities |
 | gosec v2.29.0 reviewed profile | PASS |
-| Ten bounded fuzz targets | PASS |
+| Eleven bounded fuzz targets | PASS |
 | ShellCheck | PASS |
 | Stage R source/package/systemd contracts | PASS |
 | Staged systemd verification | PASS |
-| Overall statement coverage | PASS, 75.6% |
+| Overall statement coverage | PASS, 76.4% |
 | `internal/setup` coverage | PASS, 90.0% |
 | `internal/wgconfig` coverage | PASS, 90.6% |
 | `internal/intent` coverage | PASS, 92.3% |
 | `internal/routing` coverage | PASS, 90.2% |
+| `internal/adoption` coverage | PASS, 91.1% |
 
 ## Functional source coverage
 
@@ -47,6 +48,11 @@ publication decision must remain external and checksummed.
   restart only when required; topology/route revalidation; and exact rollback.
 - Stable Docker authorization provenance across a race-consistent full-ID and
   Linux-bridge rebind, including transactional generation publication.
+- Explicit dry-run-only existing-host adoption planning with exact schema-6
+  state/pointer/snapshot/provenance and live-policy fingerprint verification,
+  double observation,
+  deterministic redacted output, actionable refusals, and byte-identical
+  no-mutation fixture proof.
 - Managed `expose` and `lan` changes compiled from the newly published
   protected files rather than stale daemon memory.
 - Checksummed managed-change journal recovery for pre-apply, applied,
@@ -64,8 +70,8 @@ reference NUC. Observed maxima included 0.006 ms provider parsing, 0.016 ms
 managed Docker config generation, 0.032 ms strict daemon merge, 0.014 ms
 Docker topology projection, 0.078 ms standard compilation, 34.7 ms
 10,000-policy compilation, 0.022 ms canonical fingerprinting, 0.361 ms no-op
-reconciliation, and 0.001 ms dashboard status projection. Performance
-evidence is not privileged network proof.
+reconciliation, 0.001 ms dashboard status projection, and 0.046 ms adoption
+worksheet generation. Performance evidence is not privileged network proof.
 
 ## Not executed under Stage E-R
 
@@ -77,6 +83,7 @@ evidence is not privileged network proof.
 | Privileged namespace/network/leak matrix | NOT EXECUTED |
 | Clean-server setup and reboot matrix | NOT EXECUTED |
 | Privileged Docker ownership/traffic/rollback matrix | NOT EXECUTED |
+| Disposable exact-2.0.3 adoption-planner no-mutation matrix | NOT EXECUTED |
 | Real-provider VPN test | NOT EXECUTED |
 | Local release tag | NOT CREATED |
 | GitHub publication | NOT AUTHORIZED |

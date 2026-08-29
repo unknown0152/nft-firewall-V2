@@ -38,11 +38,15 @@ Unit tests cover strict config, compiler invariants, owned transaction
 validation, JSON fingerprints, API size/schema/peer rules, state migrations,
 backup/corruption, provenance union, endpoint rollover/failure, Docker
 daemon merge/ownership, topology adoption, forwarding, bridge recreation,
-uninstall handoff, feed parsing, explanation, safe apply, and rollback.
+uninstall handoff, adoption-planner command grammar, exact schema-6 read-only
+inspection, deterministic/redacted worksheet generation, no-mutation tree
+comparison, feed parsing, explanation, safe apply, and rollback.
 
 Fuzz targets cover config decoding, API decoding, policy explanation, runtime
 prefix compilation, nft transaction validation/fingerprinting, claim
-validation, strict Docker daemon JSON, and feed parsing. Example bounded run:
+validation, strict Docker daemon JSON, adoption error redaction, and feed
+parsing. The adoption target proves untrusted provider/path/error strings
+reduce to one bounded operator code without echoing input. Example bounded run:
 
 ```bash
 go test ./internal/config -run '^$' -fuzz FuzzDecode -fuzztime 5s

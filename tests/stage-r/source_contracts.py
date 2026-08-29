@@ -1047,6 +1047,109 @@ class ManagedDockerContracts(unittest.TestCase):
         self.assertIn("nftfw_remove_managed_docker_dropin", prerm)
 
 
+class AdoptionPlannerContracts(unittest.TestCase):
+    def test_setup_adopt_is_explicit_and_dry_run_only(self) -> None:
+        cli = read("cmd/nftfw/managed.go")
+        self.assertIn('args[0] == "adopt"', cli)
+        self.assertIn("return setupAdoptCommand(args[1:])", cli)
+        self.assertIn('flag.NewFlagSet("setup adopt"', cli)
+        self.assertIn('dryRun := fs.Bool("dry-run"', cli)
+        self.assertIn("fs.SetOutput(io.Discard)", cli)
+        self.assertIn("ADOPTION_EXECUTION_REQUIRES_SEPARATE_LIVE_PLAN", cli)
+        self.assertIn("adoption.OperatorError(err)", cli)
+        self.assertNotIn("acquireSetupLock()", cli.split("func setupAdoptCommand", 1)[1].split("\n}", 1)[0])
+
+    def test_planner_has_no_mutation_surface(self) -> None:
+        planner = read("internal/adoption/adoption.go")
+        system = read("internal/adoption/system.go")
+        combined = planner + system
+        for forbidden in (
+            "os.WriteFile(",
+            "os.OpenFile(",
+            "os.Mkdir",
+            "os.Remove(",
+            "exec.Command",
+            "state.Open(ctx",
+            "provenance.Open(ctx",
+            '"systemctl", "start"',
+            '"systemctl", "restart"',
+            '"systemctl", "enable"',
+            '"nft", "--file"',
+            '"ip", "route", "add"',
+            '"sysctl", "-w"',
+        ):
+            self.assertNotIn(forbidden, combined)
+        self.assertIn("state.OpenReadOnly(ctx", system)
+        self.assertIn("provenance.OpenReadOnly(ctx", system)
+        self.assertIn("state.LoadVerifiedGenerationSnapshot", system)
+        self.assertIn("wgconfig.Read(vpnPath)", system)
+        self.assertIn("containers.ValidateManagedDaemonConfig", system)
+        self.assertIn("containers.ManagedDaemonConfigFingerprint", system)
+        self.assertIn("nft.CanonicalOwnedTableJSON", system)
+        self.assertIn('runner.Run(ctx, "nft", "-j", "list", "table"', system)
+        self.assertNotIn("nft.New(", system)
+        self.assertIn("first.Fingerprint != second.Fingerprint", system)
+
+    def test_planner_output_and_errors_are_redacted(self) -> None:
+        planner = read("internal/adoption/adoption.go")
+        tests = read("internal/adoption/adoption_test.go")
+        self.assertIn('return "ADOPTION_INSPECTION_FAILED"', planner)
+        self.assertIn("live state changed: NO", planner)
+        self.assertIn("rollback required: NO", planner)
+        self.assertIn("the planner writes no log", planner)
+        for forbidden_field in (
+            'json:"private_key"',
+            'json:"endpoint"',
+            'json:"public_ip"',
+            'json:"container_id"',
+            'json:"image"',
+            'json:"volume"',
+            'json:"docker_network_name"',
+        ):
+            self.assertNotIn(forbidden_field, planner)
+        self.assertIn("FuzzAdoptionErrorRedaction", tests)
+        self.assertIn("TestPlannerBuildsDeterministicRedactedWorksheet", tests)
+        self.assertIn('json:"restart_required"', planner)
+
+    def test_exact_schema6_fixture_proves_no_filesystem_change(self) -> None:
+        tests = read("internal/adoption/system_test.go")
+        self.assertIn("TestSystemInspectorExactSchema6FixtureIsNonMutating", tests)
+        self.assertIn("before := treeSignature(t, root)", tests)
+        self.assertIn("after := treeSignature(t, root)", tests)
+        self.assertIn("state.Open(ctx, database)", tests)
+        self.assertIn("store.Commit(ctx, 1)", tests)
+        self.assertIn("mutatingCommand(command)", tests)
+
+    def test_operator_documents_keep_planning_separate_from_execution(self) -> None:
+        for relative in (
+            "README.md",
+            "QUICKSTART.md",
+            "INSTALL.md",
+            "SUPPORTED-PLATFORMS.md",
+            "docs/CLI.md",
+            "docs/UPGRADING.md",
+            "docs/RECOVERY.md",
+            "docs/TROUBLESHOOTING.md",
+            "docs/ARCHITECTURE.md",
+            "docs/TESTING.md",
+            "SECURITY.md",
+        ):
+            source = read(relative)
+            self.assertIn(
+                "adopt",
+                source.lower(),
+                f"{relative} does not explain the adoption boundary",
+            )
+        cli = read("docs/CLI.md")
+        upgrade = read("docs/UPGRADING.md")
+        recovery = read("docs/RECOVERY.md")
+        architecture = read("docs/ARCHITECTURE.md")
+        self.assertIn("nftfw setup adopt --vpn PATH --dry-run", cli)
+        self.assertIn("ADOPTION_EXECUTION_REQUIRES_SEPARATE_LIVE_PLAN", upgrade)
+        self.assertIn("requires no rollback", recovery)
+        self.assertIn("no writer", architecture)
+
+
 class ReleaseCandidateMetadataContracts(unittest.TestCase):
     def test_build_defaults_and_ci_identify_2_1_0(self) -> None:
         makefile = read("Makefile")

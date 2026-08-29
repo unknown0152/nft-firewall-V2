@@ -4,6 +4,7 @@
 
 ```bash
 nftfw setup --vpn PATH [--dry-run] [--yes] [--json]
+nftfw setup adopt --vpn PATH --dry-run [--json]
 nftfw setup status [--json]
 nftfw setup rollback [--expired]
 ```
@@ -13,6 +14,14 @@ no-op. A different profile or unhealthy prior managed state is refused. The
 dry-run lists adopted Docker networks, NFTFW IPv4-forwarding ownership, and
 whether one Docker restart is required. Interactive setup asks again
 immediately before that restart; `--yes` accepts both confirmations.
+
+`setup adopt` is a separate, root-only, non-mutating reader for a compatible
+existing 2.0.3 advanced-mode installation. It does not use the setup mutation
+lock, create state, import a profile, or execute conversion. It reads the
+protected profile/config/state/provenance and current host observation twice,
+then emits a deterministic redacted worksheet. Invocation without
+`--dry-run` returns `ADOPTION_EXECUTION_REQUIRES_SEPARATE_LIVE_PLAN` before
+inspection or mutation. The JSON schema is `nftfw.adoption-plan.v1`.
 
 ## Tunnel
 

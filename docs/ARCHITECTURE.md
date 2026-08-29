@@ -176,6 +176,28 @@ unit state, Docker state, and the prior firewall generation before removing
 the guard. An unchanged compliant daemon configuration is an idempotent
 no-restart path.
 
+## Existing-host adoption planner
+
+The adoption planner is structurally separate from the managed setup engine.
+It has no writer, setup journal, mutation lock, service-control API, nftables
+backend, routing manager, or Docker mutation method. The CLI accepts only:
+
+```text
+setup adopt --vpn PATH --dry-run [--json]
+```
+
+The system inspector uses strict profile/config readers, immutable read-only
+schema-6 SQLite, the verified enforcement pointer/snapshot, read-only
+provenance, bounded nftables/discovery commands, the explicit local Docker
+socket, `systemctl show`, `ip -j ... show`, and `sysctl -n`. It reduces raw
+addresses, endpoint data, interface/network identities, and Docker details to
+counts or fixed classifications plus private digests. It repeats the entire
+observation and requires both sanitized facts and private digests to match.
+
+The pure planner validates the supported adoption boundary and emits
+`nftfw.adoption-plan.v1`. Actual ownership transfer has no code path from this
+component and remains a separately reviewed Stage E-L transaction.
+
 ## WireGuard
 
 The policy permits physical bootstrap only to validated host addresses in

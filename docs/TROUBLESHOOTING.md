@@ -93,7 +93,37 @@ VPN identity in place. Use a separately reviewed profile migration.
 ## Existing-host refusal
 
 `DISCOVERY_EXISTING_NFTFW_REQUIRES_ADOPT` protects an existing NFTFW
-deployment. Use the upgrade/adoption workflow; do not erase evidence. Docker
-alone is not an existing-host refusal: eligible IPv4 bridge networks are
-included in the generated plan, while unsupported topology returns a specific
-Docker refusal code.
+deployment. After a supported inert upgrade, run:
+
+```bash
+sudo nftfw setup adopt --vpn /path/to/profile.conf --dry-run
+```
+
+Do not erase evidence. The 2.1.0 command produces a worksheet only and refuses
+execution without `--dry-run`.
+
+Common adoption refusals are:
+
+- `ADOPTION_USAGE_INVALID`: rerun the exact dry-run command shown in the
+  refusal; unknown/conflicting options are never echoed;
+- `ADOPTION_ALREADY_MANAGED` or `ADOPTION_CLEAN_HOST_USE_SETUP`: use the
+  matching ordinary setup/idempotent workflow;
+- `ADOPTION_STATE_INVALID`, `ADOPTION_PENDING_GENERATION`, or
+  `ADOPTION_PROVENANCE_INVALID`: verify and recover the existing advanced
+  deployment before planning conversion;
+- `ADOPTION_POLICY_IDENTITY_MISMATCH`: the live owned-table fingerprint does
+  not match the committed generation; recover the advanced firewall before
+  retrying;
+- `ADOPTION_FIREWALL_OWNERSHIP_AMBIGUOUS` or
+  `ADOPTION_ROUTING_AMBIGUOUS`: retain advanced mode and investigate ownership;
+- `ADOPTION_EXPOSURE_UNSUPPORTED`: advanced policy or DNAT exposes the host
+  through a non-VPN ingress; keep advanced mode until a topology-specific
+  Stage E-L plan accounts for that service;
+- `ADOPTION_DOCKER_TOPOLOGY_UNSUPPORTED`: an existing authorized tuple drifted
+  or Docker returned unsupported/ambiguous topology;
+- `ADOPTION_OBSERVATION_CHANGED`: protected state or topology changed between
+  the two read-only observations; retry after it becomes stable; and
+- `ADOPTION_EXECUTION_REQUIRES_SEPARATE_LIVE_PLAN`: actual conversion is Stage
+  E-L and is not implemented as a generic 2.1.0 action.
+
+All planner refusals occur without mutation or rollback.

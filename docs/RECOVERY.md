@@ -5,6 +5,19 @@ rollback architecture and adds separate managed-setup and managed-policy
 file-publication journals and watchdogs. Recovery still depends on
 local-console or independent LAN access and the actual deployed generation.
 
+## Adoption-planner interruption
+
+`nftfw setup adopt --vpn PATH --dry-run` has no recovery transaction. It does
+not acquire the setup mutation lock or create a journal, backup, intent,
+generated policy, VPN copy, route, nftables object, sysctl, systemd change, or
+Docker change. Killing it at any point requires no rollback. Run the same
+command again; if the two race-consistent observations differ, it refuses with
+`ADOPTION_OBSERVATION_CHANGED`.
+
+Every planner error confirms `live state changed: NO` and `rollback required:
+NO`. The detailed-log pointer is the existing root-only daemon journal; the
+planner itself writes no log.
+
 ## Managed setup interruption
 
 Inspect the root-only setup journal:

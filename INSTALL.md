@@ -83,6 +83,21 @@ IPv6, internal networks, overlap, ambiguity, or an unreadable local socket
 stop setup before mutation. Do not delete state or disable a firewall manager
 to bypass refusal.
 
+Generate the nonactivating local adoption worksheet with:
+
+```bash
+sudo nftfw setup adopt --vpn /path/to/working-vpn.conf --dry-run
+```
+
+It reads the protected advanced configuration, exact schema-6 state,
+enforcement pointer and snapshot, provenance ledger, systemd states, routing,
+resolver, and local Docker topology twice. It prints no provider key,
+endpoint/address, public IP, domain, container/image/volume identity, or Docker
+network name. It creates no journal or backup and changes no file, firewall,
+route, interface, sysctl, resolver, service, or Docker object. Actual adoption
+is deliberately not a generic 2.1.0 command; prepare a separately approved
+Stage E-L plan from the worksheet.
+
 ## Source builds
 
 Final release builds require exact Go 1.27.0. Build from the exact approved

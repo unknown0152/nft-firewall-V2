@@ -56,8 +56,18 @@ Kubernetes, internal, IPv6, overlapping, malformed, or changing Docker
 topologies are refused.
 
 Existing NFTFW installations, multiple uplinks, split tunnels, provider
-hooks, multiple peers, and native IPv6 are not silently changed. They require
-the explicit adoption or advanced-mode workflow.
+hooks, multiple peers, and native IPv6 are not silently changed. An existing
+compatible 2.0.3 advanced-mode installation can generate a redacted worksheet:
+
+```bash
+sudo nftfw setup adopt --vpn /path/to/working-vpn.conf --dry-run
+```
+
+The 2.1.0 adoption command is planning-only. It verifies the configuration,
+schema-6 generation, enforcement pointer, immutable snapshot, provenance,
+unit states, routing, resolver, and eligible Docker topology twice without a
+mutation lock or host changes. Actual conversion remains a separately
+approved, topology-specific Stage E-L operation.
 
 ## Daily commands
 

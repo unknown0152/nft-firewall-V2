@@ -2,10 +2,10 @@
 
 NFT Firewall V2 2.1.0 preserves the accepted 2.0.3 enforcement core and adds
 the source-reviewed managed setup, importer, routing, and rollback boundary.
-The guarantees below passed
-the source, privileged R2, and post-tag validation described in
-`TEST_RESULTS.md`. They apply to the exact validated source and declared
-operating assumptions, not to an unaudited host configuration.
+The guarantees below passed the source validation described in
+`TEST_RESULTS.md`; privileged 2.1.0 R2 and post-tag validation remain separate
+gates. They apply to the exact validated source and declared operating
+assumptions, not to an unaudited host configuration.
 
 Report vulnerabilities privately to the repository owner. Do not include live
 keys, tokens, public address inventories, production packet captures, or an
@@ -57,6 +57,11 @@ operational state database in a report.
   prior claims and live sets.
 - The web process is read-only, local by default, emits restrictive headers,
   and has no control or Docker socket.
+- Existing-host adoption planning is dry-run-only and has no writer, mutation
+  lock, service-control, nftables, routing-mutation, sysctl-mutation, or Docker
+  mutation surface. It reads twice, refuses races, and outputs no provider
+  key, endpoint/address, public IP/domain, application identity, or Docker
+  network name.
 
 ## Trust assumptions
 

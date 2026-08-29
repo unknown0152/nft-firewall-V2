@@ -3,7 +3,9 @@ package containers
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -78,6 +80,25 @@ func ValidateManagedDaemonConfig(path string) error {
 		}
 	}
 	return nil
+}
+
+// ManagedDaemonConfigFingerprint returns a private digest of the exact
+// protected source file, including whether it exists. Adoption planning uses
+// this only to prove that two observations saw the same daemon ownership
+// input; the digest is never included in operator output.
+func ManagedDaemonConfigFingerprint(path string) (string, error) {
+	data, existed, err := readProtectedDaemonFile(path)
+	if err != nil {
+		return "", err
+	}
+	digest := sha256.New()
+	if existed {
+		_, _ = digest.Write([]byte{1})
+	} else {
+		_, _ = digest.Write([]byte{0})
+	}
+	_, _ = digest.Write(data)
+	return hex.EncodeToString(digest.Sum(nil)), nil
 }
 
 func readDaemonObject(path string) (map[string]any, bool, error) {

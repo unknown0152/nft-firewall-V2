@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/unknown0152/nft-firewall-v2/internal/adoption"
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
 	"github.com/unknown0152/nft-firewall-v2/internal/intent"
@@ -34,6 +35,7 @@ func managedTestKey(fill byte) string {
 func withManagedTestEnvironment(t *testing.T) (string, string) {
 	t.Helper()
 	oldDockerDaemon, oldDockerDropIn := managedDockerDaemon, managedDockerDropIn
+	oldAdoptionPlan := managedAdoptionPlan
 	oldValues := []any{
 		managedIntentPath, managedConfigPath, managedVPNPath, setupJournalPath,
 		setupLockPath, managedStatusSock, managedControlSock, managedStateDB,
@@ -71,6 +73,7 @@ func withManagedTestEnvironment(t *testing.T) (string, string) {
 		managedChangeOldConfig = oldValues[22].(string)
 		managedChangeNow = oldValues[23].(func() time.Time)
 		managedChangeTimeout = oldValues[24].(time.Duration)
+		managedAdoptionPlan = oldAdoptionPlan
 	})
 
 	root := t.TempDir()
@@ -343,6 +346,76 @@ func TestManagedSetupStatusRollbackAndUsageFailures(t *testing.T) {
 	} {
 		if err := call(); err == nil {
 			t.Fatal("invalid managed command accepted")
+		}
+	}
+}
+
+func TestSetupAdoptIsExplicitDryRunOnlyAndRedactsFailures(t *testing.T) {
+	_, source := withManagedTestEnvironment(t)
+	calls := 0
+	managedAdoptionPlan = func(ctx context.Context, path string) (adoption.Plan, error) {
+		calls++
+		if _, bounded := ctx.Deadline(); !bounded {
+			t.Fatal("adoption inspection context is unbounded")
+		}
+		if path != source {
+			t.Fatalf("unexpected profile path: %q", path)
+		}
+		return adoption.Plan{
+			Schema: adoption.Schema, Status: "READY_FOR_SEPARATE_LIVE_PLAN",
+			InstalledVersion: "2.0.3", CurrentMode: "advanced", TargetMode: "managed",
+			State:            adoption.StateSummary{Schema: 6, Generation: 9},
+			Network:          adoption.NetworkSummary{Uplink: "verified-single-ipv4", Resolver: "none", IPv6Mode: "disabled"},
+			Docker:           adoption.DockerSummary{Topology: "absent"},
+			LiveStateChanged: false, RollbackRequired: false,
+			NextStep: "prepare a separate plan", DetailedLog: "sudo journalctl -u nftfwd",
+		}, nil
+	}
+	if err := setupCommand([]string{"adopt", "--vpn", source, "--dry-run"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupCommand([]string{"adopt", "--vpn", source, "--dry-run", "--json"}); err != nil {
+		t.Fatal(err)
+	}
+	if calls != 2 {
+		t.Fatalf("planner calls=%d", calls)
+	}
+	if err := setupCommand([]string{"adopt", "--vpn", source}); err == nil ||
+		!strings.Contains(err.Error(), "ADOPTION_EXECUTION_REQUIRES_SEPARATE_LIVE_PLAN") || calls != 2 {
+		t.Fatalf("adoption execution boundary failed: calls=%d err=%v", calls, err)
+	}
+	managedEUID = func() int { return 1000 }
+	if err := setupCommand([]string{"adopt", "--vpn", source, "--dry-run"}); err == nil ||
+		!strings.Contains(err.Error(), "ADOPTION_REQUIRES_ROOT") || calls != 2 {
+		t.Fatalf("adoption root boundary failed: calls=%d err=%v", calls, err)
+	}
+	managedEUID = func() int { return 0 }
+	managedAdoptionPlan = func(context.Context, string) (adoption.Plan, error) {
+		return adoption.Plan{}, errors.New("private-key-material vpn.example.test 198.51.100.8")
+	}
+	err := setupCommand([]string{"adopt", "--vpn", source, "--dry-run"})
+	if err == nil || !strings.Contains(err.Error(), "ADOPTION_INSPECTION_FAILED") ||
+		strings.Contains(err.Error(), "private-key-material") || strings.Contains(err.Error(), "vpn.example.test") ||
+		strings.Contains(err.Error(), "198.51.100.8") {
+		t.Fatalf("unsafe adoption error: %v", err)
+	}
+}
+
+func TestSetupAdoptGrammarCannotFallThroughToCleanSetup(t *testing.T) {
+	_, source := withManagedTestEnvironment(t)
+	for _, args := range [][]string{
+		{"adopt"},
+		{"adopt", "--vpn", source},
+		{"adopt", "--vpn", source, "--dry-run", "--yes"},
+		{"adopt", "--vpn", source, "--dry-run", "extra"},
+		{"unknown", "--vpn", source},
+		{"adopt", "--unknown=private-key-material", "--vpn", source, "--dry-run"},
+	} {
+		if err := setupCommand(args); err == nil || strings.Contains(err.Error(), "private-key-material") {
+			t.Fatalf("invalid setup grammar accepted: %v", args)
+		} else if args[0] == "adopt" && (!strings.Contains(err.Error(), "live state changed: NO") ||
+			!strings.Contains(err.Error(), "rollback required: NO")) {
+			t.Fatalf("adoption usage error is not actionable: %v", err)
 		}
 	}
 }

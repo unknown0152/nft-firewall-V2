@@ -134,6 +134,28 @@ func TestManagedDaemonConfigCreatesMissingFileProjection(t *testing.T) {
 	}
 }
 
+func TestManagedDaemonConfigFingerprintBindsExistenceAndContent(t *testing.T) {
+	path := secureDockerConfigPath(t, "")
+	missing, err := ManagedDaemonConfigFingerprint(path)
+	if err != nil || missing == "" {
+		t.Fatalf("missing fingerprint failed: %q %v", missing, err)
+	}
+	if err := os.WriteFile(path, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	present, err := ManagedDaemonConfigFingerprint(path)
+	if err != nil || present == "" || present == missing {
+		t.Fatalf("present fingerprint failed: %q %v", present, err)
+	}
+	if err := os.WriteFile(path, []byte("{\"log-level\":\"warn\"}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := ManagedDaemonConfigFingerprint(path)
+	if err != nil || changed == present {
+		t.Fatalf("changed fingerprint failed: %q %v", changed, err)
+	}
+}
+
 func TestManagedDaemonConfigAcceptsMissingProtectedParent(t *testing.T) {
 	root := t.TempDir()
 	if err := os.Chmod(root, 0o700); err != nil {

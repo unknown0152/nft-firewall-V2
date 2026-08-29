@@ -68,6 +68,21 @@ type Inspector struct {
 }
 
 func (i Inspector) Discover(ctx context.Context) (Snapshot, error) {
+	snapshot, err := i.Inspect(ctx)
+	if err != nil {
+		return Snapshot{}, err
+	}
+	if err := snapshot.ValidateCleanHost(); err != nil {
+		return Snapshot{}, err
+	}
+	return snapshot, nil
+}
+
+// Inspect returns the same bounded, race-resistant host observation used by
+// clean setup without applying the clean-host classification. Existing-host
+// adoption planning needs to inspect owned NFTFW state, then validate that
+// state through its dedicated read-only contract.
+func (i Inspector) Inspect(ctx context.Context) (Snapshot, error) {
 	if i.Runner == nil {
 		i.Runner = ExecRunner{}
 	}
@@ -125,9 +140,6 @@ func (i Inspector) Discover(ctx context.Context) (Snapshot, error) {
 		ForeignNFTables: foreign, ExistingNFTFWState: existingState,
 		DockerPresent: dockerPresent, DockerClean: dockerClean,
 		DockerNetworks: dockerNetworks,
-	}
-	if err := snapshot.ValidateCleanHost(); err != nil {
-		return Snapshot{}, err
 	}
 	return snapshot, nil
 }

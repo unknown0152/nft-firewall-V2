@@ -82,6 +82,7 @@ and post-tag gates.
 | NFV2-045 | Managed setup detected Docker but then removed every Docker network and omitted kernel IPv4 forwarding ownership | HIGH | Adopt only strict local IPv4 bridge tuples, generate container-zone/VPN-only policy, and persist/apply/verify/restore `net.ipv4.ip_forward=1` while Docker's own forwarding mutation remains disabled | CLOSED; unit/race/source-contract/coverage proof PASS, privileged R2 NOT EXECUTED |
 | NFV2-046 | A recreated Docker network changes its full ID and Linux bridge, so a static binding could silently become stale or tempt name-only authorization | HIGH | Authorize the stable name/driver/subnet/gateway tuple, race-bind one observation by full ID, and transactionally compile/commit/persist the newly observed bridge before restoring claims | CLOSED; end-to-end recreation and idempotence regressions PASS, privileged R2 NOT EXECUTED |
 | NFV2-047 | Managed Docker ownership introduces root-sensitive daemon JSON, socket-access, forwarding, and uninstall handoff boundaries | HIGH | Strict no-follow/owner/mode/size/duplicate-key reads, semantic merge, checksummed exact rollback, narrow socket drop-in, and fail-closed uninstall handoff that removes only exact managed content | CLOSED; tamper/failure/rollback/package lifecycle tests PASS, privileged R2 NOT EXECUTED |
+| NFV2-048 | The frozen 2.1.0 CLI documented `setup adopt` for existing hosts but implemented no such action | HIGH | Add an explicit dry-run-only planner structurally separate from setup mutation; verify exact schema-6 state/pointer/snapshot/provenance, the committed live-policy fingerprint, and bounded host topology twice; emit only a deterministic redacted worksheet; refuse execution pending a separate Stage E-L plan | CLOSED; command/refusal/redaction/race/exact-fixture/no-mutation source proof PASS, privileged R2 NOT EXECUTED |
 
 ## Adversarial review areas
 
@@ -102,6 +103,7 @@ and post-tag gates.
 | Secret logging | Status omits keys/peer IDs; controller observation is aggregate; test config excluded; current-tree scan passes while exact frozen history and extracted archives remain post-freeze gates |
 | Capabilities/systemd | Static units bind the root daemon to `CAP_NET_ADMIN`; web has no capabilities; staged, package, runtime, and reboot verification passed |
 | Managed Docker | Docker keeps all five packet-mutation settings false; NFTFW alone owns IPv4 forwarding, container policy/NAT, current bridge binding, and the narrow local socket handoff |
+| Adoption planner | Dry-run-only component has no writer/mutation backend; double observation, exact state/provenance verification, bounded fixed output, and untrusted-error redaction are source-tested |
 
 ## Accepted residual risks
 
@@ -129,7 +131,7 @@ unresolved high/critical implementation findings.
 ## Final scan evidence
 
 The amended 2.1.0 source passed Go 1.27.0 unit/race/vet/module/fmt, staticcheck
-v0.8.1, govulncheck v1.7.0, gosec v2.29.0, ten bounded fuzz targets,
+v0.8.1, govulncheck v1.7.0, gosec v2.29.0, eleven bounded fuzz targets,
 complete shell analysis, Stage R source/guard/comparator contracts, staged
 systemd verification, and the coverage/benchmark gates. Candidate
 source/history/extracted-tree scans and two-parent comparison are generated

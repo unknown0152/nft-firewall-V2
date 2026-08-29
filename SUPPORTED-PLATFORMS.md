@@ -42,6 +42,20 @@ bridges are supported when every current bridge, canonical IPv4 subnet, and
 gateway is unambiguous and non-overlapping. Setup adopts all eligible bridge
 networks together; it never selects only a convenient subset.
 
+## Existing-host adoption planning
+
+The dry-run-only `nftfw setup adopt` planner supports Debian 13 amd64/arm64
+with a compatible 2.0.3 or inertly upgraded 2.1.0 advanced installation,
+exact contiguous schema-6 state, a matching committed enforcement snapshot
+and provenance ledger, one IPv4 uplink, disabled IPv6 mode, supported resolver
+ownership, and only eligible local Docker bridges.
+
+It refuses a clean or already-managed host, older/unknown/future package or
+state versions, pending or corrupt generations, inconsistent provenance,
+competing/foreign firewall ownership, ambiguous routes, native/VPN IPv6, and
+unsupported or changing Docker topology. Success authorizes no conversion;
+it produces only a redacted worksheet for a separate Stage E-L plan.
+
 ## Advanced mode
 
 The existing strict TOML compiler and schema-6 state remain compatible with

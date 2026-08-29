@@ -19,6 +19,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/unknown0152/nft-firewall-v2/internal/adoption"
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
@@ -59,6 +60,13 @@ var (
 	managedTunnelStatus = func(ctx context.Context, config routing.Config) (map[string]any, error) {
 		return (routing.Manager{}).Status(ctx, config)
 	}
+	managedAdoptionPlan = func(ctx context.Context, vpnPath string) (adoption.Plan, error) {
+		inspector := adoption.SystemInspector{Paths: adoption.Paths{
+			Config: managedConfigPath, Intent: managedIntentPath,
+			DockerDaemon: managedDockerDaemon,
+		}}
+		return (adoption.Planner{Inspector: inspector}).Plan(ctx, vpnPath)
+	}
 )
 
 func setupCommand(args []string) error {
@@ -81,6 +89,12 @@ func setupCommand(args []string) error {
 	}
 	if len(args) > 0 && args[0] == "rollback" {
 		return setupRollbackCommand(args[1:])
+	}
+	if len(args) > 0 && args[0] == "adopt" {
+		return setupAdoptCommand(args[1:])
+	}
+	if len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		return errors.New("usage: nftfw setup --vpn PATH [--dry-run] [--yes] [--json] | nftfw setup <status|rollback|adopt>")
 	}
 	fs := flag.NewFlagSet("setup", flag.ContinueOnError)
 	vpnPath := fs.String("vpn", "", "working WireGuard provider configuration")
@@ -155,6 +169,34 @@ func setupCommand(args []string) error {
 		return printJSONOr(map[string]any{"status": "PROTECTED", "plan": plan.Summary}, true)
 	}
 	printProtectedSummary(plan.Summary, false)
+	return nil
+}
+
+func setupAdoptCommand(args []string) error {
+	fs := flag.NewFlagSet("setup adopt", flag.ContinueOnError)
+	fs.SetOutput(io.Discard)
+	vpnPath := fs.String("vpn", "", "working WireGuard provider configuration")
+	dryRun := fs.Bool("dry-run", false, "produce a non-mutating adoption worksheet")
+	jsonMode := fs.Bool("json", false, "machine-readable output")
+	if err := fs.Parse(args); err != nil || fs.NArg() != 0 || *vpnPath == "" {
+		return adoption.OperatorError(adoption.Error{Code: "ADOPTION_USAGE_INVALID"})
+	}
+	if !*dryRun {
+		return adoption.OperatorError(adoption.Error{Code: "ADOPTION_EXECUTION_REQUIRES_SEPARATE_LIVE_PLAN"})
+	}
+	if managedEUID() != 0 {
+		return adoption.OperatorError(adoption.Error{Code: "ADOPTION_REQUIRES_ROOT"})
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	plan, err := managedAdoptionPlan(ctx, *vpnPath)
+	if err != nil {
+		return adoption.OperatorError(err)
+	}
+	if *jsonMode {
+		return printJSONOr(plan, true)
+	}
+	fmt.Print(plan.Human())
 	return nil
 }
 
