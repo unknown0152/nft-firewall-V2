@@ -47,6 +47,18 @@ done
     $(dpkg-deb -f "$new_deb" Version) == "$new_version" ]] || fail "new package identity mismatch"
 [[ $(dpkg-query -W -f='${db:Status-Abbrev} ${Version}' "$package") == "ii  $old_version" ]] || \
     fail "guest must begin with configured exact 2.0.3"
+resolver_ready=0
+for resolver_package in openresolv resolvconf systemd-resolved; do
+    resolver_status=$(dpkg-query -W -f='${db:Status-Abbrev}' "$resolver_package" 2>/dev/null || true)
+    if [[ $resolver_status == 'ii ' ]]; then
+        resolver_ready=1
+        break
+    fi
+done
+((resolver_ready == 1)) || {
+    echo "BLOCKED: disposable guest lacks a configured resolver package dependency"
+    exit 77
+}
 [[ ! -e $work_root && ! -L $work_root ]] || fail "disposable work root already exists"
 install -d -o root -g root -m 0700 "$work_root"
 
