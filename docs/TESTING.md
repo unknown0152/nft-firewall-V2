@@ -67,8 +67,10 @@ canonical-lock probe against exact 2.0.3's historical backup: the probe must
 remain blocked while the backup succeeds through dpkg's private lock view, and
 no transaction-local lock file may remain. Timestamped audit/backup material,
 SQLite WAL files, and the restart-regenerated WireGuard endpoint observation
-cache are excluded from byte identity; their authoritative inputs and policy
-outputs remain covered. The root-owned regular
+cache are excluded from byte identity. Audit, integration-health, and runtime
+claim-publication rows are normalized only in a temporary database copy
+because daemon restart necessarily refreshes them; schema, generations,
+claims, provenance, and committed policy remain byte/logically covered. The root-owned regular
 mode-`0600` marker and disposable guest are mandatory; this script must never
 run on an operator host.
 

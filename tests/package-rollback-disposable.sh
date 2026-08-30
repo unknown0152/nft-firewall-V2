@@ -75,6 +75,13 @@ tree_digest() {
 }
 
 state_digest() {
+    local normalized_database normalized_database_digest
+    normalized_database=$(mktemp "$work_root/authoritative-state.XXXXXX.db")
+    sqlite3 /var/lib/nftfw/generation-state/state.db ".backup $normalized_database"
+    sqlite3 "$normalized_database" \
+        "BEGIN IMMEDIATE; DELETE FROM audit; DELETE FROM integration_state; DELETE FROM runtime_claim_publication; DELETE FROM sqlite_sequence WHERE name = 'audit'; COMMIT;"
+    normalized_database_digest=$(sqlite3 "$normalized_database" .dump | sha256sum | awk '{print $1}')
+    rm -f -- "$normalized_database"
     {
         find /var/lib/nftfw -xdev -type f \
             ! -path '/var/lib/nftfw/audit*' \
@@ -84,7 +91,7 @@ state_digest() {
             ! -path '/var/lib/nftfw/generation-state/state.db-*' -print0 |
             sort -z | xargs -0 -r sha256sum
         printf '%s  %s\n' \
-            "$(sqlite3 /var/lib/nftfw/generation-state/state.db .dump | sha256sum | awk '{print $1}')" \
+            "$normalized_database_digest" \
             '/var/lib/nftfw/generation-state/state.db.logical-dump'
     } | sort | sha256sum | awk '{print $1}'
 }
