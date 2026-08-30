@@ -164,7 +164,7 @@ start_canonical_lock_probe() {
         done
         if ((found == 0)); then
             printf 'PRIVATE_LOCK_NOT_OBSERVED\n' >"$result"
-        elif flock -w 2 /run/nftfw/mutation.lock true; then
+        elif flock -n /run/nftfw/mutation.lock true; then
             printf 'CANONICAL_LOCK_ACQUIRED\n' >"$result"
         else
             printf 'CANONICAL_LOCK_BLOCKED\n' >"$result"
