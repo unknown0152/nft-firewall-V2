@@ -1,0 +1,52 @@
+#!/bin/sh
+set -eu
+
+PREREQ=
+prereqs() {
+    echo "$PREREQ"
+}
+case "${1:-}" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+marker=/etc/nftfw/initramfs-managed-disabled-v1
+loader=/usr/lib/nftfw/initramfs/nftfw-ipv6-early
+rules=/usr/lib/nftfw/initramfs/nftfw-initramfs-guard.nft
+
+test -e "$marker" || exit 0
+test -f "$marker" -a ! -L "$marker" -a "$(stat -c '%a:%u:%g' "$marker")" = 600:0:0
+test "$(cat "$marker")" = 'nftfw.initramfs-managed-disabled.v1'
+for input in "$loader" "$rules"; do
+    test -f "$input" -a ! -L "$input"
+    test "$(stat -c '%u:%g' "$input")" = 0:0
+    test -z "$(find "$input" -maxdepth 0 -type f -perm /022 -print -quit)"
+done
+
+# shellcheck source=/dev/null
+. /usr/share/initramfs-tools/hook-functions
+manual_add_modules nf_tables
+copy_exec /usr/sbin/nft /usr/sbin
+copy_exec /usr/bin/sha256sum /usr/bin
+copy_exec /usr/bin/stat /usr/bin
+copy_exec /usr/bin/install /usr/bin
+copy_file script "$loader" /scripts/init-top/nftfw-ipv6-early
+copy_file config "$rules" /etc/nftfw/initramfs-guard.nft
+copy_file config "$marker" /etc/nftfw/initramfs-managed-disabled-v1
+printf '%s  %s\n' "$(sha256sum "$rules" | awk '{print $1}')" \
+    /etc/nftfw/initramfs-guard.nft >"$DESTDIR/etc/nftfw/initramfs-guard.sha256"
+chmod 0600 "$DESTDIR/etc/nftfw/initramfs-guard.sha256"
+
+# initramfs-tools starts udev from init-top, and udev may create the NIC before
+# an unrelated no-prerequisite script. Make the suppression script an explicit
+# prerequisite while changing no executable statement in the vendor script.
+udev="$DESTDIR/scripts/init-top/udev"
+test -f "$udev" -a ! -L "$udev"
+test "$(grep -Fxc 'PREREQS=""' "$udev")" -eq 1
+temporary="$udev.nftfw.$$"
+sed 's/^PREREQS=""$/PREREQS="nftfw-ipv6-early"/' "$udev" >"$temporary"
+chmod --reference="$udev" "$temporary"
+mv -f "$temporary" "$udev"
+test "$("$udev" prereqs)" = nftfw-ipv6-early

@@ -50,9 +50,12 @@ func (f *fakeExecutor) StartRuntime(context.Context, Plan) error { return f.call
 func (f *fakeExecutor) ApplySafe(context.Context, Plan) (uint64, error) {
 	return 7, f.call("apply")
 }
-func (f *fakeExecutor) StartTunnel(context.Context, Plan) error       { return f.call("tunnel") }
-func (f *fakeExecutor) Validate(context.Context, Plan, uint64) error  { return f.call("validate") }
-func (f *fakeExecutor) Commit(context.Context, Plan, uint64) error    { return f.call("commit") }
+func (f *fakeExecutor) StartTunnel(context.Context, Plan) error      { return f.call("tunnel") }
+func (f *fakeExecutor) Validate(context.Context, Plan, uint64) error { return f.call("validate") }
+func (f *fakeExecutor) Commit(context.Context, Plan, uint64) error   { return f.call("commit") }
+func (f *fakeExecutor) PublishFinalDependencies(context.Context, Plan) error {
+	return f.call("handoff")
+}
 func (f *fakeExecutor) EnableBoot(context.Context, Plan) error        { return f.call("boot") }
 func (f *fakeExecutor) Finalize(context.Context, Plan) error          { return f.call("finalize") }
 func (f *fakeExecutor) Rollback(context.Context, Plan, Journal) error { return f.call("rollback") }
@@ -106,7 +109,7 @@ func TestRunCompletesInExactOrder(t *testing.T) {
 	if _, err := engine.Run(context.Background(), "/vpn.conf"); err != nil {
 		t.Fatal(err)
 	}
-	want := "prepare,backup,guard,install,docker,runtime,apply,tunnel,validate,commit,boot,finalize"
+	want := "prepare,backup,guard,install,docker,runtime,apply,tunnel,validate,commit,handoff,boot,finalize"
 	if strings.Join(executor.calls, ",") != want {
 		t.Fatalf("calls=%v want=%s", executor.calls, want)
 	}
@@ -318,6 +321,26 @@ func TestPostCommitFailureRecoversForward(t *testing.T) {
 	}
 	if final.Status != "complete" || !final.Committed {
 		t.Fatalf("committed recovery did not finalize: %#v", final)
+	}
+}
+
+func TestFinalDependencyPublicationFailureRecoversForward(t *testing.T) {
+	executor := &fakeExecutor{failAt: "handoff"}
+	journal := FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")}
+	_, err := (Engine{
+		Executor: executor, Journal: journal,
+		NewID: func() string { return "handoff-recovery" },
+	}).Run(context.Background(), "/vpn.conf")
+	if err == nil || err.Error() != "SETUP_COMMITTED_RECOVERED" {
+		t.Fatalf("unexpected handoff recovery result: %v", err)
+	}
+	want := "prepare,backup,guard,install,docker,runtime,apply,tunnel,validate,commit,handoff,recover-committed"
+	if strings.Join(executor.calls, ",") != want {
+		t.Fatalf("handoff failure crossed an unsafe recovery boundary: %v", executor.calls)
+	}
+	final, readErr := journal.Read()
+	if readErr != nil || final.Status != "complete" || !final.Committed {
+		t.Fatalf("handoff recovery journal invalid: %#v %v", final, readErr)
 	}
 }
 

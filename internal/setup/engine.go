@@ -22,6 +22,7 @@ const (
 	PhaseTunnel   Phase = "tunnel"
 	PhaseValidate Phase = "validate"
 	PhaseCommit   Phase = "commit"
+	PhaseHandoff  Phase = "handoff"
 	PhaseBoot     Phase = "boot"
 	PhaseFinalize Phase = "finalize"
 	PhaseComplete Phase = "complete"
@@ -78,6 +79,7 @@ type Executor interface {
 	StartTunnel(context.Context, Plan) error
 	Validate(context.Context, Plan, uint64) error
 	Commit(context.Context, Plan, uint64) error
+	PublishFinalDependencies(context.Context, Plan) error
 	EnableBoot(context.Context, Plan) error
 	Finalize(context.Context, Plan) error
 	Rollback(context.Context, Plan, Journal) error
@@ -178,6 +180,7 @@ func (e Engine) Run(ctx context.Context, vpnPath string) (Plan, error) {
 			journal.Committed = true
 			return nil
 		}},
+		{PhaseHandoff, func() error { return e.Executor.PublishFinalDependencies(ctx, plan) }},
 		{PhaseBoot, func() error { return e.Executor.EnableBoot(ctx, plan) }},
 		{PhaseFinalize, func() error { return e.Executor.Finalize(ctx, plan) }},
 	}

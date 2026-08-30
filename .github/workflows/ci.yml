@@ -30,7 +30,7 @@ jobs:
       - run: make vuln
       - run: make security
       - name: Shell analysis
-        run: shellcheck scripts/*.sh tests/acceptance/*.sh tests/chaos/*.sh tests/namespaces/*.sh tests/packaging/*.sh tests/stage-r/*.sh packaging/deb/preinst packaging/deb/postinst packaging/deb/prerm packaging/deb/postrm
+        run: shellcheck scripts/*.sh packaging/initramfs/nftfw-ipv6-early packaging/initramfs/nftfw-early-guard-hook packaging/initramfs/nftfw-initramfs-manage tests/*.sh tests/acceptance/*.sh tests/chaos/*.sh tests/namespaces/*.sh tests/packaging/*.sh tests/stage-r/*.sh packaging/deb/preinst packaging/deb/postinst packaging/deb/prerm packaging/deb/postrm
 
   stage-r-contracts:
     runs-on: ubuntu-latest

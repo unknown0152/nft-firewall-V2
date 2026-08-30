@@ -1,0 +1,18 @@
+table inet nftfw_initramfs_guard {
+    comment "nftfw:initramfs-guard:v1"
+
+    chain input_guard {
+        type filter hook input priority -310; policy drop;
+        comment "nftfw:initramfs-input:v1"
+    }
+
+    chain output_guard {
+        type filter hook output priority -310; policy drop;
+        comment "nftfw:initramfs-output:v1"
+    }
+
+    chain forward_guard {
+        type filter hook forward priority -310; policy drop;
+        comment "nftfw:initramfs-forward:v1"
+    }
+}

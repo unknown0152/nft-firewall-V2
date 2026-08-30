@@ -60,6 +60,51 @@ sudo nftfw state backup /var/lib/nftfw/backups/pre-upgrade.db \
   --database /var/lib/nftfw/generation-state/state.db
 ```
 
+## Required exact-package rollback bundle
+
+Before installing 2.1.0, retain the exact approved 2.0.3 and 2.1.0 packages
+and their release-manifest SHA-256 values. Extract only the new package into a
+new root-only directory, then run its helper:
+
+```bash
+sudo install -d -o root -g root -m 0700 /run/nftfw-rollback-helper
+sudo dpkg-deb -x ./nft-firewall-v2_2.1.0_amd64.deb \
+  /run/nftfw-rollback-helper
+sudo /run/nftfw-rollback-helper/usr/lib/nftfw/package-rollback prepare \
+  --old-package /absolute/path/nft-firewall-v2_2.0.3_amd64.deb \
+  --new-package /absolute/path/nft-firewall-v2_2.1.0_amd64.deb \
+  --old-sha256 OLD_RELEASE_SHA256 \
+  --new-sha256 NEW_RELEASE_SHA256 \
+  --bundle /var/backups/nftfw-migration/UTC-2.1.0-package-rollback
+sudo /var/backups/nftfw-migration/UTC-2.1.0-package-rollback/execute \
+  verify --bundle /var/backups/nftfw-migration/UTC-2.1.0-package-rollback
+```
+
+Use the actual architecture and an unused canonical bundle path. The helper
+requires protected root ownership, binds itself to the 2.1.0 package, verifies
+both exact release packages, and builds a checksummed Debian rollback bridge.
+That bridge has a version lower than 2.0.3 but an extracted payload identical
+to exact 2.0.3. On rollback it first becomes the configured package, then the
+unmodified exact 2.0.3 package sees a supported forward version transition
+and runs its own pre-install checks. No dpkg status edit, state deletion,
+maintainer-script skip, or unverified payload copy is used.
+
+The deployment controller must arm the copied `execute` helper as its
+daemon-independent timeout action before installing 2.1.0. To invoke an
+approved rollback manually or from that timer:
+
+```bash
+sudo /var/backups/nftfw-migration/UTC-2.1.0-package-rollback/execute \
+  execute --bundle /var/backups/nftfw-migration/UTC-2.1.0-package-rollback
+```
+
+Execution is resumable from configured 2.1.0, the exact named bridge, or
+already-restored 2.0.3. It holds the global NFTFW mutation lock, reversibly
+removes a managed-only 2.1.0 initramfs guard before downgrade, verifies the
+old binary identity and package payload, and leaves compatible schema-6
+state, configuration, provenance, generations, drop-ins, WireGuard, Docker,
+and unit lifecycle state in place.
+
 The Debian `preinst` creates an additional timestamped verified backup when a
 nonempty compatible generation database exists. The source installer follows
 the same fail-closed sequence. `sqlite3` is used only for an immutable,
@@ -123,6 +168,13 @@ backup inputs, rollback boundaries, and the explicit statements
 `live_state_changed: false` and `rollback_required: false`. It omits provider
 keys, endpoint/address values, public IPs/domains, container/image/volume IDs,
 and Docker network names.
+
+On exact 2.0.3, `nftfw-vpn.service`, `nftfw-setup-rollback.timer`, and
+`nftfw-managed-rollback.timer` did not exist. The planner accepts only the
+single canonical systemd observation `LoadState=not-found`,
+`ActiveState=inactive`, empty unit-file state, empty fragment path, and exact
+unit identity for those three names. It still rejects absence on 2.1.0 and
+every alias, shadow, malformed property, contradiction, or observation race.
 
 2.1.0 deliberately provides no generic adoption executor. Invocation without
 `--dry-run` returns `ADOPTION_EXECUTION_REQUIRES_SEPARATE_LIVE_PLAN`. Actual

@@ -1,15 +1,25 @@
 #!/bin/sh
 set -eu
 
-if [ -d /run/systemd/system ]; then
-    case "${1:-}" in
-        upgrade)
-            # Preserve active/inactive and enabled/disabled state across an
-            # upgrade. The administrator performs any required restart only
-            # after the separately reviewed migration and readiness checks.
-            :
-            ;;
-        remove|deconfigure)
+case "${1:-}" in
+    upgrade)
+        # Preserve active/inactive and enabled/disabled state across an
+        # upgrade. The administrator performs any required restart only
+        # after the separately reviewed migration and readiness checks.
+        :
+        ;;
+    remove|deconfigure)
+        if [ -e /etc/nftfw/initramfs-managed-disabled-v1 ] || \
+            [ -L /etc/nftfw/initramfs-managed-disabled-v1 ]; then
+            [ -x /usr/lib/nftfw/initramfs/nftfw-initramfs-manage ] || {
+                echo "Refusing removal: managed initramfs guard helper is missing." >&2
+                exit 1
+            }
+        fi
+        if [ -x /usr/lib/nftfw/initramfs/nftfw-initramfs-manage ]; then
+            /usr/lib/nftfw/initramfs/nftfw-initramfs-manage disable
+        fi
+        if [ -d /run/systemd/system ]; then
             systemctl disable --now nftfw-web.service nftfw-vpn.service \
                 nftfw-setup-rollback.timer nftfw-setup-rollback.service \
                 nftfw-managed-rollback.timer nftfw-managed-rollback.service \
@@ -21,6 +31,6 @@ if [ -d /run/systemd/system ]; then
                 . /usr/lib/nftfw/docker-handoff.sh
                 nftfw_remove_managed_docker_dropin ""
             fi
-            ;;
-    esac
-fi
+        fi
+        ;;
+esac

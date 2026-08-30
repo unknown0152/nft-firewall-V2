@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+umask 077
+
+readonly action=${1:-}
+readonly marker=/etc/nftfw/initramfs-managed-disabled-v1
+readonly installed_loader=/usr/lib/nftfw/initramfs/nftfw-ipv6-early
+readonly installed_rules=/usr/lib/nftfw/initramfs/nftfw-initramfs-guard.nft
+readonly marker_value=nftfw.initramfs-managed-disabled.v1
+
+fail() {
+    echo "NFTFW initramfs guard: $*" >&2
+    exit 1
+}
+
+require_root() {
+    [[ ${EUID:-$(id -u)} -eq 0 ]] || fail "root is required"
+}
+
+require_safe_marker() {
+    [[ -f $marker && ! -L $marker ]] || fail "managed marker is absent or unsafe"
+    [[ $(stat -c '%a:%u:%g' "$marker") == 600:0:0 ]] || fail "managed marker metadata is unsafe"
+    [[ $(<"$marker") == "$marker_value" ]] || fail "managed marker content is invalid"
+}
+
+initrds() {
+    local current
+    current=/boot/initrd.img-$(uname -r)
+    [[ -f $current && ! -L $current ]] || fail "current kernel initramfs is absent or unsafe"
+    find /boot -maxdepth 1 -type f -name 'initrd.img-*' -print0 | sort -z
+}
+
+one_path() {
+    local root=$1 suffix=$2
+    local -a matches=()
+    mapfile -d '' -t matches < <(find "$root" -type f -path "*/$suffix" -print0)
+    [[ ${#matches[@]} -eq 1 ]] || return 1
+    printf '%s\n' "${matches[0]}"
+}
+
+verify_image_enabled() {
+    local image=$1 temporary=$2 root loader rules digest copied_marker order udev
+    root=$temporary/extracted
+    install -d -o root -g root -m 0700 "$root"
+    unmkinitramfs "$image" "$root" >/dev/null
+    loader=$(one_path "$root" scripts/init-top/nftfw-ipv6-early) || return 1
+    rules=$(one_path "$root" etc/nftfw/initramfs-guard.nft) || return 1
+    digest=$(one_path "$root" etc/nftfw/initramfs-guard.sha256) || return 1
+    copied_marker=$(one_path "$root" etc/nftfw/initramfs-managed-disabled-v1) || return 1
+    order=$(one_path "$root" scripts/init-top/ORDER) || return 1
+    udev=$(one_path "$root" scripts/init-top/udev) || return 1
+    [[ $(sha256sum "$loader" | awk '{print $1}') == $(sha256sum "$installed_loader" | awk '{print $1}') ]]
+    [[ $(sha256sum "$rules" | awk '{print $1}') == $(sha256sum "$installed_rules" | awk '{print $1}') ]]
+    [[ $(<"$copied_marker") == "$marker_value" ]]
+    [[ $(awk 'NR == 1 {print $1}' "$digest") == $(sha256sum "$rules" | awk '{print $1}') ]]
+    [[ $("$udev" prereqs) == nftfw-ipv6-early ]]
+    awk '
+        /\/scripts\/init-top\/nftfw-ipv6-early / { guard=NR }
+        /\/scripts\/init-top\/udev / { udev=NR }
+        END { exit !(guard > 0 && udev > guard) }
+    ' "$order"
+}
+
+verify_image_disabled() {
+    local image=$1 listing
+    listing=$(lsinitramfs "$image") || return 1
+    if grep -Eq '(^|/)(nftfw-ipv6-early|initramfs-guard\.nft|initramfs-guard\.sha256|initramfs-managed-disabled-v1)$' <<<"$listing"; then
+        return 1
+    fi
+}
+
+verify_all() {
+    local mode=$1 image temporary count=0
+    while IFS= read -r -d '' image; do
+        temporary=$(mktemp -d /tmp/nftfw-initramfs-verify.XXXXXX)
+        if [[ $mode == enabled ]]; then
+            verify_image_enabled "$image" "$temporary" || {
+                rm -rf -- "$temporary"
+                fail "enabled guard verification failed for an installed initramfs"
+            }
+        else
+            verify_image_disabled "$image" || {
+                rm -rf -- "$temporary"
+                fail "disabled guard verification failed for an installed initramfs"
+            }
+        fi
+        rm -rf -- "$temporary"
+        count=$((count + 1))
+    done < <(initrds)
+    (( count > 0 )) || fail "no installed initramfs was verified"
+}
+
+rebuild_enabled() {
+    require_safe_marker
+    update-initramfs -u -k all
+    verify_all enabled
+}
+
+disable_transaction() {
+    local backup
+    if [[ ! -e $marker && ! -L $marker ]]; then
+        verify_all disabled
+        return
+    fi
+    require_safe_marker
+    backup=$(mktemp /etc/nftfw/.initramfs-managed-disabled-v1.XXXXXX)
+    install -o root -g root -m 0600 "$marker" "$backup"
+    rm -f -- "$marker"
+    if update-initramfs -u -k all && verify_all disabled; then
+        rm -f -- "$backup"
+        return
+    fi
+    install -o root -g root -m 0600 "$backup" "$marker"
+    rm -f -- "$backup"
+    update-initramfs -u -k all
+    verify_all enabled
+    fail "disable transaction was rolled back"
+}
+
+require_root
+for tool in awk chmod find grep install lsinitramfs mktemp rm sha256sum sort stat uname unmkinitramfs update-initramfs; do
+    command -v "$tool" >/dev/null || fail "missing prerequisite"
+done
+case "$action" in
+    rebuild-enabled)
+        rebuild_enabled
+        ;;
+    verify-enabled)
+        require_safe_marker
+        verify_all enabled
+        ;;
+    disable)
+        disable_transaction
+        ;;
+    verify-disabled)
+        [[ ! -e $marker && ! -L $marker ]] || fail "managed marker still exists"
+        verify_all disabled
+        ;;
+    *)
+        fail "usage: nftfw-initramfs-manage {rebuild-enabled|verify-enabled|disable|verify-disabled}"
+        ;;
+esac

@@ -1195,6 +1195,106 @@ class AdoptionPlannerContracts(unittest.TestCase):
         self.assertIn("no writer", architecture)
 
 
+class AmendmentMContracts(unittest.TestCase):
+    def test_exact_203_absence_uses_one_strict_systemd_snapshot(self) -> None:
+        system = read("internal/adoption/system.go")
+        tests = read("internal/adoption/system_test.go")
+        self.assertIn(
+            '"--property=Id,Names,LoadState,ActiveState,UnitFileState,FragmentPath"',
+            system,
+        )
+        self.assertIn('"nftfw-managed-rollback.timer": true', system)
+        self.assertIn('"nftfw-setup-rollback.timer":   true', system)
+        self.assertIn('"nftfw-vpn.service":            true', system)
+        self.assertIn('observed.LoadState == "not-found"', system)
+        self.assertIn('observed.ActiveState == "inactive"', system)
+        self.assertIn('observed.UnitFileState == ""', system)
+        self.assertIn('observed.FragmentPath == ""', system)
+        self.assertNotIn('"--property=ActiveState", "--value"', system)
+        self.assertNotIn('"--property=UnitFileState", "--value"', system)
+        self.assertIn("TestExact203CanonicalAbsentUnits", tests)
+        self.assertIn("TestCanonicalUnitAbsenceRejectsAmbiguity", tests)
+
+    def test_first_setup_publishes_final_edges_only_after_commit(self) -> None:
+        engine = read("internal/setup/engine.go")
+        system = read("internal/setup/system.go")
+        tests = read("internal/setup/system_test.go")
+        self.assertLess(engine.index("PhaseRuntime"), engine.index("PhaseCommit"))
+        self.assertLess(engine.index("PhaseCommit"), engine.index("PhaseHandoff"))
+        self.assertLess(engine.index("PhaseHandoff"), engine.index("PhaseBoot"))
+        install_body = system.split("func (s *System) Install", 1)[1].split(
+            "func sameDockerNetworks", 1
+        )[0]
+        self.assertNotIn("50-nftfw-final-early.conf", install_body)
+        runtime_body = system.split("func (s *System) StartRuntime", 1)[1].split(
+            "func (s *System) ApplySafe", 1
+        )[0]
+        self.assertIn('"systemctl", "start", "nftfwd.service"', runtime_body)
+        self.assertNotIn("50-nftfw-final-early.conf", runtime_body)
+        handoff = system.split("func (s *System) PublishFinalDependencies", 1)[1].split(
+            "func (s *System) EnableBoot", 1
+        )[0]
+        self.assertIn('"nftfw-early.service", "nftfw-enforcement-ready.service"', handoff)
+        self.assertIn('"rebuild-enabled"', handoff)
+        self.assertIn("50-nftfw-final-early.conf", handoff)
+        self.assertIn("TestInstallDefersFinalDependenciesUntilCommittedHandoff", tests)
+        self.assertIn(
+            "TestFinalDependencyPublicationFailureRecoversForward",
+            read("internal/setup/engine_test.go"),
+        )
+
+    def test_initramfs_guard_is_inert_packaged_and_strictly_handed_off(self) -> None:
+        hook = read("packaging/initramfs/nftfw-early-guard-hook")
+        loader = read("packaging/initramfs/nftfw-ipv6-early")
+        manager = read("packaging/initramfs/nftfw-initramfs-manage")
+        rules = read("packaging/initramfs/nftfw-initramfs-guard.nft")
+        builder = read("scripts/build-deb.sh")
+        service = parse_unit("packaging/systemd/nftfw-enforcement-ready.service")
+        prerm = read("packaging/deb/prerm")
+        self.assertIn("test -e \"$marker\" || exit 0", hook)
+        self.assertIn('PREREQS="nftfw-ipv6-early"', hook)
+        self.assertIn("conf/default/disable_ipv6 1", loader)
+        self.assertIn("conf/lo/disable_ipv6 0", loader)
+        self.assertIn("nft --check --file", loader)
+        self.assertIn('comment "nftfw:initramfs-guard:v1"', rules)
+        self.assertEqual(rules.count("policy drop;"), 3)
+        self.assertIn("listing=$(lsinitramfs", manager)
+        self.assertIn('listing=$(lsinitramfs "$image") || return 1', manager)
+        for artifact in (
+            "nftfw-ipv6-early",
+            "nftfw-initramfs-guard.nft",
+            "nftfw-initramfs-manage",
+            "nftfw-early-guard-hook",
+        ):
+            self.assertIn(artifact, builder)
+        self.assertIn(
+            "/usr/lib/nftfw/nftfwd --handoff-initramfs-guard --state-dir /var/lib/nftfw",
+            values(service, "Service", "ExecStartPost"),
+        )
+        self.assertLess(
+            prerm.index("nftfw-initramfs-manage disable"),
+            prerm.index("if [ -d /run/systemd/system ]"),
+        )
+        self.assertIn("tests/initramfs-guard-namespace.sh", read("docs/TESTING.md"))
+
+    def test_exact_203_rollback_bridge_is_prepared_and_fail_closed(self) -> None:
+        helper = read("scripts/package-rollback.sh")
+        builder = read("scripts/build-deb.sh")
+        test = read("tests/package-rollback-bundle.sh")
+        self.assertIn("nftfw.package-rollback.v1", helper)
+        self.assertIn('bridge_version="$old_version~nftfwrollback1.', helper)
+        self.assertIn('dpkg --force-downgrade --install "$bundle/bridge.deb"', helper)
+        self.assertIn('dpkg --install "$bundle/old.deb"', helper)
+        self.assertNotIn("/var/lib/dpkg/status", helper)
+        self.assertNotIn("--force-script-chrootless", helper)
+        self.assertIn("protected_directory_chain \"${path%/*}\"", helper)
+        self.assertIn("old_payload_sha256", helper)
+        self.assertIn("installed package is outside the resumable rollback states", helper)
+        self.assertIn("scripts/package-rollback.sh", builder)
+        self.assertIn("unsafe parent", test.lower())
+        self.assertIn("PACKAGE_ROLLBACK_BUNDLE_PASS", test)
+
+
 class ReleaseCandidateMetadataContracts(unittest.TestCase):
     def test_build_defaults_and_ci_identify_2_1_0(self) -> None:
         makefile = read("Makefile")

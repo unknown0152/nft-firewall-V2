@@ -163,8 +163,28 @@ profile/discovery/plan (no journal, no mutation)
   -> durable journal containing the prepared summary
   -> checksum backup -> temporary guard -> install/check candidate
   -> confirmed Docker ownership restart when required
-  -> daemon start -> safe apply -> tunnel -> validation -> commit -> boot
+  -> daemon start without final Requisite -> safe apply -> tunnel
+  -> validation -> commit -> early restore/readiness
+  -> verified initramfs guard -> publish final Requisite -> boot
 ```
+
+The explicit `handoff` phase is after the commit linearization point. It first
+starts `nftfw-early` and the independent enforcement verifier while the
+temporary setup guard and already-running daemon remain active. It then
+publishes the managed initramfs marker, rebuilds and inspects every installed
+initramfs, and finally writes the daemon/rollback `Requisite=` drop-ins. A
+handoff interruption recovers forward from the committed generation; it never
+rolls committed state back to make the dependency graph easier to satisfy.
+
+The initramfs hook patches only the staged Debian 13 initramfs-tools udev
+prerequisite declaration. Its loader runs before udev, sets reversible
+per-netns IPv6 default/all disablement while immediately restoring loopback,
+checksums and applies the all-interface deny guard, then records readiness in
+the initramfs `/run`. This prevents kernel MLD/DAD from preceding the guard.
+After root switch, `nftfw-enforcement-ready` verifies committed enforcement
+and its post-start handoff removes only the exact marker/comment/chain shape
+of `inet nftfw_initramfs_guard` under the global mutation lock. A colliding or
+extended table is left untouched and blocks readiness.
 
 Clean-host discovery deliberately treats any pre-existing setup journal as
 NFTFW state requiring recovery. The engine therefore completes preparation

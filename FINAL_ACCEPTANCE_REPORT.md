@@ -25,8 +25,10 @@ strict managed Docker IPv4 bridge adoption and forwarding ownership,
 the explicit dry-run-only existing-host adoption planner, CLI/dashboard
 changes, the corrected managed first-setup transaction boundary, valid
 interval-based setup-guard prefix sets with exact `/32` endpoint scope,
-package source, documentation, benchmarks, tests, and local nondeployable
-candidate builds.
+strict exact-2.0.3 absent-unit planning, the committed first-setup handoff,
+marker-gated pre-udev IPv6 suppression and exact guard handoff, and the
+protected exact-2.0.3 Debian rollback transaction, plus package source,
+documentation, benchmarks, tests, and local nondeployable candidate builds.
 
 The candidate binaries permit only their quarantine-safe behavior, candidate
 daemon/web processes refuse startup, and candidate Debian packages refuse
@@ -41,7 +43,7 @@ live installation, firewall application, VPN interruption, or deployment.
   mode-`0600`/root-ownership acceptance boundary and mode-`0644` refusal; the
   complete suite also passes with `umask 0077` in an unprivileged environment.
 - Overall statement coverage at least 75%, with all five new core packages at
-  or above 90%.
+  or above 90%; the new bootguard package is also above 90%.
 - Clean-host routing uses bounded numeric all-table JSON: an absent reserved
   table is clean, but failed, malformed, or populated observations refuse.
 - Managed first setup completes all read-only preparation before publishing a
@@ -64,6 +66,24 @@ live installation, firewall application, VPN interruption, or deployment.
 - Existing-host adoption planning has no mutation path, repeats protected
   observation, and refuses actual conversion pending a separate Stage E-L
   plan.
+- Exact 2.0.3 planning accepts only the three enumerated canonical absent
+  units from one strict systemd property snapshot; aliases, shadows,
+  contradictions, malformed output, and 2.1.0 absence refuse.
+- Managed first setup publishes no final early dependency before runtime
+  enforcement starts and commits. It establishes early/readiness and verifies
+  every initramfs before publishing final edges or enabling boot consumers;
+  every post-commit failure follows the recover-forward path.
+- The managed initramfs hook is inert without its protected marker. When
+  active, its checksum-bound udev prerequisite sets reversible non-loopback
+  IPv6 defaults, keeps loopback enabled, applies the exact deny guard, and
+  permits removal only after committed enforcement verification under the
+  mutation lock. Disposable source proof is not substituted for R2 boot
+  capture.
+- The package rollback bundle binds exact 2.0.3 and 2.1.0 release packages,
+  helper, architecture, schema, binaries, bridge, and payload. The
+  payload-identical lower-version bridge makes the subsequent unmodified
+  2.0.3 install a supported transition; no dpkg-status edit or unverified copy
+  is accepted.
 - No VPN key, provider identity, public topology, token, or live secret is
   present in tracked source evidence.
 
@@ -76,11 +96,12 @@ approval bound to that frozen source commit and comparison SHA-256. Any local
 tag, remote publication, or current-server deployment requires still later
 identity-bound approval.
 
-The latest approved R2 attempt passed its preceding disposable gates, proved
-the corrected journal/prepare ordering, and reached managed first setup. It
-then hard-stopped before guard apply because real Debian nftables rejected a
-prefix-bearing endpoint set without interval semantics. Rollback completed,
-but the partial run is not complete acceptance evidence. The corrected source
-requires a new identity-bound E-R2 approval and complete renewed run.
+The latest approved R2 attempt completed every still-useful independent row
+and then hard-stopped without a tag on the four Amendment M blockers:
+exact-2.0.3 absent-unit planning, first-setup final-edge ordering, two
+pre-readiness IPv6 control frames, and exact 2.0.3 package rollback refusal.
+The corrected source requires a new identity-bound E-R2 approval and complete
+renewed E–M run, including two-boot zero-packet capture and full two-step dpkg
+rollback execution.
 
 R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED

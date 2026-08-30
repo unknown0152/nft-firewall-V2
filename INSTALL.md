@@ -25,6 +25,11 @@ Package installation:
 - does not import a VPN, create an interface, alter routes, apply nftables,
   disable IPv6, or open a port.
 
+The package also installs inert initramfs and exact-package rollback tooling.
+The initramfs hook copies nothing unless successful managed setup publishes
+its protected marker; package installation and an advanced-mode upgrade do
+not regenerate an initramfs.
+
 ## Clean-server setup
 
 Place an already-working supported WireGuard profile in a protected file and
@@ -85,6 +90,11 @@ IPv6, internal networks, overlap, ambiguity, or an unreadable local socket
 stop planning. Do not delete state, containers, or firewall evidence merely to
 bypass refusal.
 
+Before an approved 2.0.3-to-2.1.0 upgrade, extract the 2.1.0 package and use
+its `usr/lib/nftfw/package-rollback` helper to prepare and verify the exact
+rollback bundle as described in `docs/UPGRADING.md`. Do not install 2.1.0
+until that bundle exists.
+
 Generate the nonactivating local adoption worksheet with:
 
 ```bash
@@ -132,5 +142,8 @@ and remains nonactivating.
 | `/var/lib/nftfw/setup/` | Setup journal, verified backups, and result |
 | `/etc/docker/daemon.json` | Semantically merged Docker ownership settings when adopted |
 | `/etc/sysctl.d/90-nftfw-managed.conf` | Managed IPv4 forwarding and IPv6 disablement |
+| `/etc/nftfw/initramfs-managed-disabled-v1` | Managed-only initramfs guard activation marker |
+| `/usr/lib/nftfw/initramfs/` | Guard loader, rules, archive verifier, and reversible removal tool |
+| `/usr/lib/nftfw/package-rollback` | Pre-upgrade exact-package rollback bundle tool |
 | `/run/nftfw/control.sock` | Root-only mutation API |
 | `/run/nftfw/status.sock` | Read-only status API |

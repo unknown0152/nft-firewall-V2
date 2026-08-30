@@ -49,6 +49,12 @@ Keep the local console or a second LAN session available until setup reports
 when its daemon ownership settings changed. `--yes` accepts both confirmations
 for controlled automation.
 
+After policy commit, setup verifies early enforcement, regenerates every
+installed initramfs with the managed pre-udev IPv6/deny guard, verifies the
+archive ordering and checksums, and then publishes the final consumer
+dependencies. A failure remains under the independent setup recovery timer;
+do not reboot until setup reports completion.
+
 ## 4. Verify
 
 ```bash

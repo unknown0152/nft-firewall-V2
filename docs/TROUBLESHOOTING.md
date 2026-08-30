@@ -43,6 +43,32 @@ The independent setup timer rolls back an expired pre-commit transaction.
 After a durable commit, recovery proceeds forward to the verified boot state.
 An unknown commit state fails closed and requires inspection.
 
+### Committed setup is waiting for boot handoff
+
+`SETUP_EARLY_ENFORCEMENT_FAILED`, `SETUP_INITRAMFS_MARKER_*`,
+`SETUP_INITRAMFS_GUARD_FAILED`, or `SETUP_FINAL_DEPENDENCY_*` means the
+firewall generation committed but the durable boot handoff is incomplete.
+The setup journal deliberately remains recoverable and the temporary guard
+remains the outer boundary. Do not reboot, delete the journal or marker, copy
+the final drop-ins manually, or disable the setup watchdog.
+
+Inspect without weakening enforcement:
+
+```bash
+sudo nftfw setup status
+sudo systemctl status nftfw-early.service nftfw-enforcement-ready.service \
+  nftfw-setup-rollback.timer
+sudo journalctl -u nftfw-early.service -u nftfw-enforcement-ready.service \
+  -u nftfw-setup-rollback.service
+sudo /usr/lib/nftfw/initramfs/nftfw-initramfs-manage verify-enabled
+```
+
+The verified committed-recovery path repeats early readiness, rebuilds and
+checks every installed initramfs, then publishes the final `Requisite` edges.
+An archive-listing, checksum, staged-order, ownership, or rebuild error is a
+real failure; do not treat unreadable initramfs content as proof that the
+guard is absent.
+
 ## Interrupted exposure or LAN change
 
 ```bash
@@ -174,3 +200,22 @@ Common adoption refusals are:
   E-L and is not implemented as a generic 2.1.0 action.
 
 All planner refusals occur without mutation or rollback.
+
+## Exact package rollback stopped
+
+Run only the copied helper from the prepared root-only bundle:
+
+```bash
+sudo /var/backups/nftfw-migration/UTC-2.1.0-package-rollback/execute \
+  verify --bundle /var/backups/nftfw-migration/UTC-2.1.0-package-rollback
+```
+
+A checksum, package field, architecture, bridge identity, payload digest,
+helper self-binding, schema-history, or protected-path failure invalidates the
+bundle. Do not edit dpkg status, force maintainer scripts, copy the old payload
+over the installed package, or regenerate the manifest by hand.
+
+Execution may be resumed only when dpkg reports configured exact 2.1.0, the
+manifest-named rollback bridge, or already restored exact 2.0.3. Any other
+version or unpacked/half-configured dpkg state requires package-manager repair
+inside the deployment rollback procedure; it is not an accepted resume state.

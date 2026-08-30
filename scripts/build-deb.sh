@@ -146,8 +146,9 @@ cleanup() {
     [[ -z "$output_stage" ]] || rm -rf -- "$output_stage"
 }
 trap cleanup EXIT
-install -d "$stage/DEBIAN" "$stage/usr/lib/nftfw" "$stage/usr/sbin" \
-    "$stage/usr/lib/systemd/system" "$stage/usr/share/doc/nft-firewall-v2" "$stage/etc/nftfw"
+install -d "$stage/DEBIAN" "$stage/usr/lib/nftfw" "$stage/usr/lib/nftfw/initramfs" \
+    "$stage/usr/sbin" "$stage/usr/lib/systemd/system" \
+    "$stage/usr/share/initramfs-tools/hooks" "$stage/usr/share/doc/nft-firewall-v2" "$stage/etc/nftfw"
 sed -e "s/@VERSION@/$version/g" -e "s/@ARCH@/$arch/g" \
     -e "s/@BUILD_DISPOSITION@/$build_disposition/g" \
     "$root_dir/packaging/deb/control" > "$stage/DEBIAN/control"
@@ -164,7 +165,17 @@ for binary in nftfw nftfwd nftfw-web; do
     install -m 0755 "$root_dir/dist/$binary-linux-$arch" "$stage/usr/lib/nftfw/$binary"
 done
 install -m 0644 "$root_dir/scripts/docker-handoff.sh" "$stage/usr/lib/nftfw/docker-handoff.sh"
+install -m 0755 "$root_dir/scripts/package-rollback.sh" "$stage/usr/lib/nftfw/package-rollback"
+install -m 0755 "$root_dir/packaging/initramfs/nftfw-ipv6-early" \
+    "$stage/usr/lib/nftfw/initramfs/nftfw-ipv6-early"
+install -m 0644 "$root_dir/packaging/initramfs/nftfw-initramfs-guard.nft" \
+    "$stage/usr/lib/nftfw/initramfs/nftfw-initramfs-guard.nft"
+install -m 0755 "$root_dir/packaging/initramfs/nftfw-initramfs-manage" \
+    "$stage/usr/lib/nftfw/initramfs/nftfw-initramfs-manage"
+install -m 0755 "$root_dir/packaging/initramfs/nftfw-early-guard-hook" \
+    "$stage/usr/share/initramfs-tools/hooks/nftfw-early-guard"
 ln -s ../lib/nftfw/nftfw "$stage/usr/sbin/nftfw"
+ln -s ../lib/nftfw/package-rollback "$stage/usr/sbin/nftfw-package-rollback"
 systemd_units=(
     nftfw-early.service
     nftfw-enforcement-ready.service

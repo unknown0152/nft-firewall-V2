@@ -51,6 +51,21 @@
 - Render every setup-guard prefix set with nftables interval semantics while
   retaining strict canonical IPv4 `/32` VPN-endpoint authorization, exact
   table ownership, pre-apply parser validation, and deterministic output.
+- Accept canonical systemd absence only for the three 2.1-only units on an
+  exact 2.0.3 adoption worksheet while rejecting aliases, shadows,
+  contradictory states, malformed output, and changed observations.
+- Defer final early-service `Requisite=` drop-ins until runtime policy is
+  committed and early enforcement is independently ready; add a distinct,
+  recover-forward setup handoff phase.
+- Add a managed-only checksum-verified initramfs deny guard. Its explicit
+  pre-udev prerequisite disables IPv6 defaults before interface creation,
+  blocks all early packets until committed enforcement is verified, preserves
+  final loopback IPv6 after handoff, and fails closed on regeneration or
+  archive verification errors.
+- Add `nftfw-package-rollback`, which prepares a protected checksummed bundle
+  and an exact-payload lower-version package-manager bridge before upgrade so
+  the unmodified exact 2.0.3 package can be restored without dpkg-state edits,
+  retained-state deletion, or maintainer-script bypass.
 - Add setup, importer, routing, discovery, intent, rollback, benchmark,
   packaging, and reproducible-candidate validation.
 

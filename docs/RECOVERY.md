@@ -75,6 +75,27 @@ generation and continues forward to boot readiness. If commit state cannot be
 proved, it reports `SETUP_COMMIT_STATE_UNKNOWN` and does not perform a
 destructive rollback.
 
+Post-commit handoff failures recover forward:
+
+- `SETUP_EARLY_ENFORCEMENT_FAILED`: early restore or readiness did not start;
+- `SETUP_INITRAMFS_MARKER_UNSAFE` or
+  `SETUP_INITRAMFS_MARKER_INVALID`: an existing activation marker cannot be
+  authenticated;
+- `SETUP_INITRAMFS_GUARD_FAILED`: regeneration or archive/order/checksum
+  verification failed;
+- `SETUP_FINAL_DEPENDENCY_PUBLISH_FAILED` or
+  `SETUP_FINAL_DEPENDENCY_RELOAD_FAILED`: final drop-ins were not durably
+  published and reloaded.
+
+Do not reboot while any of these errors remains in a running or
+`committed_recovery_failed` setup journal. The live committed policy and
+temporary guard are the recovery boundary, but boot readiness has not yet
+been proven. Recovery must first make `nftfw-early` and
+`nftfw-enforcement-ready` active, verify every installed initramfs contains
+the checksum-bound loader before udev, and publish the final dependency
+drop-ins. A failed archive listing is a verification failure, never evidence
+that the loader is absent.
+
 Docker-specific setup failures are actionable and remain pre-commit:
 
 - `SETUP_POLICY_CHECK_FAILED`: the generated nftables candidate did not pass
@@ -245,6 +266,14 @@ use `nft flush ruleset`; it can remove unrelated protections.
 
 ## Boot enforcement
 
+Managed setup adds a pre-network initramfs boundary before the ordinary boot
+units. The hook is inactive without the root-only managed marker. When active,
+its loader runs as an explicit prerequisite of initramfs-tools' udev script,
+sets reversible IPv6 defaults before a NIC can be created, verifies the
+embedded rules checksum, and applies `inet nftfw_initramfs_guard` with drop
+policies. Any missing input, checksum error, ordering error, module failure,
+or nftables failure blocks boot networking in the initramfs.
+
 When a generation is committed, V2 writes an immutable checked snapshot and a
 generation/checksum enforcement pointer. At boot, `nftfw-early.service`
 resolves durable prepared/pending state, restores the uniquely selected
@@ -261,6 +290,14 @@ cannot activate snapshot restoration. The verifier, required by
 drop-ins retain `Requisite=` plus `After=` on readiness so a routine consumer
 restart cannot activate either readiness or early restore.
 
+After verification, readiness invokes the static initramfs handoff mode. It
+takes the canonical mutation lock and removes the bootstrap table only when
+its table comment and all three chain hook/priority/policy/comment identities
+match exactly. Absence is valid on the first live setup. An unexpected rule,
+set, chain, alias, or table identity is foreign state and is never deleted.
+Final managed sysctls keep every non-loopback interface disabled for IPv6 and
+explicitly retain `::1` on loopback.
+
 If a required pointer or snapshot is missing, corrupt, symlinked, oversized,
 or has an invalid checksum, recovery fails before an nftables mutation and
 readiness remains blocked. It does not select the emergency-deny policy merely
@@ -272,7 +309,15 @@ generation installation path has already run.
 sudo systemctl status nftfw-early nftfw-enforcement-ready
 sudo journalctl -b -u nftfw-early -u nftfw-enforcement-ready
 sudo nftfw reconcile
+sudo /usr/lib/nftfw/initramfs/nftfw-initramfs-manage verify-enabled
 ```
+
+If an initramfs rebuild fails during the committed setup handoff, do not
+reboot. Keep LAN/local-console recovery, inspect `nftfw setup status`, fix the
+local initramfs-tools error, and let `nftfw-setup-rollback.timer` retry the
+committed recover-forward path. Removing the package or using the source
+uninstaller first runs the reversible `disable` transaction; it refuses
+removal if every installed initramfs cannot be proved free of the guard.
 
 ## Managed WireGuard failure
 

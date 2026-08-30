@@ -13,7 +13,7 @@ DOC_EXAMPLE_DIR=$DOC_DIR/examples
 RUNTIME_DIR=/run/nftfw
 case "$(uname -m)" in x86_64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; esac
 
-for command_name in nft ip wg systemctl systemd-analyze sha256sum awk getent groupadd useradd install readlink mktemp sed grep find dpkg jq sqlite3; do
+for command_name in nft ip wg systemctl systemd-analyze sha256sum awk getent groupadd useradd install readlink mktemp sed grep find dpkg jq sqlite3 lsinitramfs unmkinitramfs update-initramfs; do
     command -v "$command_name" >/dev/null || { echo "Missing prerequisite: $command_name" >&2; exit 1; }
 done
 protected_root_file() {
@@ -68,7 +68,8 @@ protected_root_directory_chain "$ROOT_DIR" || {
     exit 1
 }
 for directory in "$ROOT_DIR/dist" "$ROOT_DIR/configs" \
-    "$ROOT_DIR/packaging" "$ROOT_DIR/packaging/systemd" "$ROOT_DIR/scripts"; do
+    "$ROOT_DIR/packaging" "$ROOT_DIR/packaging/systemd" \
+    "$ROOT_DIR/packaging/initramfs" "$ROOT_DIR/scripts"; do
     protected_root_directory "$directory" || {
         echo "Release input directory must be protected and root-owned: $directory" >&2
         exit 1
@@ -76,6 +77,7 @@ for directory in "$ROOT_DIR/dist" "$ROOT_DIR/configs" \
 done
 for input in \
     "$ROOT_DIR/scripts/install.sh" \
+    "$ROOT_DIR/scripts/package-rollback.sh" \
     "$ROOT_DIR/scripts/verify-systemd-units.sh" \
     "$ROOT_DIR/configs/nftfw.example.toml" \
     "$ROOT_DIR/packaging/systemd/nftfw-early.service" \
@@ -95,6 +97,16 @@ for input in \
     "$ROOT_DIR/packaging/systemd/nftfw-consumer-final-ready.conf.example"; do
     protected_root_file "$input" || {
         echo "Release input must be a protected root-owned regular file: $input" >&2
+        exit 1
+    }
+done
+for input in \
+    "$ROOT_DIR/packaging/initramfs/nftfw-ipv6-early" \
+    "$ROOT_DIR/packaging/initramfs/nftfw-initramfs-guard.nft" \
+    "$ROOT_DIR/packaging/initramfs/nftfw-initramfs-manage" \
+    "$ROOT_DIR/packaging/initramfs/nftfw-early-guard-hook"; do
+    protected_root_file "$input" || {
+        echo "Release initramfs input must be a protected root-owned regular file: $input" >&2
         exit 1
     }
 done
@@ -287,7 +299,18 @@ fi
 install -o root -g root -m 0755 "$ROOT_DIR/dist/nftfw-linux-$ARCH" "$BIN_DIR/nftfw"
 install -o root -g root -m 0755 "$ROOT_DIR/dist/nftfwd-linux-$ARCH" "$BIN_DIR/nftfwd"
 install -o root -g root -m 0755 "$ROOT_DIR/dist/nftfw-web-linux-$ARCH" "$BIN_DIR/nftfw-web"
+install -o root -g root -m 0755 "$ROOT_DIR/scripts/package-rollback.sh" "$BIN_DIR/package-rollback"
+install -d -o root -g root -m 0755 "$BIN_DIR/initramfs" /usr/share/initramfs-tools/hooks
+install -o root -g root -m 0755 "$ROOT_DIR/packaging/initramfs/nftfw-ipv6-early" \
+    "$BIN_DIR/initramfs/nftfw-ipv6-early"
+install -o root -g root -m 0644 "$ROOT_DIR/packaging/initramfs/nftfw-initramfs-guard.nft" \
+    "$BIN_DIR/initramfs/nftfw-initramfs-guard.nft"
+install -o root -g root -m 0755 "$ROOT_DIR/packaging/initramfs/nftfw-initramfs-manage" \
+    "$BIN_DIR/initramfs/nftfw-initramfs-manage"
+install -o root -g root -m 0755 "$ROOT_DIR/packaging/initramfs/nftfw-early-guard-hook" \
+    /usr/share/initramfs-tools/hooks/nftfw-early-guard
 ln -sfn "$BIN_DIR/nftfw" /usr/sbin/nftfw
+ln -sfn "$BIN_DIR/package-rollback" /usr/sbin/nftfw-package-rollback
 if [[ -L "$CONF_DIR/nftfw.toml" ]]; then
     echo "Refusing symlinked configuration: $CONF_DIR/nftfw.toml" >&2
     exit 1

@@ -5,7 +5,7 @@ Source disposition: **STAGE_R_CANDIDATE_ONLY**
 Validation date: 2026-08-30
 
 Reopened source baseline:
-`4ed1f0c55ec2fe20ae9292480f4e425aad90f287`
+`ee5f03048a38f2cfb9d1e7a786e96dbba79758d1`
 
 This tracked report is the pre-build source snapshot. The later frozen commit,
 candidate build evidence, candidate comparison, R2 evidence, tag, and any
@@ -30,14 +30,17 @@ publication decision must remain external and checksummed.
 | Stage R source/package/systemd contracts | PASS |
 | Staged systemd verification | PASS |
 | Disposable real-nft setup-guard regression | PASS, narrowly scoped source gate; not E-R2 |
+| Disposable initramfs guard namespace regression | PASS; later interface inherits IPv6 disabled, loopback remains enabled, exact guard loads, unreadable archive refuses |
+| Disposable exact-package rollback bundle regression | PASS; protected inputs, exact payload-equivalent bridge, tamper/path refusal, no dpkg install |
 | Static amd64/arm64 CI package build and inspection | PASS |
 | Dependency/license inventory | PASS, 29 non-main modules |
-| Overall statement coverage | PASS, 76.6% |
+| Overall statement coverage | PASS, 76.7% |
 | `internal/setup` coverage | PASS, 90.6% |
+| `internal/bootguard` coverage | PASS, 91.8% |
 | `internal/wgconfig` coverage | PASS, 90.6% |
 | `internal/intent` coverage | PASS, 92.6% |
 | `internal/routing` coverage | PASS, 90.5% |
-| `internal/adoption` coverage | PASS, 91.1% |
+| `internal/adoption` coverage | PASS, 91.0% |
 
 ## Functional source coverage
 
@@ -72,6 +75,25 @@ publication decision must remain external and checksummed.
   double observation,
   deterministic redacted output, actionable refusals, and byte-identical
   no-mutation fixture proof.
+- Exact-2.0.3 planning accepts only the enumerated canonical absent systemd
+  tuple for the three units not shipped by 2.0.3. One bounded six-property
+  snapshot rejects aliases, shadows, contradictions, malformed output, races,
+  and absence on 2.1.0.
+- Managed first setup starts runtime enforcement under the temporary guard,
+  validates and commits it, establishes committed early/readiness, builds and
+  verifies the pre-udev guard in every installed initramfs, and only then
+  publishes final dependency edges and enables boot consumers. Post-commit
+  failures recover forward; pre-commit failures retain exact rollback.
+- The marker-gated initramfs loader sets reversible non-loopback IPv6 defaults
+  before udev, keeps loopback IPv6 enabled, checksum-verifies and applies an
+  exact three-chain deny guard, and hands it off only after committed
+  enforcement verification under the global mutation lock. Removal refuses
+  unreadable archives and cannot strand the marker silently.
+- The pre-upgrade exact-package rollback helper binds both release packages,
+  architecture, helper, schema history, binary hashes, and canonical payload
+  digest in a protected manifest. Its lower-version bridge carries exact
+  2.0.3 data and permits the unmodified 2.0.3 package to finish the supported
+  transition without dpkg-status edits, state deletion, or manual file copy.
 - Managed `expose` and `lan` changes compiled from the newly published
   protected files rather than stale daemon memory.
 - Checksummed managed-change journal recovery for pre-apply, applied,
@@ -88,29 +110,30 @@ publication decision must remain external and checksummed.
 ## Performance source results
 
 The repeated 10-sample source matrix remained inside the Amendment E budgets
-on the reference NUC. Observed maxima included 0.004756 ms provider parsing,
-0.015391 ms managed Docker config generation, 0.032293 ms strict daemon merge,
-0.016723 ms Docker topology projection, 0.008432 ms managed route decoding,
-0.001419 ms Docker workload-ID classification, 0.065686 ms standard
-compilation, 42.184367 ms 10,000-policy compilation, 0.021105 ms canonical
-fingerprinting, 0.376339 ms no-op reconciliation, 0.0003060 ms dashboard status
-projection, and 0.002104 ms adoption worksheet generation. Ten-sample
-`benchstat` comparison against exact `4ed1f0c` found no statistically
-significant runtime or allocation regression; the only significant runtime
-change was an 8.72% semantic-summary improvement, with two sub-0.1% allocation
-decreases. Performance evidence is not privileged network proof.
+on the reference NUC. Current medians included 0.003457 ms provider parsing,
+0.01401 ms managed Docker config generation, 0.02944 ms strict daemon merge,
+0.01082 ms Docker topology projection, 0.005914 ms managed route decoding,
+0.001396 ms Docker workload-ID classification, 0.03832 ms standard
+compilation, 33.36 ms 10,000-policy compilation, 0.01829 ms canonical
+fingerprinting, 0.3399 ms no-op reconciliation, 0.0002988 ms dashboard status
+projection, and 0.001639 ms adoption worksheet generation. Ten-sample
+`benchstat` comparison against exact `ee5f030` found no statistically
+significant runtime regression. The only significant allocation change was a
+0.28% decrease for standard compilation; all other allocation counts were
+unchanged or statistically equivalent. Performance evidence is not
+privileged network proof.
 
 ## Not executed under Stage E-R
 
-The latest approval-bound E-R2 attempt passed its preceding disposable gates,
-proved the corrected journal/prepare boundary, and reached the managed
-first-setup guard phase. It then hard-stopped because real Debian nftables
-requires interval semantics for a set populated by `/32` prefixes, while the
-generated endpoint set omitted that flag. The guard was rejected before
-apply and rollback completed. That partial run is not complete privileged
-acceptance evidence. A complete renewed E-R2 run has not been executed and
-requires new approval bound to the replacement frozen source and candidate
-comparison.
+The latest approval-bound E-R2 attempt passed its still-useful independent
+package, namespace, tunnel-loss, Docker, provenance, safe-apply, service-chaos,
+and exact-upgrade rows, then hard-stopped without a tag on four Amendment M
+defects: exact-2.0.3 absent-unit classification, first-setup final-edge
+ordering, two pre-readiness IPv6 control frames, and refusal of exact 2.0.3
+package rollback from recorded 2.1.0. That partial run is not complete
+privileged acceptance evidence. A complete renewed E-R2 run has not been
+executed and requires new approval bound to the replacement frozen source and
+candidate comparison.
 
 | Gate | Result |
 | --- | --- |

@@ -27,6 +27,15 @@ func (r readRunner) Run(ctx context.Context, name string, args ...string) ([]byt
 	return r(ctx, name, args...)
 }
 
+func unitShow(unit, active, enabled string) []byte {
+	return []byte(fmt.Sprintf("Id=%s\nNames=%s\nLoadState=loaded\nActiveState=%s\nUnitFileState=%s\nFragmentPath=/usr/lib/systemd/system/%s\n",
+		unit, unit, active, enabled, unit))
+}
+
+func absentUnitShow(unit string) []byte {
+	return []byte(fmt.Sprintf("Id=%s\nNames=%s\nLoadState=not-found\nActiveState=inactive\nUnitFileState=\nFragmentPath=\n", unit, unit))
+}
+
 func TestExposureSummaryUsesVPNIngressAndTrustedServices(t *testing.T) {
 	value := config.Defaults()
 	value.Interfaces = []config.Interface{
@@ -124,9 +133,7 @@ func TestReadOnlyCommandClassifiers(t *testing.T) {
 		case name == "dpkg-query":
 			return []byte("2.1.0-1\n"), nil
 		case name == "systemctl" && strings.Contains(command, "ActiveState"):
-			return []byte("active\n"), nil
-		case name == "systemctl" && strings.Contains(command, "UnitFileState"):
-			return []byte("enabled\n"), nil
+			return unitShow(args[len(args)-1], "active", "enabled"), nil
 		case command == "ip -j -4 rule show":
 			return []byte(`[{"priority":32766}]`), nil
 		case command == "ip -j -4 route show table all":
@@ -141,7 +148,7 @@ func TestReadOnlyCommandClassifiers(t *testing.T) {
 	if version, err := inspector.installedVersion(context.Background()); err != nil || version != "2.1.0-1" {
 		t.Fatalf("version=%q err=%v", version, err)
 	}
-	units, err := inspector.unitStates(context.Background())
+	units, err := inspector.unitStates(context.Background(), "2.1.0-1")
 	if err != nil || len(units) != len(adoptionUnits) || !units[0].Active || !units[0].Enabled {
 		t.Fatalf("units=%#v err=%v", units, err)
 	}
@@ -164,28 +171,25 @@ func TestUnitStateActiveAndEnabledPermutations(t *testing.T) {
 		indexes[unit] = index
 	}
 	runner := readRunner(func(_ context.Context, name string, args ...string) ([]byte, error) {
-		if name != "systemctl" || len(args) != 4 {
+		if name != "systemctl" || len(args) != 3 {
 			return nil, errors.New("unexpected command")
 		}
-		index, ok := indexes[args[3]]
+		unit := args[2]
+		index, ok := indexes[unit]
 		if !ok {
 			return nil, errors.New("unexpected unit")
 		}
-		if args[1] == "--property=ActiveState" {
-			if index%2 == 0 {
-				return []byte("active\n"), nil
-			}
-			return []byte("inactive\n"), nil
+		active := "inactive"
+		if index%2 == 0 {
+			active = "active"
 		}
-		if args[1] == "--property=UnitFileState" {
-			if index%3 == 0 {
-				return []byte("enabled\n"), nil
-			}
-			return []byte("disabled\n"), nil
+		enabled := "disabled"
+		if index%3 == 0 {
+			enabled = "enabled"
 		}
-		return nil, errors.New("unexpected property")
+		return unitShow(unit, active, enabled), nil
 	})
-	units, err := (SystemInspector{Runner: runner}).unitStates(context.Background())
+	units, err := (SystemInspector{Runner: runner}).unitStates(context.Background(), "2.1.0")
 	if err != nil || len(units) != len(adoptionUnits) {
 		t.Fatalf("unit permutations failed: %#v %v", units, err)
 	}
@@ -196,6 +200,65 @@ func TestUnitStateActiveAndEnabledPermutations(t *testing.T) {
 	}
 }
 
+func TestExact203CanonicalAbsentUnits(t *testing.T) {
+	runner := readRunner(func(_ context.Context, name string, args ...string) ([]byte, error) {
+		if name != "systemctl" || len(args) != 3 {
+			return nil, errors.New("unexpected command")
+		}
+		unit := args[2]
+		if legacyAbsentUnits[unit] {
+			return absentUnitShow(unit), nil
+		}
+		return unitShow(unit, "active", "enabled"), nil
+	})
+	units, err := (SystemInspector{Runner: runner}).unitStates(context.Background(), "2.0.3")
+	if err != nil || len(units) != len(adoptionUnits) {
+		t.Fatalf("canonical exact-2.0.3 unit set rejected: %#v %v", units, err)
+	}
+	for _, unit := range units {
+		if legacyAbsentUnits[unit.Name] && (unit.Active || unit.Enabled) {
+			t.Fatalf("absent legacy unit acquired state: %#v", unit)
+		}
+	}
+}
+
+func TestCanonicalUnitAbsenceRejectsAmbiguity(t *testing.T) {
+	tests := []struct {
+		name, version, unit string
+		mutate              func(string) string
+	}{
+		{"new package", "2.1.0", "nftfw-vpn.service", func(value string) string { return value }},
+		{"legacy unit", "2.0.3", "nftfwd.service", func(value string) string { return value }},
+		{"active", "2.0.3", "nftfw-vpn.service", func(value string) string {
+			return strings.Replace(value, "ActiveState=inactive", "ActiveState=active", 1)
+		}},
+		{"unit-file state", "2.0.3", "nftfw-vpn.service", func(value string) string {
+			return strings.Replace(value, "UnitFileState=\n", "UnitFileState=disabled\n", 1)
+		}},
+		{"fragment", "2.0.3", "nftfw-vpn.service", func(value string) string {
+			return strings.Replace(value, "FragmentPath=\n", "FragmentPath=/etc/systemd/system/nftfw-vpn.service\n", 1)
+		}},
+		{"alias", "2.0.3", "nftfw-vpn.service", func(value string) string {
+			return strings.Replace(value, "Names=nftfw-vpn.service", "Names=nftfw-vpn.service alias.service", 1)
+		}},
+		{"duplicate", "2.0.3", "nftfw-vpn.service", func(value string) string { return value + "UnitFileState=\n" }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			runner := readRunner(func(_ context.Context, _ string, args ...string) ([]byte, error) {
+				unit := args[len(args)-1]
+				if unit == test.unit {
+					return []byte(test.mutate(string(absentUnitShow(unit)))), nil
+				}
+				return unitShow(unit, "inactive", "disabled"), nil
+			})
+			if _, err := (SystemInspector{Runner: runner}).unitStates(context.Background(), test.version); ErrorCode(err) != "ADOPTION_UNIT_STATE_UNREADABLE" {
+				t.Fatalf("ambiguous unit observation accepted: %v", err)
+			}
+		})
+	}
+}
+
 func TestReadOnlyCommandFailuresAndStateParsers(t *testing.T) {
 	failed := SystemInspector{Runner: readRunner(func(context.Context, string, ...string) ([]byte, error) {
 		return nil, errors.New("secret endpoint")
@@ -203,7 +266,7 @@ func TestReadOnlyCommandFailuresAndStateParsers(t *testing.T) {
 	if _, err := failed.installedVersion(context.Background()); ErrorCode(err) != "ADOPTION_PACKAGE_VERSION_UNSUPPORTED" {
 		t.Fatalf("unexpected version error: %v", err)
 	}
-	if _, err := failed.unitStates(context.Background()); ErrorCode(err) != "ADOPTION_UNIT_STATE_UNREADABLE" {
+	if _, err := failed.unitStates(context.Background(), "2.1.0"); ErrorCode(err) != "ADOPTION_UNIT_STATE_UNREADABLE" {
 		t.Fatalf("unexpected unit error: %v", err)
 	}
 	if valid, _ := failed.routingState(context.Background()); valid {
@@ -363,21 +426,15 @@ func TestSystemHelperBoundaryCoverage(t *testing.T) {
 		t.Fatal("exact active provenance boundary failed")
 	}
 	badActive := SystemInspector{Runner: readRunner(func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		if strings.Contains(strings.Join(args, " "), "ActiveState") {
-			return []byte("unknown\n"), nil
-		}
-		return []byte("enabled\n"), nil
+		return unitShow(args[len(args)-1], "unknown", "enabled"), nil
 	})}
-	if _, err := badActive.unitStates(context.Background()); ErrorCode(err) != "ADOPTION_UNIT_STATE_UNREADABLE" {
+	if _, err := badActive.unitStates(context.Background(), "2.1.0"); ErrorCode(err) != "ADOPTION_UNIT_STATE_UNREADABLE" {
 		t.Fatalf("invalid active state accepted: %v", err)
 	}
 	badEnabled := SystemInspector{Runner: readRunner(func(_ context.Context, _ string, args ...string) ([]byte, error) {
-		if strings.Contains(strings.Join(args, " "), "ActiveState") {
-			return []byte("inactive\n"), nil
-		}
-		return []byte("unknown\n"), nil
+		return unitShow(args[len(args)-1], "inactive", "unknown"), nil
 	})}
-	if _, err := badEnabled.unitStates(context.Background()); ErrorCode(err) != "ADOPTION_UNIT_STATE_UNREADABLE" {
+	if _, err := badEnabled.unitStates(context.Background(), "2.1.0"); ErrorCode(err) != "ADOPTION_UNIT_STATE_UNREADABLE" {
 		t.Fatalf("invalid enabled state accepted: %v", err)
 	}
 }
@@ -505,11 +562,12 @@ func TestSystemInspectorExactSchema6FixtureIsNonMutating(t *testing.T) {
 		if name == "systemctl" && len(args) >= 3 && args[0] == "is-active" {
 			return nil, errors.New("inactive")
 		}
-		if name == "systemctl" && len(args) == 4 && args[0] == "show" && args[1] == "--property=ActiveState" {
-			return []byte("active\n"), nil
-		}
-		if name == "systemctl" && len(args) == 4 && args[0] == "show" && args[1] == "--property=UnitFileState" {
-			return []byte("enabled\n"), nil
+		if name == "systemctl" && len(args) == 3 && args[0] == "show" {
+			unit := args[2]
+			if legacyAbsentUnits[unit] {
+				return absentUnitShow(unit), nil
+			}
+			return unitShow(unit, "active", "enabled"), nil
 		}
 		return nil, fmt.Errorf("unexpected read command %s", command)
 	})

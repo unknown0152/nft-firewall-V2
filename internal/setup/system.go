@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
@@ -28,17 +29,19 @@ import (
 )
 
 type Paths struct {
-	Config        string
-	Intent        string
-	VPN           string
-	Sysctl        string
-	StateDir      string
-	RuntimeDir    string
-	SystemdDir    string
-	DockerDaemon  string
-	DockerDropIn  string
-	ControlSocket string
-	StatusSocket  string
+	Config           string
+	Intent           string
+	VPN              string
+	Sysctl           string
+	StateDir         string
+	RuntimeDir       string
+	SystemdDir       string
+	DockerDaemon     string
+	DockerDropIn     string
+	InitramfsMarker  string
+	InitramfsManager string
+	ControlSocket    string
+	StatusSocket     string
 }
 
 func DefaultPaths() Paths {
@@ -46,10 +49,12 @@ func DefaultPaths() Paths {
 		Config: "/etc/nftfw/nftfw.toml", Intent: "/etc/nftfw/intent.toml",
 		VPN: intent.VPNConfig, Sysctl: "/etc/sysctl.d/90-nftfw-managed.conf",
 		StateDir: "/var/lib/nftfw", RuntimeDir: "/run/nftfw",
-		SystemdDir:    "/etc/systemd/system",
-		DockerDaemon:  "/etc/docker/daemon.json",
-		DockerDropIn:  "/etc/systemd/system/nftfwd.service.d/docker-access.conf",
-		ControlSocket: "/run/nftfw/control.sock", StatusSocket: "/run/nftfw/status.sock",
+		SystemdDir:       "/etc/systemd/system",
+		DockerDaemon:     "/etc/docker/daemon.json",
+		DockerDropIn:     "/etc/systemd/system/nftfwd.service.d/docker-access.conf",
+		InitramfsMarker:  "/etc/nftfw/initramfs-managed-disabled-v1",
+		InitramfsManager: "/usr/lib/nftfw/initramfs/nftfw-initramfs-manage",
+		ControlSocket:    "/run/nftfw/control.sock", StatusSocket: "/run/nftfw/status.sock",
 	}
 }
 
@@ -315,8 +320,6 @@ func (s *System) Install(ctx context.Context, plan Plan) error {
 		{s.Paths.Intent, private.IntentData, 0o640},
 		{s.Paths.Config, private.ConfigData, 0o640},
 		{s.Paths.Sysctl, private.SysctlData, 0o644},
-		{filepath.Join(s.Paths.SystemdDir, "nftfwd.service.d", "50-nftfw-final-early.conf"), []byte(finalEarlyDropIn), 0o644},
-		{filepath.Join(s.Paths.SystemdDir, "nftfw-rollback.service.d", "50-nftfw-final-early.conf"), []byte(finalEarlyDropIn), 0o644},
 	}
 	if private.Intent.DockerEnabled {
 		files = append(files,
@@ -340,6 +343,7 @@ func (s *System) Install(ctx context.Context, plan Plan) error {
 	settings := map[string]string{
 		"net.ipv6.conf.default.disable_ipv6": "1",
 		"net.ipv6.conf.all.forwarding":       "0",
+		"net.ipv6.conf.lo.disable_ipv6":      "0",
 	}
 	if private.Intent.DockerEnabled {
 		settings["net.ipv4.ip_forward"] = "1"
@@ -377,6 +381,28 @@ func sameDockerNetworks(left, right []config.DockerNetwork) bool {
 	leftJSON, leftErr := json.Marshal(left)
 	rightJSON, rightErr := json.Marshal(right)
 	return leftErr == nil && rightErr == nil && bytes.Equal(leftJSON, rightJSON)
+}
+
+func ensureManagedInitramfsMarker(path string) error {
+	const content = "nftfw.initramfs-managed-disabled.v1\n"
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		if err := writeAtomic(path, []byte(content), 0o600); err != nil {
+			return errors.New("SETUP_INITRAMFS_MARKER_FAILED")
+		}
+		return nil
+	}
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		return errors.New("SETUP_INITRAMFS_MARKER_UNSAFE")
+	}
+	if stat, ok := info.Sys().(*syscall.Stat_t); !ok || os.Geteuid() == 0 && (stat.Uid != 0 || stat.Gid != 0) {
+		return errors.New("SETUP_INITRAMFS_MARKER_UNSAFE")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil || string(data) != content {
+		return errors.New("SETUP_INITRAMFS_MARKER_INVALID")
+	}
+	return nil
 }
 
 func (s *System) ConfigureDocker(ctx context.Context, plan Plan) error {
@@ -629,6 +655,37 @@ func (s *System) GenerationCommitted(ctx context.Context, generation uint64) (bo
 		snapshot.Active && snapshot.PolicyMatch && snapshot.KillSwitchEnforced, nil
 }
 
+// PublishFinalDependencies converts the already committed runtime into its
+// durable boot relationship. The daemon was intentionally started without
+// these Requisite edges during first setup; publishing them any earlier would
+// make that runtime start impossible while nftfw-early is still inactive.
+func (s *System) PublishFinalDependencies(ctx context.Context, _ Plan) error {
+	s.defaults()
+	for _, unit := range []string{"nftfw-early.service", "nftfw-enforcement-ready.service"} {
+		if _, err := s.Runner.Run(ctx, nil, "systemctl", "start", unit); err != nil {
+			return errors.New("SETUP_EARLY_ENFORCEMENT_FAILED")
+		}
+	}
+	if err := ensureManagedInitramfsMarker(s.Paths.InitramfsMarker); err != nil {
+		return err
+	}
+	if _, err := s.Runner.Run(ctx, nil, s.Paths.InitramfsManager, "rebuild-enabled"); err != nil {
+		return errors.New("SETUP_INITRAMFS_GUARD_FAILED")
+	}
+	for _, path := range []string{
+		filepath.Join(s.Paths.SystemdDir, "nftfwd.service.d", "50-nftfw-final-early.conf"),
+		filepath.Join(s.Paths.SystemdDir, "nftfw-rollback.service.d", "50-nftfw-final-early.conf"),
+	} {
+		if err := writeAtomic(path, []byte(finalEarlyDropIn), 0o644); err != nil {
+			return errors.New("SETUP_FINAL_DEPENDENCY_PUBLISH_FAILED")
+		}
+	}
+	if _, err := s.Runner.Run(ctx, nil, "systemctl", "daemon-reload"); err != nil {
+		return errors.New("SETUP_FINAL_DEPENDENCY_RELOAD_FAILED")
+	}
+	return nil
+}
+
 func (s *System) EnableBoot(ctx context.Context, _ Plan) error {
 	s.defaults()
 	units := []string{
@@ -639,7 +696,7 @@ func (s *System) EnableBoot(ctx context.Context, _ Plan) error {
 	if _, err := s.Runner.Run(ctx, nil, "systemctl", args...); err != nil {
 		return errors.New("SETUP_BOOT_ENABLE_FAILED")
 	}
-	for _, unit := range []string{"nftfw-early.service", "nftfw-enforcement-ready.service", "nftfw-vpn.service", "nftfw-web.service"} {
+	for _, unit := range []string{"nftfw-vpn.service", "nftfw-web.service"} {
 		if _, err := s.Runner.Run(ctx, nil, "systemctl", "start", unit); err != nil {
 			return errors.New("SETUP_BOOT_ACTIVATION_FAILED")
 		}
@@ -750,7 +807,7 @@ func (s *System) Rollback(ctx context.Context, plan Plan, journal Journal) error
 
 func phaseMayHaveTunnel(phase Phase) bool {
 	switch phase {
-	case PhaseTunnel, PhaseValidate, PhaseCommit, PhaseBoot, PhaseFinalize, PhaseComplete:
+	case PhaseTunnel, PhaseValidate, PhaseCommit, PhaseHandoff, PhaseBoot, PhaseFinalize, PhaseComplete:
 		return true
 	default:
 		return false
@@ -758,6 +815,9 @@ func phaseMayHaveTunnel(phase Phase) bool {
 }
 
 func (s *System) RecoverCommitted(ctx context.Context, plan Plan, _ Journal) error {
+	if err := s.PublishFinalDependencies(ctx, plan); err != nil {
+		return err
+	}
 	if err := s.EnableBoot(ctx, plan); err != nil {
 		return err
 	}
@@ -792,6 +852,12 @@ func (s *System) defaults() {
 	}
 	if s.Paths.DockerDropIn == "" {
 		s.Paths.DockerDropIn = defaults.DockerDropIn
+	}
+	if s.Paths.InitramfsMarker == "" {
+		s.Paths.InitramfsMarker = defaults.InitramfsMarker
+	}
+	if s.Paths.InitramfsManager == "" {
+		s.Paths.InitramfsManager = defaults.InitramfsManager
 	}
 	if s.Paths.ControlSocket == "" {
 		s.Paths.ControlSocket = defaults.ControlSocket
@@ -836,7 +902,7 @@ func (s *System) status(ctx context.Context) (health.Snapshot, error) {
 
 func (s *System) touchedFiles(plan Plan) []string {
 	result := []string{
-		s.Paths.VPN, s.Paths.Intent, s.Paths.Config, s.Paths.Sysctl,
+		s.Paths.VPN, s.Paths.Intent, s.Paths.Config, s.Paths.Sysctl, s.Paths.InitramfsMarker,
 		filepath.Join(s.Paths.SystemdDir, "nftfwd.service.d", "50-nftfw-final-early.conf"),
 		filepath.Join(s.Paths.SystemdDir, "nftfw-rollback.service.d", "50-nftfw-final-early.conf"),
 	}
@@ -898,6 +964,7 @@ func renderSysctl(interfaces []string, dockerEnabled bool) []byte {
 		builder.WriteString("net.ipv4.ip_forward = 1\n")
 	}
 	builder.WriteString("net.ipv6.conf.default.disable_ipv6 = 1\n")
+	builder.WriteString("net.ipv6.conf.lo.disable_ipv6 = 0\n")
 	for _, name := range interfaces {
 		builder.WriteString("net.ipv6.conf." + name + ".disable_ipv6 = 1\n")
 	}
@@ -921,6 +988,7 @@ func managedSysctls(interfaces []string, dockerEnabled bool) []string {
 	result := []string{
 		"net.ipv6.conf.default.disable_ipv6",
 		"net.ipv6.conf.all.forwarding",
+		"net.ipv6.conf.lo.disable_ipv6",
 	}
 	if dockerEnabled {
 		result = append(result, "net.ipv4.ip_forward")

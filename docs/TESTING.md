@@ -28,6 +28,20 @@ bash ./tests/packaging/docker_handoff.sh
 bash ./tests/stage-r/run.sh
 ```
 
+Amendment M adds two root-only, disposable source regressions. Neither
+installs a package or changes the host network namespace:
+
+```bash
+sudo ./tests/initramfs-guard-namespace.sh
+sudo ./tests/package-rollback-bundle.sh
+```
+
+The first creates private mount/network namespaces, applies the exact
+initramfs guard, and proves a later-created interface inherits IPv6 disabled
+while loopback remains enabled. The second builds disposable minimal Debian
+packages, proves the rollback bridge payload is identical to exact 2.0.3, and
+rejects manifest/package tampering without invoking dpkg installation.
+
 The systemd preflight uses temporary unit copies and staged executables, so it
 can validate a fresh-host source installation before final paths exist and
 without installing or starting anything.
@@ -185,6 +199,14 @@ rollback, installs a short-lived test policy that preserves the observed SSH
 flow, captures physical IPv4/IPv6 egress, commits/rolls back, kills the test
 daemon, and waits for independent timeout rollback. Cleanup is scoped to
 owned test objects and verifies the unrelated proof table survives.
+
+Renewed E-R2 additionally boots two fresh QEMU guests with capture active
+before execution. It requires zero guest-originated IPv4 and IPv6 frames when
+the initramfs readiness marker is first observed, classifies any frame rather
+than moving the marker, completes two consecutive boots, and proves final
+`::1`. The upgrade guest prepares the release rollback bundle before 2.1.0,
+then exercises both interruption-resume states and ends with the unmodified
+exact 2.0.3 package configured and all state/unit/network snapshots preserved.
 
 ## Endpoint and DNS failure coverage
 

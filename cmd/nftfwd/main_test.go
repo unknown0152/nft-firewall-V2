@@ -158,6 +158,35 @@ func TestCanonicalStateDatabaseRejectsAmbiguousRoots(t *testing.T) {
 	}
 }
 
+type absentBootGuardRunner struct{ calls int }
+
+func (r *absentBootGuardRunner) Run(_ context.Context, args ...string) (string, string, error) {
+	r.calls++
+	if strings.Join(args, " ") != "--json list tables" {
+		return "", "", errors.New("unexpected boot guard command")
+	}
+	return `{"nftables":[{"metainfo":{"json_schema_version":1}}]}`, "", nil
+}
+
+func TestInitramfsHandoffUsesGlobalMutationLock(t *testing.T) {
+	runner := &absentBootGuardRunner{}
+	stateRoot := secureTestDir(t)
+	lockRoot := secureTestDir(t)
+	if err := handoffInitramfsGuardAt(context.Background(), stateRoot, lockRoot, runner); err != nil {
+		t.Fatal(err)
+	}
+	if runner.calls != 1 {
+		t.Fatalf("unexpected guard inspection count: %d", runner.calls)
+	}
+	info, err := os.Stat(filepath.Join(lockRoot, "mutation.lock"))
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm() != 0o600 {
+		t.Fatalf("global mutation lock missing or unsafe: %#v %v", info, err)
+	}
+	if err := handoffInitramfsGuardAt(context.Background(), "relative", lockRoot, runner); err == nil {
+		t.Fatal("ambiguous state root reached initramfs handoff")
+	}
+}
+
 func TestStaticRollbackUsesLockedCurrentSchemaState(t *testing.T) {
 	ctx := context.Background()
 	root, databasePath := newStateLayout(t)

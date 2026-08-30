@@ -15,6 +15,7 @@ import (
 
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
 	"github.com/unknown0152/nft-firewall-v2/internal/app"
+	"github.com/unknown0152/nft-firewall-v2/internal/bootguard"
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
 	"github.com/unknown0152/nft-firewall-v2/internal/reconcile"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
@@ -34,10 +35,11 @@ func main() {
 	recoverCommit := flag.Bool("recover-commit-publication", false, "resolve a durable commit publication during early restore")
 	resolveStale := flag.Bool("resolve-stale-pending", false, "resolve stale pending state during early restore")
 	verifyEnforcement := flag.Bool("verify-enforcement", false, "strictly verify committed live enforcement without mutation")
+	handoffGuard := flag.Bool("handoff-initramfs-guard", false, "remove the exact initramfs deny guard after enforcement verification")
 	stateDir := flag.String("state-dir", "/var/lib/nftfw", "state directory for early-boot restore mode")
 	flag.Parse()
 	specialModes := 0
-	for _, enabled := range []bool{*expired, *restoreActive, *verifyEnforcement} {
+	for _, enabled := range []bool{*expired, *restoreActive, *verifyEnforcement, *handoffGuard} {
 		if enabled {
 			specialModes++
 		}
@@ -48,6 +50,13 @@ func main() {
 	}
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
+	if *handoffGuard {
+		if err := handoffInitramfsGuard(ctx, *stateDir, nft.OSRunner{}); err != nil {
+			fmt.Fprintln(os.Stderr, "nftfwd initramfs handoff:", err)
+			os.Exit(1)
+		}
+		return
+	}
 	if *restoreActive {
 		result, err := recoverAtBoot(ctx, *stateDir, state.DefaultMutationLockDir, nft.New(nil))
 		if err != nil {
@@ -108,6 +117,23 @@ func main() {
 		fmt.Fprintln(os.Stderr, "nftfwd:", err)
 		os.Exit(1)
 	}
+}
+
+func handoffInitramfsGuard(ctx context.Context, stateDirectory string, runner bootguard.Runner) error {
+	return handoffInitramfsGuardAt(ctx, stateDirectory, state.DefaultMutationLockDir, runner)
+}
+
+func handoffInitramfsGuardAt(ctx context.Context, stateDirectory, lockDirectory string, runner bootguard.Runner) error {
+	if _, err := canonicalStateDatabase(stateDirectory); err != nil {
+		return err
+	}
+	release, err := state.AcquireMutationLock(ctx, lockDirectory)
+	if err != nil {
+		return err
+	}
+	defer release()
+	_, err = bootguard.Handoff(state.WithMutationLock(ctx), runner)
+	return err
 }
 
 func candidateStartupGuard() error {

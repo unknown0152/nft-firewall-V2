@@ -179,7 +179,7 @@ func (s SystemInspector) inspectOnce(ctx context.Context, vpnPath string) (inspe
 	if err != nil {
 		return inspected{}, err
 	}
-	units, err := s.unitStates(ctx)
+	units, err := s.unitStates(ctx, installedVersion)
 	if err != nil {
 		return inspected{}, err
 	}
@@ -290,31 +290,84 @@ var adoptionUnits = []string{
 	"nftfw-setup-rollback.timer", "nftfw-vpn.service", "nftfw-web.service",
 }
 
-func (s SystemInspector) unitStates(ctx context.Context) ([]UnitState, error) {
+var legacyAbsentUnits = map[string]bool{
+	"nftfw-managed-rollback.timer": true,
+	"nftfw-setup-rollback.timer":   true,
+	"nftfw-vpn.service":            true,
+}
+
+type observedUnitState struct {
+	ID, Names, LoadState, ActiveState, UnitFileState, FragmentPath string
+}
+
+func (s SystemInspector) unitStates(ctx context.Context, installedVersion string) ([]UnitState, error) {
 	result := make([]UnitState, 0, len(adoptionUnits))
 	for _, unit := range adoptionUnits {
-		activeOutput, err := s.Runner.Run(ctx, "systemctl", "show", "--property=ActiveState", "--value", unit)
+		output, err := s.Runner.Run(ctx, "systemctl", "show",
+			"--property=Id,Names,LoadState,ActiveState,UnitFileState,FragmentPath", unit)
 		if err != nil {
 			return nil, fail("ADOPTION_UNIT_STATE_UNREADABLE")
 		}
-		activeState := strings.TrimSpace(string(activeOutput))
-		if !allowedActiveState(activeState) {
+		observed, err := parseUnitState(output)
+		if err != nil || observed.ID != unit || observed.Names != unit {
 			return nil, fail("ADOPTION_UNIT_STATE_UNREADABLE")
 		}
-		enabledOutput, err := s.Runner.Run(ctx, "systemctl", "show", "--property=UnitFileState", "--value", unit)
-		if err != nil {
-			return nil, fail("ADOPTION_UNIT_STATE_UNREADABLE")
+		if canonicalLegacyUnitAbsence(observed, unit, installedVersion) {
+			result = append(result, UnitState{Name: unit})
+			continue
 		}
-		enabledState := strings.TrimSpace(string(enabledOutput))
-		if !allowedUnitFileState(enabledState) {
+		if observed.LoadState != "loaded" || !allowedActiveState(observed.ActiveState) ||
+			!allowedUnitFileState(observed.UnitFileState) ||
+			!canonicalVendorUnitPath(observed.FragmentPath, unit) {
 			return nil, fail("ADOPTION_UNIT_STATE_UNREADABLE")
 		}
 		result = append(result, UnitState{
-			Name: unit, Active: activeState == "active",
-			Enabled: enabledState == "enabled" || enabledState == "enabled-runtime",
+			Name: unit, Active: observed.ActiveState == "active",
+			Enabled: observed.UnitFileState == "enabled" || observed.UnitFileState == "enabled-runtime",
 		})
 	}
 	return result, nil
+}
+
+func parseUnitState(data []byte) (observedUnitState, error) {
+	if len(data) == 0 || len(data) > 4096 || !strings.HasSuffix(string(data), "\n") {
+		return observedUnitState{}, errors.New("invalid unit state")
+	}
+	values := map[string]string{}
+	seen := map[string]bool{}
+	for _, line := range strings.Split(strings.TrimSuffix(string(data), "\n"), "\n") {
+		key, value, ok := strings.Cut(line, "=")
+		if !ok || seen[key] || strings.ContainsAny(value, "\r\n") {
+			return observedUnitState{}, errors.New("invalid unit state")
+		}
+		switch key {
+		case "Id", "Names", "LoadState", "ActiveState", "UnitFileState", "FragmentPath":
+			seen[key] = true
+			values[key] = value
+		default:
+			return observedUnitState{}, errors.New("invalid unit state")
+		}
+	}
+	for _, key := range []string{"Id", "Names", "LoadState", "ActiveState", "UnitFileState", "FragmentPath"} {
+		if _, ok := values[key]; !ok {
+			return observedUnitState{}, errors.New("invalid unit state")
+		}
+	}
+	return observedUnitState{
+		ID: values["Id"], Names: values["Names"], LoadState: values["LoadState"],
+		ActiveState: values["ActiveState"], UnitFileState: values["UnitFileState"],
+		FragmentPath: values["FragmentPath"],
+	}, nil
+}
+
+func canonicalLegacyUnitAbsence(observed observedUnitState, unit, installedVersion string) bool {
+	return legacyAbsentUnits[unit] && strings.HasPrefix(installedVersion, "2.0.3") &&
+		observed.LoadState == "not-found" && observed.ActiveState == "inactive" &&
+		observed.UnitFileState == "" && observed.FragmentPath == ""
+}
+
+func canonicalVendorUnitPath(path, unit string) bool {
+	return path == "/usr/lib/systemd/system/"+unit || path == "/lib/systemd/system/"+unit
 }
 
 func allowedActiveState(value string) bool {
@@ -329,7 +382,7 @@ func allowedActiveState(value string) bool {
 func allowedUnitFileState(value string) bool {
 	switch value {
 	case "enabled", "enabled-runtime", "disabled", "static", "indirect", "masked",
-		"masked-runtime", "generated", "transient", "linked", "linked-runtime", "alias", "not-found":
+		"masked-runtime", "generated", "transient", "linked", "linked-runtime":
 		return true
 	default:
 		return false

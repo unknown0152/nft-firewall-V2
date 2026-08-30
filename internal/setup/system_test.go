@@ -114,17 +114,19 @@ func testSystem(t testing.TB, runner *systemRunner) (*System, Paths) {
 	t.Helper()
 	root := t.TempDir()
 	paths := Paths{
-		Config:        filepath.Join(root, "etc/nftfw/nftfw.toml"),
-		Intent:        filepath.Join(root, "etc/nftfw/intent.toml"),
-		VPN:           filepath.Join(root, "etc/wireguard/nftfw0.conf"),
-		Sysctl:        filepath.Join(root, "etc/sysctl.d/90-nftfw-managed.conf"),
-		StateDir:      filepath.Join(root, "var/lib/nftfw"),
-		RuntimeDir:    filepath.Join(root, "run/nftfw"),
-		SystemdDir:    filepath.Join(root, "etc/systemd/system"),
-		DockerDaemon:  filepath.Join(root, "etc/docker/daemon.json"),
-		DockerDropIn:  filepath.Join(root, "etc/systemd/system/nftfwd.service.d/docker-access.conf"),
-		ControlSocket: filepath.Join(root, "run/nftfw/control.sock"),
-		StatusSocket:  filepath.Join(root, "run/nftfw/status.sock"),
+		Config:           filepath.Join(root, "etc/nftfw/nftfw.toml"),
+		Intent:           filepath.Join(root, "etc/nftfw/intent.toml"),
+		VPN:              filepath.Join(root, "etc/wireguard/nftfw0.conf"),
+		Sysctl:           filepath.Join(root, "etc/sysctl.d/90-nftfw-managed.conf"),
+		StateDir:         filepath.Join(root, "var/lib/nftfw"),
+		RuntimeDir:       filepath.Join(root, "run/nftfw"),
+		SystemdDir:       filepath.Join(root, "etc/systemd/system"),
+		DockerDaemon:     filepath.Join(root, "etc/docker/daemon.json"),
+		DockerDropIn:     filepath.Join(root, "etc/systemd/system/nftfwd.service.d/docker-access.conf"),
+		InitramfsMarker:  filepath.Join(root, "etc/nftfw/initramfs-managed-disabled-v1"),
+		InitramfsManager: filepath.Join(root, "usr/lib/nftfw/initramfs/nftfw-initramfs-manage"),
+		ControlSocket:    filepath.Join(root, "run/nftfw/control.sock"),
+		StatusSocket:     filepath.Join(root, "run/nftfw/status.sock"),
 	}
 	profile := setupProfile(t)
 	system := &System{
@@ -266,6 +268,131 @@ func TestSystemExecutorCompletesSimulatedCleanHost(t *testing.T) {
 			t.Fatalf("simulated setup missing %q:\n%s", want, joined)
 		}
 	}
+	runtimeStart := strings.Index(joined, "systemctl start nftfwd.service")
+	earlyStart := strings.Index(joined, "systemctl start nftfw-early.service")
+	initramfsBuild := strings.Index(joined, paths.InitramfsManager+" rebuild-enabled")
+	bootEnable := strings.Index(joined, "systemctl enable nftfw-early.service")
+	if runtimeStart < 0 || earlyStart <= runtimeStart || initramfsBuild <= earlyStart || bootEnable <= initramfsBuild {
+		t.Fatalf("first-setup handoff ordering is unsafe:\n%s", joined)
+	}
+	for _, path := range []string{
+		filepath.Join(paths.SystemdDir, "nftfwd.service.d", "50-nftfw-final-early.conf"),
+		filepath.Join(paths.SystemdDir, "nftfw-rollback.service.d", "50-nftfw-final-early.conf"),
+		paths.InitramfsMarker,
+	} {
+		if _, err := os.Stat(path); err != nil {
+			t.Fatalf("final dependency artifact missing %s: %v", path, err)
+		}
+	}
+}
+
+func TestInstallDefersFinalDependenciesUntilCommittedHandoff(t *testing.T) {
+	runner := &systemRunner{}
+	system, paths := testSystem(t, runner)
+	plan, err := system.Prepare(context.Background(), "/provider.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := system.Install(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{
+		filepath.Join(paths.SystemdDir, "nftfwd.service.d", "50-nftfw-final-early.conf"),
+		filepath.Join(paths.SystemdDir, "nftfw-rollback.service.d", "50-nftfw-final-early.conf"),
+		paths.InitramfsMarker,
+	} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("install phase published final artifact %s: %v", path, err)
+		}
+	}
+	if err := system.StartRuntime(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := system.PublishFinalDependencies(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	if strings.Index(joined, "systemctl start nftfwd.service") >= strings.Index(joined, "systemctl start nftfw-early.service") {
+		t.Fatalf("runtime did not precede final requisite publication:\n%s", joined)
+	}
+}
+
+func TestManagedInitramfsMarkerLifecycle(t *testing.T) {
+	marker := filepath.Join(t.TempDir(), "etc/nftfw/initramfs-managed-disabled-v1")
+	if err := ensureManagedInitramfsMarker(marker); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(marker)
+	if err != nil || info.Mode().Perm() != 0o600 ||
+		string(mustRead(t, marker)) != "nftfw.initramfs-managed-disabled.v1\n" {
+		t.Fatalf("managed marker is not exact: info=%v err=%v", info, err)
+	}
+	if err := ensureManagedInitramfsMarker(marker); err != nil {
+		t.Fatalf("exact existing marker was not idempotent: %v", err)
+	}
+	if err := os.WriteFile(marker, []byte("foreign\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureManagedInitramfsMarker(marker); err == nil ||
+		err.Error() != "SETUP_INITRAMFS_MARKER_INVALID" {
+		t.Fatalf("foreign marker content was accepted: %v", err)
+	}
+	if err := os.Chmod(marker, 0o640); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureManagedInitramfsMarker(marker); err == nil ||
+		err.Error() != "SETUP_INITRAMFS_MARKER_UNSAFE" {
+		t.Fatalf("unsafe marker mode was accepted: %v", err)
+	}
+	if err := os.Remove(marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("missing", marker); err != nil {
+		t.Fatal(err)
+	}
+	if err := ensureManagedInitramfsMarker(marker); err == nil ||
+		err.Error() != "SETUP_INITRAMFS_MARKER_UNSAFE" {
+		t.Fatalf("symlinked marker was accepted: %v", err)
+	}
+}
+
+func TestFinalDependencyPublicationFailureBranches(t *testing.T) {
+	t.Run("marker", func(t *testing.T) {
+		runner := &systemRunner{}
+		system, paths := testSystem(t, runner)
+		if err := os.MkdirAll(filepath.Dir(paths.InitramfsMarker), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(paths.InitramfsMarker, []byte("foreign\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := system.PublishFinalDependencies(context.Background(), Plan{}); err == nil ||
+			err.Error() != "SETUP_INITRAMFS_MARKER_INVALID" {
+			t.Fatalf("invalid marker error=%v", err)
+		}
+	})
+	t.Run("dependency-target", func(t *testing.T) {
+		runner := &systemRunner{}
+		system, paths := testSystem(t, runner)
+		if err := os.MkdirAll(filepath.Dir(paths.SystemdDir), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(paths.SystemdDir, []byte("not a directory\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := system.PublishFinalDependencies(context.Background(), Plan{}); err == nil ||
+			err.Error() != "SETUP_FINAL_DEPENDENCY_PUBLISH_FAILED" {
+			t.Fatalf("unsafe dependency target error=%v", err)
+		}
+	})
+	t.Run("reload", func(t *testing.T) {
+		runner := &systemRunner{fail: "systemctl daemon-reload"}
+		system, _ := testSystem(t, runner)
+		if err := system.PublishFinalDependencies(context.Background(), Plan{}); err == nil ||
+			err.Error() != "SETUP_FINAL_DEPENDENCY_RELOAD_FAILED" {
+			t.Fatalf("dependency reload error=%v", err)
+		}
+	})
 }
 
 func TestEngineAndSystemPrepareBeforePublishingFirstSetupJournal(t *testing.T) {
@@ -1301,9 +1428,18 @@ func TestAdditionalSystemFailureBranches(t *testing.T) {
 			errorCode: "SETUP_DAEMON_START_FAILED",
 		},
 		{
-			name: "boot-start", fail: "systemctl start nftfw-early.service",
-			call:      func(system *System, plan Plan) error { return system.EnableBoot(context.Background(), plan) },
-			errorCode: "SETUP_BOOT_ACTIVATION_FAILED",
+			name: "handoff-initramfs", fail: "rebuild-enabled",
+			call: func(system *System, plan Plan) error {
+				return system.PublishFinalDependencies(context.Background(), plan)
+			},
+			errorCode: "SETUP_INITRAMFS_GUARD_FAILED",
+		},
+		{
+			name: "handoff-start", fail: "systemctl start nftfw-early.service",
+			call: func(system *System, plan Plan) error {
+				return system.PublishFinalDependencies(context.Background(), plan)
+			},
+			errorCode: "SETUP_EARLY_ENFORCEMENT_FAILED",
 		},
 		{
 			name: "boot-restart", fail: "systemctl restart nftfwd.service",
@@ -1467,7 +1603,7 @@ func TestStatusSocketDecode(t *testing.T) {
 }
 
 func TestPhaseTunnelClassification(t *testing.T) {
-	for _, phase := range []Phase{PhaseTunnel, PhaseValidate, PhaseCommit, PhaseBoot, PhaseFinalize, PhaseComplete} {
+	for _, phase := range []Phase{PhaseTunnel, PhaseValidate, PhaseCommit, PhaseHandoff, PhaseBoot, PhaseFinalize, PhaseComplete} {
 		if !phaseMayHaveTunnel(phase) {
 			t.Fatalf("phase %s should permit tunnel cleanup", phase)
 		}

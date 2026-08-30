@@ -26,7 +26,11 @@ operational state database in a report.
   exact matching provenance and egress interface. Interface IDs are permanent
   in a monotonic ledger and retired IDs are never reused.
 - IPv6 behavior is mandatory and explicit. Disabled mode installs early
-  IPv6 drop hooks; VPN and native modes use equivalent typed inet policy.
+  IPv6 drop hooks; managed setup additionally installs an inert,
+  marker-activated initramfs loader that sets reversible non-loopback defaults
+  before udev creates interfaces and applies a checksum-bound temporary deny
+  guard. Committed early enforcement must verify before the exact guard is
+  removed. VPN and native modes use equivalent typed inet policy.
 - Normal operation never invokes `flush ruleset` and never deletes a table it
   does not own.
 - Every candidate passes internal validation and `nft --check` before one
@@ -69,6 +73,12 @@ operational state database in a report.
   mutation surface. It reads twice, refuses races, and outputs no provider
   key, endpoint/address, public IP/domain, application identity, or Docker
   network name.
+- A 2.0.3-to-2.1.0 deployment prepares a root-only checksum-bound rollback
+  bundle before upgrade. Its lower-version Debian bridge has data payload
+  identical to exact 2.0.3, accepts only exact configured 2.1.0 and schema 6,
+  then permits the unmodified 2.0.3 package to complete a supported forward
+  package transition. Direct dpkg-state editing and unverified file copying
+  are not recovery mechanisms.
 
 ## Trust assumptions
 

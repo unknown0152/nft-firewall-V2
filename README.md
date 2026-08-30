@@ -19,6 +19,12 @@ All parsing and clean-host discovery finish before the setup journal exists.
 The journal is published with the complete redacted plan immediately before
 the backup and protected mutation phases begin.
 
+First setup deliberately starts `nftfwd` before publishing its final
+`Requisite=nftfw-early.service` drop-ins. After commit it starts and verifies
+early enforcement, builds a checksum-bound initramfs deny guard with IPv6
+disabled before udev creates a NIC, and only then publishes the final boot
+dependencies. The guard is removed only by the verified readiness service.
+
 The clean-host result is:
 
 - IPv4 Internet through the WireGuard VPN only;
@@ -36,11 +42,10 @@ The current tree targets **2.1.0** and requires **Go 1.27.0**. Until Stage
 E-R2, tagging, and final publication approval are complete, local Stage E-R
 candidate artifacts are deliberately quarantined and cannot run or install.
 The last published stable line remains 2.0.3. The latest privileged 2.1.0 run
-proved the corrected managed first-setup transaction boundary, then
-hard-stopped before applying its temporary guard because the generated
-endpoint prefix set lacked nftables interval semantics. Amendment L corrects
-that declaration while retaining exact `/32` endpoint authorization; complete
-renewed E-R2 validation is still required.
+hard-stopped on four release blockers: exact-2.0.3 absent-unit
+classification, first-setup dependency order, pre-guard IPv6 control frames,
+and exact package rollback. Amendment M corrects only those source contracts;
+complete renewed E-R2 validation is still required before a tag exists.
 
 ## Supported clean-host setup
 
@@ -115,6 +120,13 @@ NFTFW owns only `inet nftfw_filter`, `ip nftfw_nat`, and
 generation commit, exact rollback, immutable boot snapshots, a monotonic
 provenance ledger, and independent systemd rollback services protect the
 transition.
+
+Before a 2.0.3-to-2.1.0 package upgrade, the release-provided
+`nftfw-package-rollback` helper creates a root-only, checksummed bundle. Its
+package-manager bridge carries the exact 2.0.3 payload at a temporary lower
+Debian version, allowing the unmodified exact 2.0.3 package to complete its
+own guarded installation without editing dpkg state or bypassing maintainer
+scripts.
 
 The VPN importer accepts only documented WireGuard data fields. It rejects
 hooks, commands, `SaveConfig`, provider routing directives, split tunnels,

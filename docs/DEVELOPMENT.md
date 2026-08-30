@@ -24,7 +24,11 @@ make vet
 make static
 make vuln
 make security
-shellcheck scripts/*.sh tests/acceptance/*.sh tests/chaos/*.sh tests/namespaces/*.sh tests/packaging/*.sh packaging/deb/*inst packaging/deb/prerm
+shellcheck scripts/*.sh packaging/initramfs/nftfw-ipv6-early \
+  packaging/initramfs/nftfw-early-guard-hook \
+  packaging/initramfs/nftfw-initramfs-manage \
+  tests/*.sh tests/acceptance/*.sh tests/chaos/*.sh tests/namespaces/*.sh \
+  tests/packaging/*.sh packaging/deb/*inst packaging/deb/prerm
 ```
 
 The audited analyzer versions are staticcheck v0.8.1, govulncheck v1.7.0,
@@ -178,3 +182,18 @@ The namespace suite needs a self-hosted Linux runner labeled
 condition. Hosted GitHub runners do not provide the required durable
 `CAP_NET_ADMIN` lab environment, so absence of either opt-in is not represented
 as a pass.
+
+Amendment M also has two narrowly scoped root source regressions. They use
+disposable mount/network namespaces or disposable package construction and do
+not install NFTFW or touch the host package database:
+
+```bash
+sudo ./tests/initramfs-guard-namespace.sh
+sudo ./tests/package-rollback-bundle.sh
+```
+
+The first verifies early IPv6 inheritance, exact guard application, and
+fail-closed archive inspection. The second verifies the protected rollback
+bundle, exact 2.0.3 payload-equivalent bridge, and tamper/path refusals. Full
+boot packet capture and execution of the two-step dpkg rollback remain E-R2
+guest gates.

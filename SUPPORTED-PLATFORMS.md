@@ -6,6 +6,7 @@
 | --- | --- |
 | OS | Debian 13 stable |
 | Init | systemd |
+| Boot image | Local-disk `initramfs-tools`; every installed initramfs must regenerate and verify |
 | Architectures | amd64, arm64 |
 | Network | Exactly one usable IPv4 default uplink |
 | Management | Local console or directly connected private LAN |
@@ -32,6 +33,8 @@ matrix.
 - macvlan, ipvlan, overlay, Swarm, Kubernetes, Podman, internal-only, IPv6,
   overlapping, malformed, or changing Docker networks;
 - public administration or automatic public SSH;
+- network-root boot, an unsupported initramfs generator, or an initramfs that
+  cannot prove the NFTFW loader precedes udev;
 - native IPv6 or VPN IPv6.
 
 These cases require an explicit advanced/adoption design and their own
