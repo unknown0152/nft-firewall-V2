@@ -6,7 +6,7 @@ readonly marker=/run/nftfw-disposable-test-guest
 readonly package=nft-firewall-v2
 readonly old_version=2.0.3
 readonly new_version=2.1.0
-readonly work_root=/run/nftfw-package-rollback-disposable
+readonly work_root=/opt/nftfw-package-rollback-disposable
 
 fail() {
     echo "FAIL: $*" >&2
