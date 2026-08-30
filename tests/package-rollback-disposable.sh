@@ -79,6 +79,7 @@ state_digest() {
         find /var/lib/nftfw -xdev -type f \
             ! -path '/var/lib/nftfw/audit*' \
             ! -path '/var/lib/nftfw/backups/*' \
+            ! -path '/var/lib/nftfw/wg-endpoints.json' \
             ! -path '/var/lib/nftfw/generation-state/state.db' \
             ! -path '/var/lib/nftfw/generation-state/state.db-*' -print0 |
             sort -z | xargs -0 -r sha256sum
