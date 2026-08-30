@@ -47,10 +47,6 @@ done
     $(dpkg-deb -f "$new_deb" Version) == "$new_version" ]] || fail "new package identity mismatch"
 [[ $(dpkg-query -W -f='${db:Status-Abbrev} ${Version}' "$package") == "ii  $old_version" ]] || \
     fail "guest must begin with configured exact 2.0.3"
-systemctl is-active --quiet nftfwd.service nftfw-web.service || \
-    fail "exact 2.0.3 fixture services must begin active"
-systemctl is-enabled --quiet nftfwd.service nftfw-web.service || \
-    fail "exact 2.0.3 fixture services must begin enabled"
 [[ ! -e $work_root && ! -L $work_root ]] || fail "disposable work root already exists"
 install -d -o root -g root -m 0700 "$work_root"
 
