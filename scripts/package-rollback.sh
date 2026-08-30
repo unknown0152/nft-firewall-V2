@@ -345,6 +345,46 @@ verify_installed_payload() {
     done <<<"$output"
 }
 
+install_exact_old_package() {
+    local package_path=$1 private_lock canonical_identity private_identity status
+    private_lock=$(mktemp /run/nftfw/.package-rollback-maintscript-lock.XXXXXX)
+    chmod 0600 "$private_lock"
+    regular_protected "$private_lock" || fail "private maintainer-script lock is unsafe"
+    canonical_identity=$(stat -Lc '%d:%i' /run/nftfw/mutation.lock)
+    private_identity=$(stat -Lc '%d:%i' "$private_lock")
+    [[ $canonical_identity != "$private_identity" ]] || fail "private maintainer-script lock aliases the canonical lock"
+
+    # Exact 2.0.3's preinst deliberately takes /run/nftfw/mutation.lock while
+    # creating its verified state backup.  The rollback parent must retain the
+    # real global lock for the entire dpkg transaction, so give only dpkg and
+    # its descendants a private mount-namespace view of that one pathname.
+    # External NFTFW processes continue to see the parent-held canonical lock;
+    # the legacy preinst sees and locks the protected transaction-local inode.
+    # The private shell expands only its positional parameters.
+    # shellcheck disable=SC2016
+    if unshare --mount --propagation private /bin/sh -eu -c '
+        private_lock=$1
+        package_path=$2
+        canonical_lock=/run/nftfw/mutation.lock
+        [ -f "$private_lock" ] && [ ! -L "$private_lock" ]
+        [ "$(stat -c "%u:%g:%a:%h" "$private_lock")" = 0:0:600:1 ]
+        [ -f "$canonical_lock" ] && [ ! -L "$canonical_lock" ]
+        [ "$(stat -c "%u:%g:%a:%h" "$canonical_lock")" = 0:0:600:1 ]
+        [ "$(stat -Lc "%d:%i" "$private_lock")" != "$(stat -Lc "%d:%i" "$canonical_lock")" ]
+        mount --bind "$private_lock" "$canonical_lock"
+        [ "$(stat -Lc "%d:%i" "$private_lock")" = "$(stat -Lc "%d:%i" "$canonical_lock")" ]
+        [ "$(stat -c "%u:%g:%a:%h" "$canonical_lock")" = 0:0:600:1 ]
+        exec dpkg --install "$package_path"
+    ' nftfw-package-rollback "$private_lock" "$package_path"; then
+        status=0
+    else
+        status=$?
+    fi
+    regular_protected "$private_lock" || fail "private maintainer-script lock changed during dpkg"
+    rm -f -- "$private_lock"
+    return "$status"
+}
+
 execute_bundle() {
     local bundle='' version manifest bridge current_helper
     while (( $# > 0 )); do
@@ -381,7 +421,7 @@ execute_bundle() {
         [[ $(installed_version) == "$bridge" ]] || fail "rollback bridge did not configure"
         [[ $(sha /usr/lib/nftfw/nftfw) == $(manifest_value "$manifest" old_binary_sha256) ]] || fail "rollback bridge payload is not exact 2.0.3"
     fi
-    dpkg --install "$bundle/old.deb"
+    install_exact_old_package "$bundle/old.deb"
     [[ $(installed_version) == "$old_version" ]] || fail "exact 2.0.3 package did not configure"
     [[ $(sha /usr/lib/nftfw/nftfw) == $(manifest_value "$manifest" old_binary_sha256) ]] || fail "restored binary is not exact 2.0.3"
     verify_installed_payload
@@ -389,7 +429,7 @@ execute_bundle() {
 }
 
 require_root
-for tool in awk cat chmod dpkg dpkg-deb dpkg-query find flock grep id install mktemp mv realpath rm sed sha256sum sort sqlite3 stat tar wc; do
+for tool in awk cat chmod dpkg dpkg-deb dpkg-query find flock grep id install mktemp mount mv realpath rm sed sha256sum sort sqlite3 stat tar unshare wc; do
     command -v "$tool" >/dev/null || fail "missing prerequisite: $tool"
 done
 case "${1:-}" in

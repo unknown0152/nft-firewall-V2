@@ -62,7 +62,10 @@ sudo ./tests/package-rollback-disposable.sh \
 It performs the complete 2.1.0-to-bridge-to-2.0.3 transaction, separately
 resumes from the configured bridge, repeats from already restored 2.0.3, and
 compares package payload, schema, policy, provenance/state, Docker, unit,
-route/rule, configuration, and initramfs identities. The root-owned regular
+route/rule, configuration, and initramfs identities. It also races an external
+canonical-lock probe against exact 2.0.3's historical backup: the probe must
+remain blocked while the backup succeeds through dpkg's private lock view, and
+no transaction-local lock file may remain. The root-owned regular
 mode-`0600` marker and disposable guest are mandatory; this script must never
 run on an operator host.
 

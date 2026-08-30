@@ -70,6 +70,9 @@
   transition, the generated bridge version, architecture, package and binary
   hashes, schema history, protected metadata, and verified bundle identity;
   reject configured and every neighboring package state at that boundary.
+- Retain the canonical global mutation lock across exact-package rollback
+  while giving only dpkg descendants a private mount-namespace lock inode for
+  the historical 2.0.3 pre-install backup; reject aliasing or unsafe metadata.
 - Add setup, importer, routing, discovery, intent, rollback, benchmark,
   packaging, and reproducible-candidate validation.
 

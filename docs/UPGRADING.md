@@ -100,6 +100,14 @@ installed 2.1.0 binary and protected metadata, exact optional schema-6
 history, and the transition identity bound to both package and binary hashes
 in the verified bundle manifest.
 
+The outer controller holds the real canonical mutation lock throughout both
+dpkg steps. Because exact 2.0.3's historical `preinst` takes the same pathname
+for its verified backup, only the dpkg descendant tree receives a private
+mount-namespace view backed by a fresh protected inode. External NFTFW
+processes continue to see the locked canonical inode. Missing `unshare` or
+`mount`, namespace/bind failure, unsafe metadata, inode aliasing, or residue is
+a hard rollback failure; never substitute a canonical unlock window.
+
 The deployment controller must arm the copied `execute` helper as its
 daemon-independent timeout action before installing 2.1.0. To invoke an
 approved rollback manually or from that timer:

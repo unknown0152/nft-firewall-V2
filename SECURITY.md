@@ -80,9 +80,12 @@ operational state database in a report.
   three-argument `iHR 2.1.0` transition, the generated bridge version,
   architecture, protected installed binary, exact optional schema-6 history,
   and a manifest-bound transition digest over both package and binary hashes.
+  The parent retains the canonical global mutation lock throughout dpkg; only
+  dpkg's private mount namespace sees a protected transaction-local lock inode
+  so exact 2.0.3 can run its historical lock-taking backup without deadlock.
   It then permits the unmodified 2.0.3 package to complete a supported forward
-  package transition. Direct dpkg-state editing and unverified file copying
-  are not recovery mechanisms.
+  package transition. Direct dpkg-state editing, unlocked lock handoff, and
+  unverified file copying are not recovery mechanisms.
 
 ## Trust assumptions
 

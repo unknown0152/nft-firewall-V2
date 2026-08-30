@@ -222,6 +222,12 @@ version or architecture, an extra argument, a changed binary, unsafe file
 metadata, or non-schema-6 retained state is a refusal, not a reason to weaken
 the check. Preserve the bundle and dpkg log for diagnosis.
 
+If exact 2.0.3's pre-install backup cannot acquire its lock, verify that the
+copied helper and host provide `unshare` and `mount` and preserve the full
+error log. The controller must keep the canonical lock held while dpkg sees a
+different protected inode in its private mount namespace. Do not unlock the
+canonical inode, invoke the maintainer script manually, or bypass the backup.
+
 Execution may be resumed only when dpkg reports configured exact 2.1.0, the
 manifest-named rollback bridge, or already restored exact 2.0.3. Any other
 version or unpacked/half-configured dpkg state requires package-manager repair

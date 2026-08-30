@@ -83,9 +83,10 @@ live installation, firewall application, VPN interruption, or deployment.
   helper, architecture, schema, binaries, bridge, payload, and transition
   identity. The payload-identical lower-version bridge accepts only Debian's
   exact three-argument `iHR 2.1.0` boundary plus protected metadata, then
-  makes the subsequent unmodified 2.0.3 install a supported transition; no
-  configured/neighboring state, dpkg-status edit, or unverified copy is
-  accepted.
+  retains the parent canonical lock while giving only dpkg a protected private
+  lock view for exact 2.0.3's historical backup. It then makes the unmodified
+  2.0.3 install a supported transition; no configured/neighboring state,
+  unlocked handoff, dpkg-status edit, or unverified copy is accepted.
 - No VPN key, provider identity, public topology, token, or live secret is
   present in tracked source evidence.
 

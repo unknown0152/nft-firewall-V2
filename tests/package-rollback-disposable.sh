@@ -27,8 +27,9 @@ readonly old_deb=$1 new_deb=$2 old_sha=$3 new_sha=$4
     echo "BLOCKED: exact protected disposable-guest marker is required"
     exit 77
 }
-for tool in awk cmp docker dpkg dpkg-deb dpkg-query find install ip jq \
-    lsinitramfs nft realpath sed sha256sum sort sqlite3 stat systemctl tar xargs; do
+for tool in awk cat cmp docker dpkg dpkg-deb dpkg-query find flock grep install \
+    ip jq lsinitramfs nft realpath sed seq sha256sum sleep sort sqlite3 stat \
+    systemctl tar xargs; do
     command -v "$tool" >/dev/null || {
         echo "BLOCKED: missing disposable rollback prerequisite"
         exit 77
@@ -149,6 +150,29 @@ restore_fixture_units() {
     systemctl is-active --quiet nftfwd.service nftfw-web.service
 }
 
+start_canonical_lock_probe() {
+    local result=$1
+    (
+        found=0
+        for _ in $(seq 1 200); do
+            if find /run/nftfw -maxdepth 1 -type f \
+                -name '.package-rollback-maintscript-lock.*' -print -quit | grep -q .; then
+                found=1
+                break
+            fi
+            sleep 0.01
+        done
+        if ((found == 0)); then
+            printf 'PRIVATE_LOCK_NOT_OBSERVED\n' >"$result"
+        elif flock -w 2 /run/nftfw/mutation.lock true; then
+            printf 'CANONICAL_LOCK_ACQUIRED\n' >"$result"
+        else
+            printf 'CANONICAL_LOCK_BLOCKED\n' >"$result"
+        fi
+    ) &
+    lock_probe_pid=$!
+}
+
 assert_exact_old() {
     local verification line
     [[ $(dpkg-query -W -f='${db:Status-Abbrev} ${Version}' "$package") == "ii  $old_version" ]] || \
@@ -186,7 +210,14 @@ snapshot >"$work_root/before.snapshot"
 dpkg --install "$new_deb" >"$work_root/upgrade-complete.log" 2>&1
 [[ $(dpkg-query -W -f='${db:Status-Abbrev} ${Version}' "$package") == "ii  $new_version" ]]
 systemctl stop nftfw-web.service nftfwd.service
+lock_probe_result=$work_root/canonical-lock-probe.result
+start_canonical_lock_probe "$lock_probe_result"
 "$bundle/execute" execute --bundle "$bundle" >"$work_root/rollback-complete.log" 2>&1
+wait "$lock_probe_pid"
+[[ $(cat "$lock_probe_result") == CANONICAL_LOCK_BLOCKED ]] || \
+    fail "rollback did not retain the canonical mutation lock across legacy preinst"
+[[ -z $(find /run/nftfw -maxdepth 1 -name '.package-rollback-maintscript-lock.*' -print -quit) ]] || \
+    fail "private maintainer-script lock residue remains"
 restore_fixture_units
 assert_exact_old
 snapshot >"$work_root/after-complete.snapshot"

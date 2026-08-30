@@ -95,8 +95,12 @@ publication decision must remain external and checksummed.
   2.0.3 data and accepts only Debian 13's exact three-argument `iHR 2.1.0`
   transition, generated bridge version, architecture, protected binary and
   database metadata, optional exact schema-6 history, and manifest transition
-  identity. It permits the unmodified 2.0.3 package to finish without
-  dpkg-status edits, state deletion, or manual file copy.
+  identity. The controller retains the real canonical mutation lock while
+  only dpkg descendants see a fresh protected lock inode in a private mount
+  namespace, allowing the historical 2.0.3 backup without an unlocked handoff.
+  It permits the unmodified 2.0.3 package to finish without dpkg-status edits,
+  state deletion, or manual file copy. Full disposable rerun is pending after
+  NFV2-060 exposed the previous same-lock self-deadlock.
 - Managed `expose` and `lan` changes compiled from the newly published
   protected files rather than stale daemon memory.
 - Checksummed managed-change journal recovery for pre-apply, applied,

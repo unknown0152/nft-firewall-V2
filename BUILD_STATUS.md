@@ -27,7 +27,7 @@ its own commit.
 | Exact-2.0.3 unit compatibility | PASS | One strict six-property systemd snapshot per unit; only three enumerated 2.1-only units accept the canonical exact-2.0.3 absent tuple; aliases, shadows, contradictions, malformed output, and newer-version absence refuse |
 | First-setup committed handoff | PASS | Runtime starts under the temporary guard before commit; early/readiness and verified initramfs protection precede durable final dependency publication and boot activation; every post-commit failure recovers forward |
 | Zero-packet initramfs source boundary | PASS | Inert marker-gated pre-udev loader, reversible non-loopback IPv6 defaults, retained loopback, checksum-bound exact nft guard, strict locked handoff, archive verification, transactional removal, and disposable namespace proof; boot capture remains R2 |
-| Exact 2.0.3 package rollback source | PASS | Protected pre-upgrade bundle, exact package/helper/hash/schema/architecture binding, payload-identical lower-version bridge, strict three-argument Debian `iHR` transition, neighboring-state and metadata refusal, resumable two-step controller, and tamper/path coverage; complete renewed E–N execution remains R2 |
+| Exact 2.0.3 package rollback source | IN PROGRESS | Protected bundle and strict `iHR` bridge are retained; the parent-held canonical lock/private dpkg lock-view correction for the legacy backup now requires full disposable regression and complete source-gate rerun |
 | Privileged-umask security fixtures | PASS | Explicit unsafe modes plus isolated `umask 0077` acceptance/refusal regression and full-suite rerun |
 | Managed policy mutation/recovery | PASS | Protected reload, exact generation query, checksummed file journal, and independent watchdog tests |
 | Configuration/compiler/provenance | PASS | Unit, fuzz, vet, staticcheck, gosec, and source contracts |
@@ -36,8 +36,8 @@ its own commit.
 | Package/systemd source | PASS | Nonactivating lifecycle contracts, staged unit verification, and sandbox review |
 | Shell and secret handling | PASS | ShellCheck and deterministic source/history scan contracts |
 | Benchmarks | PASS | Fresh ten-sample run remains inside Amendment E budgets; Amendment N changes shell recovery only and exact `02a7ea7` Go sources are unchanged |
-| Quarantined candidate builds | NOT EXECUTED | Must be built twice from the later frozen clean commit |
-| Candidate comparison | NOT EXECUTED | Requires both independent protected-parent candidates |
+| Quarantined candidate builds | NOT EXECUTED | Earlier Amendment N candidates were invalidated by NFV2-060; build twice from the later frozen clean commit |
+| Candidate comparison | NOT EXECUTED | Requires both replacement protected-parent candidates |
 | Privileged R2 | FAIL, HARD STOPPED | The latest approved run passed the corrected Amendment M boundaries, then found the impossible configured-state assertion at Debian's real `iHR` rollback transition. This source corrects it; the complete E–N matrix is NOT EXECUTED and requires new identity-bound approval |
 | Release tag/publication/deployment | NOT AUTHORIZED | Explicitly outside Stage E-R |
 

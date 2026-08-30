@@ -132,7 +132,11 @@ three-argument downgrade call while `dpkg-query` reports the observed
 `iHR 2.1.0` transition. It also binds the generated bridge version,
 architecture, both package hashes, both binary hashes, optional exact
 schema-6 history, protected file metadata, and the verified bundle transition
-identity; configured or neighboring package states fail closed.
+identity; configured or neighboring package states fail closed. While exact
+2.0.3 runs its historical lock-taking backup, the controller retains the real
+global mutation lock and gives only the dpkg descendant tree a protected
+transaction-local view of that pathname in a private mount namespace. This
+avoids self-deadlock without exposing an unlocked mutation interval.
 
 The VPN importer accepts only documented WireGuard data fields. It rejects
 hooks, commands, `SaveConfig`, provider routing directives, split tunnels,

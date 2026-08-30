@@ -195,5 +195,8 @@ sudo ./tests/package-rollback-bundle.sh
 The first verifies early IPv6 inheritance, exact guard application, and
 fail-closed archive inspection. The second verifies the protected rollback
 bundle, exact 2.0.3 payload-equivalent bridge, exact `iHR` transition, and
-argument/state/identity/metadata/tamper/path refusals. Full boot packet capture
-and the complete renewed E–N privileged matrix remain E-R2 guest gates.
+argument/state/identity/metadata/tamper/path refusals. The disposable package
+test additionally proves the parent canonical lock remains externally held
+while dpkg's private mount namespace satisfies the legacy pre-install backup.
+Full boot packet capture and the complete renewed E–N privileged matrix remain
+E-R2 guest gates.

@@ -275,6 +275,13 @@ bridge accepts only that transient boundary and the manifest-named target;
 `ii`, unpacked, failed, malformed, unrelated, or ambiguous states are not
 recovery shortcuts.
 
+The controller must retain the canonical `/run/nftfw/mutation.lock` for the
+whole transaction. Exact 2.0.3's historical pre-install backup also takes that
+pathname, so dpkg runs in a private mount namespace where only that pathname
+is bound to a fresh protected transaction-local inode. Do not replace this
+with unlocking the canonical lock. Failure to create or prove the isolated
+binding stops rollback before the exact package is installed.
+
 Do not edit `/var/lib/dpkg/status`, invoke maintainer scripts manually, copy
 package payload files, or alter the bundle manifest. Preserve the bundle and
 dpkg logs if the exact transition refuses; repair requires a separately
