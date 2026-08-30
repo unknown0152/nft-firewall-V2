@@ -9,10 +9,11 @@ Current source disposition: **2.1.0 STAGE_R_CANDIDATE_ONLY**.
 The amended 2.1.0 source-only Stage E-R matrix passed; independent candidate
 comparison remains a post-freeze external gate. Successive privileged R2 runs
 hard-stopped safely on NFV2-049, NFV2-050/NFV2-051, NFV2-052, and then
-NFV2-053. The latest run reached the disposable managed first-setup scenario,
-where the setup transaction's own early journal was correctly treated as
-pre-existing NFTFW state. It did not complete R2. A renewed R2 run, tag
-validation, publication, and deployment have not been executed. The findings
+NFV2-053 and NFV2-054. The latest run proved the NFV2-053 transaction-ordering
+repair, then real Debian nftables rejected the temporary guard's
+prefix-bearing endpoint set before apply because it lacked interval
+semantics. It did not complete R2. A renewed R2 run, tag validation,
+publication, and deployment have not been executed. The findings
 below through NFV2-030 record the tagged 2.0.1 audit history; NFV2-031 through
 NFV2-041 record the accepted 2.0.2/2.0.3 release work; NFV2-042 onward records
 2.1.0 source work.
@@ -93,6 +94,7 @@ and post-tag gates.
 | NFV2-051 | Discovery recorded non-clean Docker state but clean-host validation and intent generation ignored it, allowing automatic ownership planning around retained workloads | HIGH | Observe running/all containers around topology discovery, refuse every stable non-empty or changing observation, retain eligible empty custom bridges, and repeat clean/topology validation immediately before ownership publication | CLOSED; empty/custom/running/retained/race/redaction/post-plan source proof PASS, renewed privileged R2 NOT EXECUTED |
 | NFV2-052 | The managed dynamic bridge projector required `docker:<network>` provenance for legacy v2.0.3 static advanced Docker entries, rejecting a valid unchanged historical interface-name identity | HIGH | Split projection into non-crossing modes: static entries require an unchanged bridge and exact tuple while retaining their historical identity/ID; dynamic entries require exact `docker:<network>` provenance and alone may rebind | CLOSED; unit/runtime/bundled-fixture source proof PASS, renewed privileged R2 NOT EXECUTED |
 | NFV2-053 | Managed first setup published its transaction journal before clean-host discovery, so discovery classified the transaction's own journal as pre-existing NFTFW state and rollback then lacked a prepared plan | HIGH | Complete read-only preparation before journal publication; write the prepared summary at the durable pre-mutation boundary; return preparation/initial-write failures without rollback; terminalize inspect/incomplete-backup interruption without touching services; require a valid prepared summary and durable backup before guard-or-later rollback can touch services | CLOSED; engine plus real-system ordering, refusal, redaction, initial-write, backup-boundary, expiry, phase-failure, and exact-rollback source proof PASS; renewed privileged R2 NOT EXECUTED |
+| NFV2-054 | The temporary setup guard declared an ordinary IPv4 address set but populated it with `/32` prefixes, which Debian nftables rejects without interval semantics | HIGH | Emit interval semantics for the endpoint set while retaining strict canonical IPv4 `/32` validation, deterministic ordering, exact table ownership, and pre-apply `nft --check` | CLOSED; unit/source-contract and gated disposable real-parser/apply/exact-delete proof PASS; complete renewed privileged R2 NOT EXECUTED |
 
 ## Adversarial review areas
 
@@ -117,6 +119,7 @@ and post-tag gates.
 | Legacy Docker compatibility | Static advanced entries retain their exact bridge, tuple, historical interface-name provenance, and ledger ID; they never enter the managed rebind branch |
 | Adoption planner | Dry-run-only component has no writer/mutation backend; double observation, exact state/provenance verification, bounded fixed output, and untrusted-error redaction are source-tested |
 | Managed setup boundary | Profile/discovery/plan complete before journal creation; initial journal contains the prepared summary; pre-backup interruption changes no protected state; guard-or-later recovery requires a valid prepared summary, durable backup, and exact phase record before touching services |
+| Temporary setup guard | Every prefix-bearing generated set uses nftables interval semantics; bootstrap endpoints remain canonical IPv4 `/32`; the guard is checked before apply and owns/deletes only `inet nftfw_setup_guard` |
 
 ## Accepted residual risks
 

@@ -1077,6 +1077,21 @@ class ManagedDockerContracts(unittest.TestCase):
         self.assertIn("nftfw_remove_managed_docker_dropin", prerm)
 
 
+class SetupGuardContracts(unittest.TestCase):
+    def test_prefix_sets_are_interval_sets_and_endpoints_remain_hosts(self) -> None:
+        guard = read("internal/setup/guard.go")
+        self.assertIn(
+            "set endpoints_v4 { type ipv4_addr; flags interval;",
+            guard,
+        )
+        self.assertIn(
+            "set lan_v4 { type ipv4_addr; flags interval;",
+            guard,
+        )
+        self.assertIn("prefix.Bits() != 32", guard)
+        self.assertNotIn("flush ruleset", guard)
+
+
 class AdoptionPlannerContracts(unittest.TestCase):
     def test_setup_adopt_is_explicit_and_dry_run_only(self) -> None:
         cli = read("cmd/nftfw/managed.go")

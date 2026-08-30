@@ -17,6 +17,14 @@ permissions must be repaired before retrying.
 Do not disable a firewall manager, delete state, flush nftables, or remove
 routes to bypass a refusal. Confirm the host is in `SUPPORTED-PLATFORMS.md`.
 
+`SETUP_GUARD_CHECK_FAILED` means the exact temporary fail-closed guard did not
+pass the installed nftables parser. NFTFW does not apply that guard and rolls
+the backup-bound setup transaction back. Inspect `nftfw setup status` and the
+root-only journal, preserve the generated diagnostics, and report the nftables
+version and bounded error code. Do not remove `nft --check`, broaden endpoint
+prefixes, run the generated file manually, or flush unrelated rules to bypass
+this release/compatibility failure.
+
 ## Interrupted setup
 
 ```bash

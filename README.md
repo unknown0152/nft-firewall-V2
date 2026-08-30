@@ -36,9 +36,11 @@ The current tree targets **2.1.0** and requires **Go 1.27.0**. Until Stage
 E-R2, tagging, and final publication approval are complete, local Stage E-R
 candidate artifacts are deliberately quarantined and cannot run or install.
 The last published stable line remains 2.0.3. The latest privileged 2.1.0 run
-hard-stopped before tagging after exposing the managed first-setup journal
-ordering defect; Amendment K corrects that source boundary, but its complete
-renewed validation is still required.
+proved the corrected managed first-setup transaction boundary, then
+hard-stopped before applying its temporary guard because the generated
+endpoint prefix set lacked nftables interval semantics. Amendment L corrects
+that declaration while retaining exact `/32` endpoint authorization; complete
+renewed E-R2 validation is still required.
 
 ## Supported clean-host setup
 

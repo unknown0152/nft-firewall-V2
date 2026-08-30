@@ -36,7 +36,7 @@ func renderGuard(uplink, vpnInterface, fwmark string, endpointPort int, endpoint
 	sort.Ints(management)
 	var builder strings.Builder
 	builder.WriteString("table inet nftfw_setup_guard {\n")
-	builder.WriteString("    set endpoints_v4 { type ipv4_addr; elements = { " + strings.Join(endpoints, ", ") + " } }\n")
+	builder.WriteString("    set endpoints_v4 { type ipv4_addr; flags interval; elements = { " + strings.Join(endpoints, ", ") + " } }\n")
 	builder.WriteString("    set lan_v4 { type ipv4_addr; flags interval; elements = { " + strings.Join(lan, ", ") + " } }\n")
 	builder.WriteString("    chain input {\n")
 	builder.WriteString("        type filter hook input priority -200; policy accept;\n")

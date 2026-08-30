@@ -204,6 +204,12 @@ proxy mutation controls to false. NFTFW separately owns persistent and runtime
 daemon socket sandbox exception. The setup guard drops forwarded traffic that
 does not leave through the managed VPN, so the forwarding sysctl and Docker
 restart cannot create a physical-uplink window before the committed policy.
+Both prefix-bearing guard sets use nftables interval semantics. VPN bootstrap
+elements are still validated and rendered only as canonical IPv4 `/32`
+prefixes; interval syntax makes those exact hosts parser-valid and does not
+authorize a broader network. The exact generated guard passes `nft --check`
+before NFTFW applies its single owned `inet nftfw_setup_guard` table. It never
+flushes the ruleset or mutates an unrelated table.
 
 Setup backup payloads are checksummed. Rollback restores exact files, sysctls,
 unit state, Docker state, and the prior firewall generation before removing

@@ -1,9 +1,10 @@
 # Testing
 
 Current disposition: **2.1.0 STAGE E-R SOURCE VALIDATED**. Source-only results
-are consolidated in `TEST_RESULTS.md`. The privileged commands below have not
-been executed for 2.1.0 and require a separately approved disposable lab with
-independent recovery.
+are consolidated in `TEST_RESULTS.md`. Except for the narrowly scoped
+setup-guard parser regression described below, the privileged commands below
+have not been executed for this corrected source and require a separately
+approved disposable lab with independent recovery.
 
 Test outcomes use only `PASS`, `FAIL`, `BLOCKED`, `NOT APPLICABLE`, or
 `NOT EXECUTED`. A namespace simulation and an external provider tunnel are
@@ -47,6 +48,24 @@ pre-mutation journal is terminalized without invoking system rollback, while
 backup-complete guard through commit failures retain exact rollback and
 post-commit failures retain forward recovery. The disposable R2 matrix repeats
 the real process-death, timeout, idempotent-rerun, Docker, and reboot cases.
+
+The setup-guard unit regression covers one and multiple endpoint `/32`
+elements, exact interval flags, deterministic order, malformed/broader-prefix
+refusal, and absence of global flush or unrelated-table mutation. Its real
+nftables companion refuses to run unless it is root, the opt-in value is exact,
+and `/run/nftfw-disposable-test-guest` is a root-owned regular mode-`0600`
+marker. Only inside a disposable Debian guest, run:
+
+```bash
+install -o root -g root -m 0600 /dev/null /run/nftfw-disposable-test-guest
+NFTFW_PRIVILEGED_NFT_TEST=disposable-approved \
+  go test ./internal/setup -run '^TestGuardPassesRealNftablesParserInDisposableGuest$' -count=1
+rm -f /run/nftfw-disposable-test-guest
+```
+
+The regression checks the exact rendered file, applies only its owned table,
+lists it, deletes that exact table, and verifies cleanup. It must never be run
+on an operator host or counted as the complete E-R2 matrix.
 
 The Stage R runner checks package nonactivation, the early/ready/rollback
 dependency graph, packaged CLI contracts, release-candidate metadata, and

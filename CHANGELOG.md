@@ -48,6 +48,9 @@
 - Inspect the reserved policy-routing table through bounded numeric all-table
   JSON so a normally absent clean-host table is accepted without weakening
   populated-table or malformed/failed-inspection refusal.
+- Render every setup-guard prefix set with nftables interval semantics while
+  retaining strict canonical IPv4 `/32` VPN-endpoint authorization, exact
+  table ownership, pre-apply parser validation, and deterministic output.
 - Add setup, importer, routing, discovery, intent, rollback, benchmark,
   packaging, and reproducible-candidate validation.
 

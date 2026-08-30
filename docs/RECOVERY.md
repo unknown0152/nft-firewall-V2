@@ -49,6 +49,13 @@ checksummed backup path is durable in the journal. Missing that boundary in a
 guard-or-later phase, or a missing prepared-plan schema, fails closed before
 stopping services instead of guessing.
 
+The generated guard is passed through real `nft --check` before it is applied.
+Its LAN and endpoint prefix sets use interval semantics, but endpoint inputs
+remain exact canonical IPv4 `/32` values. `SETUP_GUARD_CHECK_FAILED` therefore
+stops before the guard reaches the kernel and triggers the verified
+backup-bound transaction rollback; it is never a reason to bypass the check
+or apply the file manually.
+
 Rollback first stops the managed tunnel when it may exist, rolls back only the
 exact pending generation, restores files, sysctls, unit state, routes, DNS,
 and resolver ownership, then removes the temporary guard. It never flushes the

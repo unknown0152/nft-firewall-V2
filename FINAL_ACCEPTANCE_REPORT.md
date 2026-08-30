@@ -23,9 +23,10 @@ candidate construction and independent comparison. The approved source scope
 includes Go 1.27, one-file managed setup, strict VPN import, managed routing,
 strict managed Docker IPv4 bridge adoption and forwarding ownership,
 the explicit dry-run-only existing-host adoption planner, CLI/dashboard
-changes, the corrected managed first-setup transaction boundary, package
-source, documentation, benchmarks, tests, and local nondeployable candidate
-builds.
+changes, the corrected managed first-setup transaction boundary, valid
+interval-based setup-guard prefix sets with exact `/32` endpoint scope,
+package source, documentation, benchmarks, tests, and local nondeployable
+candidate builds.
 
 The candidate binaries permit only their quarantine-safe behavior, candidate
 daemon/web processes refuse startup, and candidate Debian packages refuse
@@ -47,6 +48,10 @@ live installation, firewall application, VPN interruption, or deployment.
   journal containing the prepared summary. Preparation, initial publication,
   and incomplete-backup failures cannot invoke protected mutation or system
   rollback; guard-or-later rollback remains bound to a durable backup.
+- The temporary setup guard renders every prefix-bearing set with interval
+  semantics, keeps VPN bootstrap endpoints restricted to canonical IPv4
+  `/32` values, passes the real nftables parser in a gated disposable guest,
+  and never flushes the global ruleset.
 - Managed Docker clean-host setup accepts eligible empty bridges only and
   revalidates that no running or retained workload appeared immediately before
   ownership-file publication.
@@ -71,11 +76,11 @@ approval bound to that frozen source commit and comparison SHA-256. Any local
 tag, remote publication, or current-server deployment requires still later
 identity-bound approval.
 
-The latest approved R2 attempt passed its preceding disposable gates and
-reached managed first setup, then hard-stopped when its own prematurely
-published journal was correctly classified as pre-existing NFTFW state and
-rollback lacked a prepared plan. It is not complete acceptance evidence. The
-corrected source requires a new identity-bound E-R2 approval and complete
-renewed run.
+The latest approved R2 attempt passed its preceding disposable gates, proved
+the corrected journal/prepare ordering, and reached managed first setup. It
+then hard-stopped before guard apply because real Debian nftables rejected a
+prefix-bearing endpoint set without interval semantics. Rollback completed,
+but the partial run is not complete acceptance evidence. The corrected source
+requires a new identity-bound E-R2 approval and complete renewed run.
 
 R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED
