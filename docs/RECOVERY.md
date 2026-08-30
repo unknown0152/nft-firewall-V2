@@ -264,6 +264,22 @@ state; if encountered, preserve them separately as unexpected forensic or
 defensive evidence rather than treating them as normal restore inputs. Never
 use `nft flush ruleset`; it can remove unrelated protections.
 
+## Exact package rollback transition
+
+Start or resume package rollback only through the copied, verified bundle
+helper documented in `docs/UPGRADING.md`. Its outer controller accepts a
+configured exact 2.1.0 package, the exact configured bridge, or already
+restored exact 2.0.3. When starting from 2.1.0, Debian itself enters
+`iHR 2.1.0` and supplies the bridge `preinst` exactly three arguments. The
+bridge accepts only that transient boundary and the manifest-named target;
+`ii`, unpacked, failed, malformed, unrelated, or ambiguous states are not
+recovery shortcuts.
+
+Do not edit `/var/lib/dpkg/status`, invoke maintainer scripts manually, copy
+package payload files, or alter the bundle manifest. Preserve the bundle and
+dpkg logs if the exact transition refuses; repair requires a separately
+reviewed package-manager recovery procedure.
+
 ## Boot enforcement
 
 Managed setup adds a pre-network initramfs boundary before the ordinary boot

@@ -12,8 +12,10 @@ hard-stopped safely on NFV2-049, NFV2-050/NFV2-051, NFV2-052, and then
 NFV2-053/NFV2-054. The latest run completed every still-useful independent
 row and found NFV2-055 through NFV2-058: exact-2.0.3 absent-unit planning,
 first-setup final-edge ordering, pre-readiness IPv6 MLD/DAD, and exact package
-rollback refusal. It did not complete R2. Their source corrections and direct
-regressions pass, but renewed E–M R2, tag validation, publication, and
+rollback refusal. The next run passed those corrected boundaries and reached
+the real rollback, then found NFV2-059 at dpkg's `iHR` bridge transition. It
+did not complete R2. The source corrections and direct regressions pass, but
+renewed E–N R2, tag validation, publication, and
 deployment have not been executed. The findings
 below through NFV2-030 record the tagged 2.0.1 audit history; NFV2-031 through
 NFV2-041 record the accepted 2.0.2/2.0.3 release work; NFV2-042 onward records
@@ -100,6 +102,7 @@ and post-tag gates.
 | NFV2-056 | Managed first setup installed final `Requisite=nftfw-early` edges before starting the daemon, making the runtime phase unstartable | HIGH | Defer final dependency publication to a post-commit handoff: start and validate runtime under the temporary guard, commit, establish early/readiness and initramfs protection, then atomically publish final edges and activate boot consumers | CLOSED; Engine/System ordering, failure, recovery-forward, and rollback source proof PASS; complete renewed privileged R2 NOT EXECUTED |
 | NFV2-057 | The prior initramfs design allowed guest-originated IPv6 MLD and DAD frames before readiness | HIGH | Marker-activate a checksum-bound init-top loader as an explicit udev prerequisite, set reversible IPv6 defaults before NIC creation, retain loopback IPv6, apply an exact temporary nftables deny guard, and remove it only after committed enforcement verification under the global mutation lock | CLOSED at source boundary; unit, strict-handoff, disposable namespace, packaging, and removal proof PASS; zero-packet two-boot capture requires complete renewed privileged R2 |
 | NFV2-058 | Exact 2.0.3 package rollback was refused by its historical downgrade guard after dpkg recorded 2.1.0 | HIGH | Prepare and verify a protected bundle before upgrade; use a lower-version fail-closed Debian bridge with exact-2.0.3 data payload, then install the unmodified exact 2.0.3 package; validate package state, schema, hashes, payload, resumable states, and initramfs cleanup without editing dpkg status | CLOSED at source boundary; bundle/tamper/path/payload source proof PASS; full disposable dpkg execution requires complete renewed privileged R2 |
+| NFV2-059 | The generated rollback bridge required configured `ii  2.1.0`, but Debian 13 invokes its `preinst` only after entering the `iHR 2.1.0` transition | HIGH | Accept only the exact observed three-argument downgrade call and `iHR` state; bind bridge version, architecture, package/binary hashes, protected metadata, optional exact schema history, and manifest transition identity; reject configured and every neighboring state | CLOSED at source boundary; direct generated-script acceptance/refusal and protected bundle regression PASS; complete renewed E–N R2 NOT EXECUTED |
 
 ## Adversarial review areas
 
@@ -126,7 +129,7 @@ and post-tag gates.
 | Managed setup boundary | Profile/discovery/plan complete before journal creation; initial journal contains the prepared summary; pre-backup interruption changes no protected state; guard-or-later recovery requires a valid prepared summary, durable backup, and exact phase record before touching services |
 | Temporary setup guard | Every prefix-bearing generated set uses nftables interval semantics; bootstrap endpoints remain canonical IPv4 `/32`; the guard is checked before apply and owns/deletes only `inet nftfw_setup_guard` |
 | Initramfs boundary | The protected marker activates a checksum-bound pre-udev loader and exact temporary table; non-loopback IPv6 defaults are reversible, loopback remains available, unreadable archives fail verification, and only the strict table shape can be removed after committed enforcement verification |
-| Exact package rollback | Both release packages, helper, bridge, architecture, schema, canonical payload digest, and resumable dpkg states are bound in a protected manifest; unsafe paths, tampering, direct dpkg-status edits, and manual payload replacement are refused |
+| Exact package rollback | Both release packages, helper, bridge, architecture, schema, canonical payload digest, protected metadata, exact `iHR` transition, and resumable outer-controller states are bound in a protected manifest; neighboring states, unsafe paths, tampering, direct dpkg-status edits, and manual payload replacement are refused |
 
 ## Accepted residual risks
 

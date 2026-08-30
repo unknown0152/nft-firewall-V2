@@ -75,8 +75,12 @@ operational state database in a report.
   network name.
 - A 2.0.3-to-2.1.0 deployment prepares a root-only checksum-bound rollback
   bundle before upgrade. Its lower-version Debian bridge has data payload
-  identical to exact 2.0.3, accepts only exact configured 2.1.0 and schema 6,
-  then permits the unmodified 2.0.3 package to complete a supported forward
+  identical to exact 2.0.3. The controller begins only from exact configured
+  package states; the bridge itself accepts only Debian's observed exact
+  three-argument `iHR 2.1.0` transition, the generated bridge version,
+  architecture, protected installed binary, exact optional schema-6 history,
+  and a manifest-bound transition digest over both package and binary hashes.
+  It then permits the unmodified 2.0.3 package to complete a supported forward
   package transition. Direct dpkg-state editing and unverified file copying
   are not recovery mechanisms.
 

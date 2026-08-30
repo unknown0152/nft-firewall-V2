@@ -215,6 +215,13 @@ helper self-binding, schema-history, or protected-path failure invalidates the
 bundle. Do not edit dpkg status, force maintainer scripts, copy the old payload
 over the installed package, or regenerate the manifest by hand.
 
+When the outer helper starts from configured 2.1.0, the bridge pre-install
+script must observe exactly the Debian 13 three-argument downgrade call and
+`iHR 2.1.0`. Seeing configured `ii`, unpacked, failed, malformed, a different
+version or architecture, an extra argument, a changed binary, unsafe file
+metadata, or non-schema-6 retained state is a refusal, not a reason to weaken
+the check. Preserve the bundle and dpkg log for diagnosis.
+
 Execution may be resumed only when dpkg reports configured exact 2.1.0, the
 manifest-named rollback bridge, or already restored exact 2.0.3. Any other
 version or unpacked/half-configured dpkg state requires package-manager repair

@@ -89,6 +89,17 @@ unmodified exact 2.0.3 package sees a supported forward version transition
 and runs its own pre-install checks. No dpkg status edit, state deletion,
 maintainer-script skip, or unverified payload copy is used.
 
+The copied controller begins only from configured exact 2.1.0, the exact
+manifest-named configured bridge, or already restored exact 2.0.3. During the
+first step, Debian 13 changes its database to the `iHR 2.1.0` transition and
+invokes the bridge `preinst` with exactly `upgrade`, `2.1.0`, and the generated
+bridge version. That one boundary is accepted; configured `ii`, unpacked,
+failed, malformed, extra-argument, wrong-version, wrong-architecture, or
+ambiguous states are rejected. The pre-install script also verifies the
+installed 2.1.0 binary and protected metadata, exact optional schema-6
+history, and the transition identity bound to both package and binary hashes
+in the verified bundle manifest.
+
 The deployment controller must arm the copied `execute` helper as its
 daemon-independent timeout action before installing 2.1.0. To invoke an
 approved rollback manually or from that timer:

@@ -5,7 +5,7 @@ Source disposition: **STAGE_R_CANDIDATE_ONLY**
 Validation date: 2026-08-30
 
 Reopened source baseline:
-`ee5f03048a38f2cfb9d1e7a786e96dbba79758d1`
+`02a7ea711a72725a27b25decb9b36a277b37d7b8`
 
 This tracked report is the pre-build source snapshot. The later frozen commit,
 candidate build evidence, candidate comparison, R2 evidence, tag, and any
@@ -31,7 +31,7 @@ publication decision must remain external and checksummed.
 | Staged systemd verification | PASS |
 | Disposable real-nft setup-guard regression | PASS, narrowly scoped source gate; not E-R2 |
 | Disposable initramfs guard namespace regression | PASS; later interface inherits IPv6 disabled, loopback remains enabled, exact guard loads, unreadable archive refuses |
-| Disposable exact-package rollback bundle regression | PASS; protected inputs, exact payload-equivalent bridge, tamper/path refusal, no dpkg install |
+| Disposable exact-package rollback bundle regression | PASS; protected inputs, exact payload-equivalent bridge, generated-script exact `iHR` acceptance plus argument/state/identity/metadata refusal, tamper/path coverage, no host dpkg install |
 | Static amd64/arm64 CI package build and inspection | PASS |
 | Dependency/license inventory | PASS, 29 non-main modules |
 | Overall statement coverage | PASS, 76.7% |
@@ -92,8 +92,11 @@ publication decision must remain external and checksummed.
 - The pre-upgrade exact-package rollback helper binds both release packages,
   architecture, helper, schema history, binary hashes, and canonical payload
   digest in a protected manifest. Its lower-version bridge carries exact
-  2.0.3 data and permits the unmodified 2.0.3 package to finish the supported
-  transition without dpkg-status edits, state deletion, or manual file copy.
+  2.0.3 data and accepts only Debian 13's exact three-argument `iHR 2.1.0`
+  transition, generated bridge version, architecture, protected binary and
+  database metadata, optional exact schema-6 history, and manifest transition
+  identity. It permits the unmodified 2.0.3 package to finish without
+  dpkg-status edits, state deletion, or manual file copy.
 - Managed `expose` and `lan` changes compiled from the newly published
   protected files rather than stale daemon memory.
 - Checksummed managed-change journal recovery for pre-apply, applied,
@@ -110,30 +113,26 @@ publication decision must remain external and checksummed.
 ## Performance source results
 
 The repeated 10-sample source matrix remained inside the Amendment E budgets
-on the reference NUC. Current medians included 0.003457 ms provider parsing,
-0.01401 ms managed Docker config generation, 0.02944 ms strict daemon merge,
-0.01082 ms Docker topology projection, 0.005914 ms managed route decoding,
-0.001396 ms Docker workload-ID classification, 0.03832 ms standard
-compilation, 33.36 ms 10,000-policy compilation, 0.01829 ms canonical
-fingerprinting, 0.3399 ms no-op reconciliation, 0.0002988 ms dashboard status
-projection, and 0.001639 ms adoption worksheet generation. Ten-sample
-`benchstat` comparison against exact `ee5f030` found no statistically
-significant runtime regression. The only significant allocation change was a
-0.28% decrease for standard compilation; all other allocation counts were
-unchanged or statistically equivalent. Performance evidence is not
+on the reference NUC. Current medians included 0.004027 ms provider parsing,
+0.01405 ms managed Docker config generation, 0.02952 ms strict daemon merge,
+0.01236 ms Docker topology projection, 0.006285 ms managed route decoding,
+0.001363 ms Docker workload-ID classification, 0.05728 ms standard
+compilation, 32.35 ms 10,000-policy compilation, 0.01869 ms canonical
+fingerprinting, 0.3329 ms no-op reconciliation, 0.0002975 ms dashboard status
+projection, and 0.001781 ms adoption worksheet generation. Amendment N changes
+shell recovery only, and the exact `02a7ea7` Go sources are unchanged. Every
+reference operation remained inside budget; performance evidence is not
 privileged network proof.
 
 ## Not executed under Stage E-R
 
-The latest approval-bound E-R2 attempt passed its still-useful independent
-package, namespace, tunnel-loss, Docker, provenance, safe-apply, service-chaos,
-and exact-upgrade rows, then hard-stopped without a tag on four Amendment M
-defects: exact-2.0.3 absent-unit classification, first-setup final-edge
-ordering, two pre-readiness IPv6 control frames, and refusal of exact 2.0.3
-package rollback from recorded 2.1.0. That partial run is not complete
-privileged acceptance evidence. A complete renewed E-R2 run has not been
-executed and requires new approval bound to the replacement frozen source and
-candidate comparison.
+The latest approval-bound E-R2 attempt passed the corrected Amendment M
+boundaries and every preceding still-useful independent row, then reached the
+real Debian rollback and hard-stopped without a tag because the generated
+bridge required configured `ii` after dpkg had entered `iHR`. That partial run
+is not complete privileged acceptance evidence. A complete renewed E–N R2 run
+has not been executed and requires new approval bound to the replacement
+frozen source and candidate comparison.
 
 | Gate | Result |
 | --- | --- |

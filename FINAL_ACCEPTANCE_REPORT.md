@@ -80,10 +80,12 @@ live installation, firewall application, VPN interruption, or deployment.
   mutation lock. Disposable source proof is not substituted for R2 boot
   capture.
 - The package rollback bundle binds exact 2.0.3 and 2.1.0 release packages,
-  helper, architecture, schema, binaries, bridge, and payload. The
-  payload-identical lower-version bridge makes the subsequent unmodified
-  2.0.3 install a supported transition; no dpkg-status edit or unverified copy
-  is accepted.
+  helper, architecture, schema, binaries, bridge, payload, and transition
+  identity. The payload-identical lower-version bridge accepts only Debian's
+  exact three-argument `iHR 2.1.0` boundary plus protected metadata, then
+  makes the subsequent unmodified 2.0.3 install a supported transition; no
+  configured/neighboring state, dpkg-status edit, or unverified copy is
+  accepted.
 - No VPN key, provider identity, public topology, token, or live secret is
   present in tracked source evidence.
 
@@ -96,12 +98,11 @@ approval bound to that frozen source commit and comparison SHA-256. Any local
 tag, remote publication, or current-server deployment requires still later
 identity-bound approval.
 
-The latest approved R2 attempt completed every still-useful independent row
-and then hard-stopped without a tag on the four Amendment M blockers:
-exact-2.0.3 absent-unit planning, first-setup final-edge ordering, two
-pre-readiness IPv6 control frames, and exact 2.0.3 package rollback refusal.
-The corrected source requires a new identity-bound E-R2 approval and complete
-renewed E–M run, including two-boot zero-packet capture and full two-step dpkg
-rollback execution.
+The latest approved R2 attempt passed the corrected Amendment M boundaries and
+every preceding still-useful independent row, then hard-stopped without a tag
+when Debian entered `iHR` before the bridge `preinst` that incorrectly
+required configured `ii`. The corrected source requires a new identity-bound
+E-R2 approval and complete renewed E–N run, including two-boot zero-packet
+capture and full two-step dpkg rollback execution.
 
 R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED

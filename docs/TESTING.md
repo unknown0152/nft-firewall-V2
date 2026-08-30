@@ -39,8 +39,32 @@ sudo ./tests/package-rollback-bundle.sh
 The first creates private mount/network namespaces, applies the exact
 initramfs guard, and proves a later-created interface inherits IPv6 disabled
 while loopback remains enabled. The second builds disposable minimal Debian
-packages, proves the rollback bridge payload is identical to exact 2.0.3, and
-rejects manifest/package tampering without invoking dpkg installation.
+packages, proves the rollback bridge payload is identical to exact 2.0.3,
+executes the generated `preinst` inside a minimal chroot, and accepts only the
+real three-argument Debian 13 call with `iHR 2.1.0`. It rejects configured and
+neighboring package states, malformed arguments, identity/schema/architecture
+drift, unsafe metadata, symlinks, hard links, and manifest/package tampering
+without invoking dpkg installation on the host.
+
+The full package-manager regression is deliberately unusable on an operator
+host. In a disposable Debian 13 guest already carrying the exact 2.0.3
+advanced-mode fixture, create the same protected marker used by other
+destructive guest tests, copy both exact release-form test packages into a
+root-only directory, and run:
+
+```bash
+sudo ./tests/package-rollback-disposable.sh \
+  /absolute/guest/path/nft-firewall-v2_2.0.3_amd64.deb \
+  /absolute/guest/path/nft-firewall-v2_2.1.0_amd64.deb \
+  OLD_SHA256 NEW_SHA256
+```
+
+It performs the complete 2.1.0-to-bridge-to-2.0.3 transaction, separately
+resumes from the configured bridge, repeats from already restored 2.0.3, and
+compares package payload, schema, policy, provenance/state, Docker, unit,
+route/rule, configuration, and initramfs identities. The root-owned regular
+mode-`0600` marker and disposable guest are mandatory; this script must never
+run on an operator host.
 
 The systemd preflight uses temporary unit copies and staged executables, so it
 can validate a fresh-host source installation before final paths exist and

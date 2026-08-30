@@ -20,6 +20,7 @@ regular_protected() {
     local path=$1
     [[ -f $path && ! -L $path ]] || return 1
     [[ $(stat -c '%u:%g' "$path") == 0:0 ]] || return 1
+    [[ $(stat -c '%h' "$path") == 1 ]] || return 1
     [[ -z $(find "$path" -maxdepth 0 -type f -perm /022 -print -quit) ]]
 }
 
@@ -70,22 +71,92 @@ payload_digest() {
     rm -rf -- "$temporary"
 }
 
+transition_digest() {
+    local architecture=$1 bridge_version=$2 old_sha=$3 new_sha=$4 old_binary_sha=$5 new_binary_sha=$6
+    printf '%s\n' \
+        "schema=$manifest_schema" \
+        "package=$package_name" \
+        "architecture=$architecture" \
+        "old_version=$old_version" \
+        "new_version=$new_version" \
+        "bridge_version=$bridge_version" \
+        "old_sha256=$old_sha" \
+        "new_sha256=$new_sha" \
+        "old_binary_sha256=$old_binary_sha" \
+        "new_binary_sha256=$new_binary_sha" |
+        sha256sum | awk '{print $1}'
+}
+
 write_bridge_scripts() {
-    local control=$1 expected_new_sha=$2
+    local control=$1 architecture=$2 bridge_version=$3 old_sha=$4 new_sha=$5
+    local old_binary_sha=$6 new_binary_sha=$7 expected_transition_sha=$8
     apply_control_version "$control/control" "$bridge_version"
     printf 'X-NFTFW-Rollback-Bridge: %s:%s\n' "$old_sha" "$new_sha" >>"$control/control"
+    printf 'X-NFTFW-Rollback-Transition: %s\n' "$expected_transition_sha" >>"$control/control"
     cat >"$control/preinst" <<EOF
 #!/bin/sh
 set -eu
-action=\${1:-}
-previous=\${2:-}
-[ "\$action" = upgrade ]
-[ "\$previous" = "$new_version" ]
-[ "\$(dpkg-query -W -f='\${db:Status-Abbrev} \${Version}' $package_name 2>/dev/null)" = "ii  $new_version" ]
-[ "\$(sha256sum /usr/lib/nftfw/nftfw | awk '{print \$1}')" = "$expected_new_sha" ]
+package=$package_name
+architecture=$architecture
+old_version=$old_version
+new_version=$new_version
+bridge_version=$bridge_version
+old_sha256=$old_sha
+new_sha256=$new_sha
+old_binary_sha256=$old_binary_sha
+new_binary_sha256=$new_binary_sha
+expected_transition_sha256=$expected_transition_sha
+binary=/usr/lib/nftfw/nftfw
 database=/var/lib/nftfw/generation-state/state.db
-if [ -e "\$database" ]; then
+
+[ "\$#" -eq 3 ]
+[ "\$1" = upgrade ]
+[ "\$2" = "\$new_version" ]
+[ "\$3" = "\$bridge_version" ]
+[ "\$(dpkg --print-architecture)" = "\$architecture" ]
+[ "\$(dpkg-query -W -f='\${db:Status-Abbrev} \${Version}' "\$package")" = "iHR \$new_version" ]
+
+transition_sha256=\$(
+    printf '%s\n' \\
+        "schema=$manifest_schema" \\
+        "package=\$package" \\
+        "architecture=\$architecture" \\
+        "old_version=\$old_version" \\
+        "new_version=\$new_version" \\
+        "bridge_version=\$bridge_version" \\
+        "old_sha256=\$old_sha256" \\
+        "new_sha256=\$new_sha256" \\
+        "old_binary_sha256=\$old_binary_sha256" \\
+        "new_binary_sha256=\$new_binary_sha256" |
+        sha256sum | awk '{print \$1}'
+)
+[ "\$transition_sha256" = "\$expected_transition_sha256" ]
+
+for directory in /usr /usr/lib /usr/lib/nftfw; do
+    [ -d "\$directory" ] && [ ! -L "\$directory" ]
+    directory_metadata=\$(stat -c '%u:%a' "\$directory")
+    directory_owner=\${directory_metadata%%:*}
+    directory_mode=\${directory_metadata#*:}
+    case "\$directory_mode" in *[!0-7]*|'') exit 1 ;; esac
+    [ "\$directory_owner" = 0 ]
+    [ "\$((0\$directory_mode & 0022))" -eq 0 ]
+done
+[ -f "\$binary" ] && [ ! -L "\$binary" ]
+[ "\$(stat -c '%u:%g:%a:%h' "\$binary")" = '0:0:755:1' ]
+[ "\$(sha256sum "\$binary" | awk '{print \$1}')" = "\$new_binary_sha256" ]
+
+if [ -e "\$database" ] || [ -L "\$database" ]; then
+    for directory in /var /var/lib /var/lib/nftfw /var/lib/nftfw/generation-state; do
+        [ -d "\$directory" ] && [ ! -L "\$directory" ]
+        directory_metadata=\$(stat -c '%u:%a' "\$directory")
+        directory_owner=\${directory_metadata%%:*}
+        directory_mode=\${directory_metadata#*:}
+        case "\$directory_mode" in *[!0-7]*|'') exit 1 ;; esac
+        [ "\$directory_owner" = 0 ]
+        [ "\$((0\$directory_mode & 0022))" -eq 0 ]
+    done
     [ -f "\$database" ] && [ ! -L "\$database" ]
+    [ "\$(stat -c '%u:%g:%a:%h' "\$database")" = '0:0:600:1' ]
     history=\$(sqlite3 -batch -noheader "file:\$database?mode=ro&immutable=1" \
         "SELECT group_concat(version, ',') FROM (SELECT version FROM schema_migrations ORDER BY version);")
     [ "\$history" = '1,2,3,4,5,6' ]
@@ -144,6 +215,7 @@ prepare_bundle() {
     [[ ! -e $bundle && ! -L $bundle ]] || fail "bundle target already exists"
     protected_directory_chain "${bundle%/*}" || fail "bundle parent is not protected"
     local architecture helper new_root stage bridge_tmp old_payload bridge_payload old_binary_sha new_binary_sha
+    local bridge_version transition_sha
     architecture=$(dpkg --print-architecture)
     case "$architecture" in amd64|arm64) ;; *) fail "unsupported architecture" ;; esac
     validate_deb "$old_package" "$old_version" "$expected_old_sha" "$architecture"
@@ -157,19 +229,23 @@ prepare_bundle() {
     bridge_tmp=$(mktemp /tmp/nftfw-rollback-bridge.XXXXXX.deb)
     trap 'rm -rf -- "$new_root" "$stage"; rm -f -- "$bridge_tmp"' RETURN
     dpkg-deb -x "$new_package" "$new_root"
-    [[ -f $new_root/usr/lib/nftfw/package-rollback && ! -L $new_root/usr/lib/nftfw/package-rollback ]] || fail "new package omits rollback helper"
+    regular_protected "$new_root/usr/lib/nftfw/package-rollback" || fail "new package rollback helper is unsafe"
+    regular_protected "$new_root/usr/lib/nftfw/nftfw" || fail "new package binary is unsafe"
     [[ $(sha "$helper") == $(sha "$new_root/usr/lib/nftfw/package-rollback") ]] || fail "helper is not bound to the new package"
     old_binary_sha=$(dpkg-deb --fsys-tarfile "$old_package" | tar -xOf - ./usr/lib/nftfw/nftfw | sha256sum | awk '{print $1}')
     new_binary_sha=$(sha "$new_root/usr/lib/nftfw/nftfw")
 
     dpkg-deb --raw-extract "$old_package" "$stage"
-    old_sha=$expected_old_sha
-    new_sha=$expected_new_sha
+    local old_sha=$expected_old_sha new_sha=$expected_new_sha
     bridge_version="$old_version~nftfwrollback1.${new_sha:0:12}"
-    write_bridge_scripts "$stage/DEBIAN" "$new_binary_sha"
+    transition_sha=$(transition_digest "$architecture" "$bridge_version" "$old_sha" "$new_sha" \
+        "$old_binary_sha" "$new_binary_sha")
+    write_bridge_scripts "$stage/DEBIAN" "$architecture" "$bridge_version" "$old_sha" "$new_sha" \
+        "$old_binary_sha" "$new_binary_sha" "$transition_sha"
     dpkg-deb --root-owner-group --build "$stage" "$bridge_tmp" >/dev/null
     [[ $(deb_field "$bridge_tmp" Version) == "$bridge_version" ]] || fail "rollback bridge version is invalid"
     [[ $(deb_field "$bridge_tmp" X-NFTFW-Rollback-Bridge) == "$old_sha:$new_sha" ]] || fail "rollback bridge identity is invalid"
+    [[ $(deb_field "$bridge_tmp" X-NFTFW-Rollback-Transition) == "$transition_sha" ]] || fail "rollback transition identity is invalid"
     old_payload=$(payload_digest "$old_package")
     bridge_payload=$(payload_digest "$bridge_tmp")
     [[ $old_payload == "$bridge_payload" ]] || fail "rollback bridge payload differs from exact 2.0.3"
@@ -193,6 +269,7 @@ helper_sha256=$(sha "$bundle/execute")
 old_payload_sha256=$old_payload
 old_binary_sha256=$old_binary_sha
 new_binary_sha256=$new_binary_sha
+transition_sha256=$transition_sha
 EOF
     chmod 0600 "$bundle/manifest"
     verify_bundle "$bundle"
@@ -216,7 +293,7 @@ verify_bundle() {
     for file in manifest old.deb new.deb bridge.deb execute; do
         regular_protected "$bundle/$file" || fail "bundle file is unsafe"
     done
-    [[ $(wc -l <"$manifest") -eq 13 ]] || fail "bundle manifest field count is invalid"
+    [[ $(wc -l <"$manifest") -eq 14 ]] || fail "bundle manifest field count is invalid"
     [[ $(manifest_value "$manifest" schema) == "$manifest_schema" ]]
     [[ $(manifest_value "$manifest" package) == "$package_name" ]]
     architecture=$(manifest_value "$manifest" architecture)
@@ -225,7 +302,7 @@ verify_bundle() {
     [[ $(manifest_value "$manifest" new_version) == "$new_version" ]]
     bridge_version=$(manifest_value "$manifest" bridge_version)
     [[ $bridge_version =~ ^2\.0\.3~nftfwrollback1\.[0-9a-f]{12}$ ]]
-    for key in old_sha256 new_sha256 bridge_sha256 helper_sha256 old_payload_sha256 old_binary_sha256 new_binary_sha256; do
+    for key in old_sha256 new_sha256 bridge_sha256 helper_sha256 old_payload_sha256 old_binary_sha256 new_binary_sha256 transition_sha256; do
         value=$(manifest_value "$manifest" "$key")
         [[ $value =~ ^[0-9a-f]{64}$ ]] || fail "bundle digest is invalid"
     done
@@ -241,6 +318,10 @@ verify_bundle() {
     [[ $(deb_field "$bundle/bridge.deb" Version) == "$bridge_version" ]]
     [[ $(deb_field "$bundle/bridge.deb" Architecture) == "$architecture" ]]
     [[ $(deb_field "$bundle/bridge.deb" X-NFTFW-Rollback-Bridge) == "$old_sha:$new_sha" ]]
+    [[ $(deb_field "$bundle/bridge.deb" X-NFTFW-Rollback-Transition) == $(manifest_value "$manifest" transition_sha256) ]]
+    [[ $(manifest_value "$manifest" transition_sha256) == $(transition_digest "$architecture" "$bridge_version" \
+        "$old_sha" "$new_sha" "$(manifest_value "$manifest" old_binary_sha256)" \
+        "$(manifest_value "$manifest" new_binary_sha256)") ]]
     [[ $(payload_digest "$bundle/old.deb") == $(manifest_value "$manifest" old_payload_sha256) ]]
     [[ $(payload_digest "$bundle/bridge.deb") == $(manifest_value "$manifest" old_payload_sha256) ]]
 }

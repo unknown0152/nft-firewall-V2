@@ -66,6 +66,10 @@
   and an exact-payload lower-version package-manager bridge before upgrade so
   the unmodified exact 2.0.3 package can be restored without dpkg-state edits,
   retained-state deletion, or maintainer-script bypass.
+- Bind that bridge to Debian 13's exact three-argument `iHR` pre-install
+  transition, the generated bridge version, architecture, package and binary
+  hashes, schema history, protected metadata, and verified bundle identity;
+  reject configured and every neighboring package state at that boundary.
 - Add setup, importer, routing, discovery, intent, rollback, benchmark,
   packaging, and reproducible-candidate validation.
 

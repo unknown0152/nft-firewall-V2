@@ -41,11 +41,12 @@ The clean-host result is:
 The current tree targets **2.1.0** and requires **Go 1.27.0**. Until Stage
 E-R2, tagging, and final publication approval are complete, local Stage E-R
 candidate artifacts are deliberately quarantined and cannot run or install.
-The last published stable line remains 2.0.3. The latest privileged 2.1.0 run
-hard-stopped on four release blockers: exact-2.0.3 absent-unit
-classification, first-setup dependency order, pre-guard IPv6 control frames,
-and exact package rollback. Amendment M corrects only those source contracts;
-complete renewed E-R2 validation is still required before a tag exists.
+The last published stable line remains 2.0.3. After Amendment M corrected its
+four prior blockers, the latest privileged 2.1.0 run reached the real Debian
+rollback and hard-stopped because the bridge expected configured `ii` after
+dpkg had already entered `iHR`. Amendment N corrects that exact transition
+contract. Complete renewed E-R2 validation is still required before a tag
+exists.
 
 ## Supported clean-host setup
 
@@ -126,7 +127,12 @@ Before a 2.0.3-to-2.1.0 package upgrade, the release-provided
 package-manager bridge carries the exact 2.0.3 payload at a temporary lower
 Debian version, allowing the unmodified exact 2.0.3 package to complete its
 own guarded installation without editing dpkg state or bypassing maintainer
-scripts.
+scripts. The bridge pre-install boundary accepts only Debian's exact
+three-argument downgrade call while `dpkg-query` reports the observed
+`iHR 2.1.0` transition. It also binds the generated bridge version,
+architecture, both package hashes, both binary hashes, optional exact
+schema-6 history, protected file metadata, and the verified bundle transition
+identity; configured or neighboring package states fail closed.
 
 The VPN importer accepts only documented WireGuard data fields. It rejects
 hooks, commands, `SaveConfig`, provider routing directives, split tunnels,
