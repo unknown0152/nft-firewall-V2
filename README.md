@@ -45,7 +45,9 @@ The last published stable line remains 2.0.3. After Amendment M corrected its
 four prior blockers, the latest privileged 2.1.0 run reached the real Debian
 rollback and hard-stopped because the bridge expected configured `ii` after
 dpkg had already entered `iHR`. Amendment N corrects that exact transition
-contract. Complete renewed E-R2 validation is still required before a tag
+contract. Its disposable source regression also found and corrected the
+legacy pre-install backup's same-lock self-deadlock while retaining the real
+global lock. Complete renewed E-R2 validation is still required before a tag
 exists.
 
 ## Supported clean-host setup

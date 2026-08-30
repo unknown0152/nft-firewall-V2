@@ -32,6 +32,7 @@ publication decision must remain external and checksummed.
 | Disposable real-nft setup-guard regression | PASS, narrowly scoped source gate; not E-R2 |
 | Disposable initramfs guard namespace regression | PASS; later interface inherits IPv6 disabled, loopback remains enabled, exact guard loads, unreadable archive refuses |
 | Disposable exact-package rollback bundle regression | PASS; protected inputs, exact payload-equivalent bridge, generated-script exact `iHR` acceptance plus argument/state/identity/metadata refusal, tamper/path coverage, no host dpkg install |
+| Disposable exact-package rollback transaction | PASS; complete, configured-bridge resume, and idempotent paths restore exact 2.0.3 and protected snapshots; external canonical-lock probe remains blocked while legacy backup succeeds through the private dpkg lock view; no lock residue |
 | Static amd64/arm64 CI package build and inspection | PASS |
 | Dependency/license inventory | PASS, 29 non-main modules |
 | Overall statement coverage | PASS, 76.7% |
@@ -99,8 +100,9 @@ publication decision must remain external and checksummed.
   only dpkg descendants see a fresh protected lock inode in a private mount
   namespace, allowing the historical 2.0.3 backup without an unlocked handoff.
   It permits the unmodified 2.0.3 package to finish without dpkg-status edits,
-  state deletion, or manual file copy. Full disposable rerun is pending after
-  NFV2-060 exposed the previous same-lock self-deadlock.
+  state deletion, or manual file copy. The complete disposable rerun passes
+  after NFV2-060 exposed and the source corrected the previous same-lock
+  self-deadlock.
 - Managed `expose` and `lan` changes compiled from the newly published
   protected files rather than stale daemon memory.
 - Checksummed managed-change journal recovery for pre-apply, applied,

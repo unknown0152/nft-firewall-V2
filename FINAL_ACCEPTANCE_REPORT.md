@@ -102,8 +102,10 @@ identity-bound approval.
 The latest approved R2 attempt passed the corrected Amendment M boundaries and
 every preceding still-useful independent row, then hard-stopped without a tag
 when Debian entered `iHR` before the bridge `preinst` that incorrectly
-required configured `ii`. The corrected source requires a new identity-bound
-E-R2 approval and complete renewed E–N run, including two-boot zero-packet
-capture and full two-step dpkg rollback execution.
+required configured `ii`. The corrected source's full disposable package
+transaction now passes, including parent-lock contention and legacy-backup
+isolation. It still requires a new identity-bound E-R2 approval and complete
+renewed E–N run, including two-boot zero-packet capture and the repeated
+two-step dpkg rollback row.
 
 R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED
