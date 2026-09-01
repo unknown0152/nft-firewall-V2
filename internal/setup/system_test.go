@@ -793,6 +793,10 @@ func TestRuntimeAPIReadinessUsesStatusAndAuthenticatedControl(t *testing.T) {
 		cancel()
 		t.Fatalf("protected daemon API readiness failed: %v", err)
 	}
+	if _, err := api.Call(context.Background(), controlPath, api.Request{Op: "reconcile"}); err == nil || err.Error() != "not used" {
+		cancel()
+		t.Fatalf("fixture control handler accepted a non-status operation: %v", err)
+	}
 	cancel()
 	<-done
 }
@@ -2314,7 +2318,10 @@ func (h setupAPIHandler) Status(context.Context) (any, error) {
 	return h.status, nil
 }
 
-func (h setupAPIHandler) Control(context.Context, api.Request) (any, error) {
+func (h setupAPIHandler) Control(_ context.Context, request api.Request) (any, error) {
+	if request.Op == "status" {
+		return h.status, nil
+	}
 	return nil, errors.New("not used")
 }
 

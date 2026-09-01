@@ -52,6 +52,13 @@ func TestBackupEvidenceHelpersFailClosed(t *testing.T) {
 		if err := os.Mkdir(unsafe, 0o750); err != nil {
 			t.Fatal(err)
 		}
+		if err := os.Chmod(unsafe, 0o750); err != nil {
+			t.Fatal(err)
+		}
+		unsafeInfo, err := os.Lstat(unsafe)
+		if err != nil || !unsafeInfo.IsDir() || unsafeInfo.Mode().Perm() != 0o750 {
+			t.Fatalf("unsafe backup fixture mode was not established exactly: %v %v", unsafeInfo, err)
+		}
 		if err := validateBackupDirectory(unsafe); err == nil || err.Error() != "SETUP_BACKUP_DIRECTORY_UNSAFE" {
 			t.Fatalf("group-accessible backup directory was accepted: %v", err)
 		}
@@ -386,6 +393,13 @@ func TestJournalHistoryHelpersFailClosed(t *testing.T) {
 	unsafe := filepath.Join(root, "unsafe")
 	if err := os.Mkdir(unsafe, 0o750); err != nil {
 		t.Fatal(err)
+	}
+	if err := os.Chmod(unsafe, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	unsafeInfo, err := os.Lstat(unsafe)
+	if err != nil || !unsafeInfo.IsDir() || unsafeInfo.Mode().Perm() != 0o750 {
+		t.Fatalf("unsafe history fixture mode was not established exactly: %v %v", unsafeInfo, err)
 	}
 	if err := secureHistoryDirectory(unsafe); err == nil || err.Error() != "SETUP_JOURNAL_HISTORY_UNSAFE" {
 		t.Fatalf("group-readable history was accepted: %v", err)

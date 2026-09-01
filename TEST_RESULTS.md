@@ -1,11 +1,11 @@
 # NFT Firewall V2 2.1.0 Source Test Results
 
-Source disposition: **AMENDMENT X SOURCE VALIDATED; CANDIDATES PENDING**
+Source disposition: **AMENDMENT Y SOURCE VALIDATED; CANDIDATES PENDING**
 
 Validation date: 2026-09-01
 
 Reopened source baseline:
-`e59cacbf81cd1851cc52530074209c84eb1ac3d9`
+`e48d071783cd9a62ad3424c917957e4f0e6ea06a`
 
 This tracked report is the pre-build source snapshot. The later frozen commit,
 candidate build evidence, candidate comparison, R2 evidence, tag, and any
@@ -20,6 +20,7 @@ publication decision must remain external and checksummed.
 | Module verification and tidy diff | PASS |
 | Full unit/regression suite | PASS |
 | Full unit/regression suite with `umask 0077` | PASS, disposable unprivileged environment |
+| Full unit/regression suite as root with `umask 0077` | PASS, fresh disposable Debian 13 guest; affected fixtures also passed independently first |
 | Race suite | PASS |
 | Vet | PASS |
 | Staticcheck v0.8.1 | PASS |
@@ -138,15 +139,18 @@ publication decision must remain external and checksummed.
   evidence separation.
 - Security-sensitive mode-refusal fixtures set and verify their intended mode;
   an isolated `umask 0077` regression proves mode-`0600` handling and explicit
-  mode-`0644` refusal without changing the runtime helper.
+  mode-`0644` refusal without changing the runtime helper. Amendment Y also
+  explicitly sets and verifies both intended mode-`0750` unsafe directory
+  fixtures and proves the root-only readiness fixture accepts authenticated
+  control-socket status while refusing every non-status operation.
 
 ## Performance source results
 
 The repeated source matrix remained inside the Amendment E budgets on the
 reference NUC. Amendment X's GRUB generated-entry verifier measured
-2.095-2.401 microseconds/op, 4672 B/op, and 22 allocations/op. The strict
+2.109-2.684 microseconds/op, 4672 B/op, and 22 allocations/op. The strict
 retained-state classifier was measured in ten independent samples at
-1.340-1.412 ms/op, 230852-231690 B/op, and 1040-1041 allocations/op. It
+1.344-1.424 ms/op, 231255-249600 B/op, and 1040-1044 allocations/op. It
 includes canonical journal/history reads, exact backup
 verification, schema-6 generation inspection, immutable snapshot checks, and
 read-only provenance validation. Performance evidence is not privileged
@@ -155,13 +159,18 @@ network proof.
 ## Not executed under Stage E-R
 
 Successive approval-bound R2/source-disposable attempts hard-stopped safely
-and led through NFV2-061. Amendment W's retry, managed-transaction, and native
+and led through NFV2-064. Amendment W's retry, managed-transaction, and native
 initramfs lifecycle rows pass. The preserved W11 baseline reopened NFV2-057
 when two IPv6 control frames left the guest before init-top readiness.
-Amendment X is the separately approved source correction, and its complete
-source-stage capture, boot/package, quality, coverage, fuzz, benchmark, and
-scan-ready matrix now passes. This tracked snapshot still precedes the clean
-freeze and independent quarantined candidate builds.
+Amendment X passed its source-stage capture, boot/package, quality, coverage,
+fuzz, benchmark, and scan-ready matrix, froze as
+`e48d071783cd9a62ad3424c917957e4f0e6ea06a`, and produced two identical
+quarantined candidates. The following E-R2 stopped before package construction
+when both independent private-build guests exposed the same three privileged
+test-fixture defects. Amendment Y explicitly corrects only those fixtures.
+The affected tests and complete suite now pass both unprivileged and as root
+under `umask 0077` in a fresh disposable guest. This tracked snapshot precedes
+the replacement clean freeze and independent quarantined candidate builds.
 
 | Gate | Result |
 | --- | --- |

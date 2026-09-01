@@ -11,16 +11,16 @@ Release approval status: STAGE_R_CANDIDATE_ONLY
 | Build date | `@BUILD_DATE@` |
 | Build disposition | `@RELEASE_DISPOSITION@` |
 | Artifact label | `@RELEASE_ARTIFACT_LABEL@` |
-| Source-only Stage E-R | AMENDMENT X SOURCE GATES PASS; CANDIDATES PENDING |
-| Privileged Stage E-R2 | NOT AUTHORIZED for the Amendment X working tree |
+| Source-only Stage E-R | AMENDMENT Y SOURCE GATES PASS; CANDIDATES PENDING |
+| Privileged Stage E-R2 | NOT AUTHORIZED for the Amendment Y working tree |
 | Publication | NOT AUTHORIZED |
 | Deployment | NOT AUTHORIZED |
 
 ## Source decision
 
-The 2.1.0 working source has passed the Amendment X gate set and is accepted
+The 2.1.0 working source has passed the Amendment Y gate set and is accepted
 for a clean source freeze and the two intrinsically nondeployable candidate
-builds. The approved Amendment X source scope
+builds. The retained Amendment E-through-X source scope
 includes Go 1.27, one-file managed setup, strict VPN import, managed routing,
 strict managed Docker IPv4 bridge adoption and forwarding ownership,
 the explicit dry-run-only existing-host adoption planner, CLI/dashboard
@@ -44,7 +44,11 @@ live installation, firewall application, VPN interruption, or deployment.
   ShellCheck, fuzz, source-contract, systemd, coverage, and benchmark gates.
 - Explicit mode fixtures and an isolated `umask 0077` regression preserve the
   mode-`0600`/root-ownership acceptance boundary and mode-`0644` refusal; the
-  complete suite also passes with `umask 0077` in an unprivileged environment.
+  two intended unsafe directory fixtures explicitly establish and verify
+  mode `0750`. The authenticated-control readiness fixture serves only status
+  and directly refuses a non-status control operation. The complete suite
+  passes with `umask 0077` both unprivileged and as root in a fresh disposable
+  Debian 13 guest.
 - Overall statement coverage at least 75%, with all five new core packages at
   or above 90%; the new bootguard package is also above 90%.
 - Clean-host routing uses bounded numeric all-table JSON: an absent reserved
@@ -122,14 +126,18 @@ tag, remote publication, or current-server deployment requires still later
 identity-bound approval.
 
 Successive approved R2/source-disposable attempts hard-stopped safely and led
-through NFV2-061. Amendment W's W6 protected matrix passes exact retry,
+through NFV2-064. Amendment W's W6 protected matrix passes exact retry,
 generation-3 success, Docker VPN/leak recovery, and two managed boots; W7
 passes the real native initramfs package lifecycle. W11 then failed the
 mandatory zero-pre-readiness-packet gate: two IPv6 MLD/DAD frames left the
 guest before init-top readiness. Amendment X implements the approved
 pre-driver correction. Its complete source-stage disposable and source
-validation now passes, so the clean freeze and two quarantined candidate
-builds may proceed. E-R2, tagging, publication, installation, and deployment
-remain outside this report.
+validation passed and froze as
+`e48d071783cd9a62ad3424c917957e4f0e6ea06a`. Its E-R2 private-build stage then
+exposed three deterministic privileged fixture failures before package
+construction. Amendment Y corrects only those fixtures; its focused and full
+ordinary/restrictive/root-disposable suites pass. The replacement clean freeze
+and two quarantined candidate builds may proceed. E-R2, tagging, publication,
+installation, and deployment remain outside this report.
 
 R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED

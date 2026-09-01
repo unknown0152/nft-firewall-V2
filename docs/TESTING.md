@@ -1,6 +1,6 @@
 # Testing
 
-Current disposition: **2.1.0 AMENDMENT X STAGE E-R SOURCE GATES PASS**.
+Current disposition: **2.1.0 AMENDMENT Y STAGE E-R SOURCE GATES PASS**.
 Source-only results are consolidated in `TEST_RESULTS.md`. The narrowly
 approved source-stage disposable GRUB/boot, native-initramfs, setup-guard, and
 exact-package rollback preflights have run. The complete namespace, Docker,
@@ -102,6 +102,24 @@ and verify mode `0644` before asserting refusal. The full unprivileged suite is
 also rerun under `umask 0077`; no security refusal fixture may depend on the
 invoking shell's ambient mask.
 
+Amendment Y adds a required fresh-disposable-guest root pass. The two
+directory refusal fixtures explicitly `chmod` and verify mode `0750` before
+calling the production validators. The root-only daemon-readiness fixture
+serves a healthy status through both API sockets and proves a non-status
+control operation still returns its fixed refusal. Run the affected tests
+first and then the complete suite, both under the restrictive mask:
+
+```bash
+(umask 0077; go test -count=1 \
+  -run 'TestBackupEvidenceHelpersFailClosed|TestJournalHistoryHelpersFailClosed|TestRuntimeAPIReadinessUsesStatusAndAuthenticatedControl' \
+  -v ./internal/setup)
+(umask 0077; go test -count=1 ./...)
+```
+
+This root pass belongs only in a disposable Debian 13 guest. It must not run
+on an operator host or be replaced by a changed umask, skipped test, filtered
+exit status, or external handler workaround.
+
 Managed setup transaction tests use both a phase-injectable executor and the
 real setup `Engine` plus `System`. They prove direct first setup and dry-run
 followed by first setup discover the clean host before a journal exists, the
@@ -132,12 +150,16 @@ Direct tests cover BIOS/EFI identity, competing managers, mount/mode/link/race
 refusals, generated-entry parsing, duplicate/quoted/conflicting arguments,
 bounded update failure, exact pre-reboot rollback, same-boot reentry, explicit
 reboot/resume, post-reboot rollback disposition, package handoff, and output
-redaction. The disposable X matrix now passes failed update, both
+redaction. The disposable X matrix passed failed update, both
 process-death sides, rollback finalization, package removal, two consecutive
 managed boots with zero packets before readiness, expected traffic after
 readiness, and a contradictory boot identity with zero guest packets. The
-complete source gate rerun also passes; candidate construction follows only
-from the new clean frozen commit.
+complete X source gate rerun passed and froze as
+`e48d071783cd9a62ad3424c917957e4f0e6ea06a`. Its E-R2 build stage then stopped
+before package construction when two independent guests reproduced the three
+fixture defects corrected by Amendment Y. The Amendment Y focused and full
+root restrictive-umask regression now passes; replacement candidate
+construction follows only from the new clean frozen commit.
 
 The setup-guard unit regression covers one and multiple endpoint `/32`
 elements, exact interval flags, deterministic order, malformed/broader-prefix
