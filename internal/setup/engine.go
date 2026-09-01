@@ -6,6 +6,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"path/filepath"
+	"reflect"
 	"time"
 )
 
@@ -14,6 +16,7 @@ type Phase string
 const (
 	PhaseInspect  Phase = "inspect"
 	PhaseBackup   Phase = "backup"
+	PhaseBootPrep Phase = "boot_prepare"
 	PhaseGuard    Phase = "guard"
 	PhaseInstall  Phase = "install"
 	PhaseDocker   Phase = "docker"
@@ -31,9 +34,12 @@ const (
 )
 
 type Plan struct {
-	VPNSource   string
-	Summary     Summary
-	PrivateData any
+	VPNSource          string
+	Summary            Summary
+	PrivateData        any
+	PriorJournalSHA256 string
+	ResumeJournal      *Journal
+	ResumeReady        bool
 }
 
 type Summary struct {
@@ -46,6 +52,7 @@ type Summary struct {
 	PublicTCP         []int    `json:"public_tcp"`
 	PublicUDP         []int    `json:"public_udp"`
 	IPv6Mode          string   `json:"ipv6_mode"`
+	BootPolicy        string   `json:"boot_policy,omitempty"`
 	DockerMode        string   `json:"docker_mode"`
 	DockerNetworks    []string `json:"docker_networks,omitempty"`
 	DockerRestart     bool     `json:"docker_restart_required"`
@@ -82,17 +89,26 @@ type Executor interface {
 	PublishFinalDependencies(context.Context, Plan) error
 	EnableBoot(context.Context, Plan) error
 	Finalize(context.Context, Plan) error
+	GenerationCommitted(context.Context, uint64) (bool, error)
 	Rollback(context.Context, Plan, Journal) error
 	RecoverCommitted(context.Context, Plan, Journal) error
 }
 
-type JournalStore interface {
-	Write(Journal) error
-	Read() (Journal, error)
+type bootTransactionExecutor interface {
+	BootTransactionRequired(Plan) bool
+	PrepareBoot(context.Context, Plan) error
+	VerifyBootResume(context.Context, Plan) error
 }
 
-type CommitInspector interface {
-	GenerationCommitted(context.Context, uint64) (bool, error)
+var (
+	ErrRebootRequired         = errors.New("SETUP_REBOOT_REQUIRED")
+	ErrRollbackRebootRequired = errors.New("SETUP_ROLLBACK_REBOOT_REQUIRED")
+)
+
+type JournalStore interface {
+	Begin(Journal, string) error
+	Write(Journal) error
+	Read() (Journal, error)
 }
 
 type Engine struct {
@@ -138,28 +154,73 @@ func (e Engine) Run(ctx context.Context, vpnPath string) (Plan, error) {
 		timeout = 15 * time.Minute
 	}
 	started := now().UTC()
-	journal := Journal{
-		Schema: "nftfw.setup-journal.v1", Transaction: newID(),
-		Phase: PhaseInspect, Status: "running", StartedAt: started,
-		UpdatedAt: started, Deadline: started.Add(timeout), Summary: plan.Summary,
-	}
-	// Publishing the initial journal is the durable boundary immediately before
-	// the first mutation-capable phase. If publication fails, no setup phase has
-	// run and rollback would have neither a backup nor changed state to restore.
-	if err := e.Journal.Write(journal); err != nil {
-		return Plan{}, errors.New("SETUP_JOURNAL_WRITE_FAILED")
+	journal := Journal{}
+	bootExecutor, bootRequired := e.Executor.(bootTransactionExecutor)
+	bootRequired = bootRequired && bootExecutor.BootTransactionRequired(plan)
+	if plan.ResumeJournal != nil {
+		journal = *plan.ResumeJournal
+		if !bootRequired || !rebootRequiredJournal(journal) ||
+			!reflect.DeepEqual(journal.Summary, plan.Summary) {
+			return Plan{}, errors.New("SETUP_RESUME_STATE_INVALID")
+		}
+		if !plan.ResumeReady {
+			return plan, ErrRebootRequired
+		}
+		journal.Status, journal.ErrorCode = "resume_ready", ""
+		journal.UpdatedAt, journal.Deadline = started, started.Add(timeout)
+		if err := e.Journal.Write(journal); err != nil {
+			return Plan{}, errors.New("SETUP_JOURNAL_WRITE_FAILED")
+		}
+		if err := bootExecutor.VerifyBootResume(ctx, plan); err != nil {
+			return Plan{}, e.fail(ctx, plan, journal, err)
+		}
+		journal.Status, journal.UpdatedAt = "running", now().UTC()
+		if err := e.Journal.Write(journal); err != nil {
+			return Plan{}, e.fail(ctx, plan, journal, errors.New("SETUP_JOURNAL_WRITE_FAILED"))
+		}
+	} else {
+		journal = Journal{
+			Schema: "nftfw.setup-journal.v1", Transaction: newID(),
+			Phase: PhaseInspect, Status: "running", StartedAt: started,
+			UpdatedAt: started, Deadline: started.Add(timeout), Summary: plan.Summary,
+		}
+		// Publishing the initial journal is the durable boundary immediately before
+		// the first mutation-capable phase. If publication fails, no setup phase has
+		// run and rollback would have neither a backup nor changed state to restore.
+		if err := e.Journal.Begin(journal, plan.PriorJournalSHA256); err != nil {
+			return Plan{}, errors.New("SETUP_JOURNAL_WRITE_FAILED")
+		}
+		journal.Phase, journal.UpdatedAt = PhaseBackup, now().UTC()
+		if err := e.Journal.Write(journal); err != nil {
+			return Plan{}, e.fail(ctx, plan, journal, errors.New("SETUP_JOURNAL_WRITE_FAILED"))
+		}
+		backup, backupErr := e.Executor.Backup(ctx, plan)
+		if backupErr != nil {
+			return Plan{}, e.fail(ctx, plan, journal, backupErr)
+		}
+		journal.BackupDir, journal.UpdatedAt = backup, now().UTC()
+		if err := e.Journal.Write(journal); err != nil {
+			return Plan{}, e.fail(ctx, plan, journal, errors.New("SETUP_JOURNAL_WRITE_FAILED"))
+		}
+		if bootRequired {
+			journal.Phase, journal.UpdatedAt = PhaseBootPrep, now().UTC()
+			if err := e.Journal.Write(journal); err != nil {
+				return Plan{}, e.fail(ctx, plan, journal, errors.New("SETUP_JOURNAL_WRITE_FAILED"))
+			}
+			if err := bootExecutor.PrepareBoot(ctx, plan); err != nil {
+				return Plan{}, e.fail(ctx, plan, journal, err)
+			}
+			journal.Status, journal.ErrorCode, journal.UpdatedAt = "reboot_required", "", now().UTC()
+			if err := e.Journal.Write(journal); err != nil {
+				return Plan{}, e.fail(ctx, plan, journal, errors.New("SETUP_JOURNAL_WRITE_FAILED"))
+			}
+			return plan, ErrRebootRequired
+		}
 	}
 	steps := []struct {
 		phase Phase
 		run   func() error
 	}{
-		{PhaseBackup, func() error {
-			backup, err := e.Executor.Backup(ctx, plan)
-			if err == nil {
-				journal.BackupDir = backup
-			}
-			return err
-		}},
 		{PhaseGuard, func() error { return e.Executor.StartGuard(ctx, plan) }},
 		{PhaseInstall, func() error { return e.Executor.Install(ctx, plan) }},
 		{PhaseDocker, func() error { return e.Executor.ConfigureDocker(ctx, plan) }},
@@ -216,7 +277,7 @@ func (e Engine) RollbackExpired(ctx context.Context, plan Plan) (bool, error) {
 	if err != nil {
 		return false, err
 	}
-	if journal.Status != "running" {
+	if !journalNeedsRecovery(journal.Status) {
 		return false, nil
 	}
 	now := time.Now
@@ -230,70 +291,105 @@ func (e Engine) RollbackExpired(ctx context.Context, plan Plan) (bool, error) {
 }
 
 func (e Engine) fail(ctx context.Context, plan Plan, journal Journal, cause error) error {
+	now := time.Now
+	if e.Now != nil {
+		now = e.Now
+	}
 	if journalBeforeProtectedMutation(journal) {
 		journal.Phase, journal.Status = PhaseFailed, "rolled_back"
 		journal.ErrorCode = errorCode(cause)
-		journal.UpdatedAt = time.Now().UTC()
-		if e.Now != nil {
-			journal.UpdatedAt = e.Now().UTC()
+		journal.UpdatedAt = now().UTC()
+		if err := e.Journal.Write(journal); err != nil {
+			return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
 		}
-		_ = e.Journal.Write(journal)
 		return errors.New(errorCode(cause))
 	}
-	if !journal.Committed && journal.Generation != 0 {
-		if inspector, ok := e.Executor.(CommitInspector); ok {
-			inspectionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
-			committed, err := inspector.GenerationCommitted(inspectionCtx, journal.Generation)
-			cancel()
-			if err != nil {
-				journal.Status = "commit_state_unknown"
-				journal.ErrorCode = "SETUP_COMMIT_STATE_UNKNOWN"
-				_ = e.Journal.Write(journal)
-				return errors.New("SETUP_COMMIT_STATE_UNKNOWN")
+	uncommittedKnown := journal.Status == "rolling_back" || journal.Status == "rollback_failed"
+	if !journal.Committed && !uncommittedKnown && journal.Generation != 0 {
+		inspectionCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 15*time.Second)
+		committed, inspectionErr := e.Executor.GenerationCommitted(inspectionCtx, journal.Generation)
+		cancel()
+		if inspectionErr != nil {
+			journal.Status = "commit_state_unknown"
+			journal.ErrorCode = "SETUP_COMMIT_STATE_UNKNOWN"
+			journal.UpdatedAt = now().UTC()
+			if writeErr := e.Journal.Write(journal); writeErr != nil {
+				return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
 			}
-			journal.Committed = committed
+			return errors.New("SETUP_COMMIT_STATE_UNKNOWN")
 		}
+		journal.Committed = committed
 	}
 	if journal.Committed {
 		journal.Status = "recovering_committed"
 		journal.ErrorCode = errorCode(cause)
-		_ = e.Journal.Write(journal)
+		journal.UpdatedAt = now().UTC()
+		if err := e.Journal.Write(journal); err != nil {
+			return errors.New("SETUP_RECOVERY_TRANSITION_WRITE_FAILED")
+		}
 		recoveryCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-		defer cancel()
-		if err := e.Executor.RecoverCommitted(recoveryCtx, plan, journal); err != nil {
+		recoveryErr := e.Executor.RecoverCommitted(recoveryCtx, plan, journal)
+		cancel()
+		if recoveryErr != nil {
 			journal.Status = "committed_recovery_failed"
-			_ = e.Journal.Write(journal)
+			journal.ErrorCode = errorCode(recoveryErr)
+			journal.UpdatedAt = now().UTC()
+			if err := e.Journal.Write(journal); err != nil {
+				return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
+			}
 			return fmt.Errorf("%s; SETUP_COMMITTED_RECOVERY_FAILED", errorCode(cause))
 		}
-		journal.Phase, journal.Status, journal.UpdatedAt = PhaseComplete, "complete", time.Now().UTC()
-		if e.Now != nil {
-			journal.UpdatedAt = e.Now().UTC()
+		journal.Phase, journal.Status, journal.UpdatedAt = PhaseComplete, "complete", now().UTC()
+		journal.ErrorCode = ""
+		if err := e.Journal.Write(journal); err != nil {
+			return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
 		}
-		_ = e.Journal.Write(journal)
 		return errors.New("SETUP_COMMITTED_RECOVERED")
 	}
-	journal.Phase, journal.Status = PhaseRollback, "rolling_back"
+	// Status records the recovery transition while Phase retains the durable
+	// originating setup phase needed for exact tunnel cleanup after another
+	// process death. No schema extension is required.
+	journal.Status = "rolling_back"
 	journal.ErrorCode = errorCode(cause)
-	journal.UpdatedAt = time.Now().UTC()
-	if e.Now != nil {
-		journal.UpdatedAt = e.Now().UTC()
+	journal.UpdatedAt = now().UTC()
+	if err := e.Journal.Write(journal); err != nil {
+		return errors.New("SETUP_RECOVERY_TRANSITION_WRITE_FAILED")
 	}
-	_ = e.Journal.Write(journal)
 	rollbackCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), 2*time.Minute)
-	defer cancel()
 	rollbackErr := e.Executor.Rollback(rollbackCtx, plan, journal)
-	journal.Phase, journal.UpdatedAt = PhaseFailed, time.Now().UTC()
-	if e.Now != nil {
-		journal.UpdatedAt = e.Now().UTC()
+	cancel()
+	journal.UpdatedAt = now().UTC()
+	if errors.Is(rollbackErr, ErrRollbackRebootRequired) {
+		journal.Phase, journal.Status = PhaseFailed, "rollback_reboot_required"
+		journal.ErrorCode = ""
+		if err := e.Journal.Write(journal); err != nil {
+			return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
+		}
+		return ErrRollbackRebootRequired
 	}
 	if rollbackErr != nil {
 		journal.Status = "rollback_failed"
-		_ = e.Journal.Write(journal)
+		journal.ErrorCode = errorCode(rollbackErr)
+		if err := e.Journal.Write(journal); err != nil {
+			return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
+		}
 		return fmt.Errorf("%s; SETUP_ROLLBACK_FAILED", errorCode(cause))
 	}
-	journal.Status = "rolled_back"
-	_ = e.Journal.Write(journal)
+	journal.Phase, journal.Status = PhaseFailed, "rolled_back"
+	if err := e.Journal.Write(journal); err != nil {
+		return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
+	}
 	return errors.New(errorCode(cause))
+}
+
+func journalNeedsRecovery(status string) bool {
+	switch status {
+	case "running", "resume_ready", "rolling_back", "recovering_committed", "rollback_failed",
+		"commit_state_unknown", "committed_recovery_failed":
+		return true
+	default:
+		return false
+	}
 }
 
 func journalBeforeProtectedMutation(journal Journal) bool {
@@ -301,6 +397,16 @@ func journalBeforeProtectedMutation(journal Journal) bool {
 		return false
 	}
 	return journal.Phase == PhaseInspect || journal.Phase == PhaseBackup
+}
+
+func rebootRequiredJournal(journal Journal) bool {
+	return journal.Schema == "nftfw.setup-journal.v1" &&
+		journalIdentityPattern.MatchString(journal.Transaction) &&
+		journal.Phase == PhaseBootPrep &&
+		(journal.Status == "reboot_required" || journal.Status == "resume_ready") &&
+		!journal.Committed && journal.Generation == 0 && journal.BackupDir != "" &&
+		filepath.IsAbs(journal.BackupDir) && filepath.Clean(journal.BackupDir) == journal.BackupDir &&
+		journal.Summary.Schema == "nftfw.setup-plan.v1" && journal.ErrorCode == ""
 }
 
 func errorCode(err error) string {

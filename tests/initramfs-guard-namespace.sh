@@ -26,11 +26,23 @@ timeout 30s unshare --mount --net --fork --kill-child bash -Eeuo pipefail -c '
     sha256sum /etc/nftfw/initramfs-guard.nft \
         >/etc/nftfw/initramfs-guard.sha256
     chmod 0600 /etc/nftfw/initramfs-guard.sha256
-    "$root_dir/packaging/initramfs/nftfw-ipv6-early"
-    [[ $(sysctl -n net.ipv6.conf.default.disable_ipv6) == 1 ]]
-    [[ $(sysctl -n net.ipv6.conf.lo.disable_ipv6) == 0 ]]
+    before_default=$(sysctl -n net.ipv6.conf.default.disable_ipv6)
+    before_loopback=$(sysctl -n net.ipv6.conf.lo.disable_ipv6)
+    printf "%s\n" "root=/dev/test ro ipv6.disable=1" >/run/nftfw-test-cmdline
+    printf "%s\n" Y >/run/nftfw-test-ipv6-disable
+    : >/run/nftfw-test-if-inet6
+    sed \
+        -e "s|/proc/cmdline|/run/nftfw-test-cmdline|g" \
+        -e "s|/sys/module/ipv6/parameters/disable|/run/nftfw-test-ipv6-disable|g" \
+        -e "s|/proc/net/if_inet6|/run/nftfw-test-if-inet6|g" \
+        "$root_dir/packaging/initramfs/nftfw-ipv6-early" \
+        >/run/nftfw-ipv6-early-test
+    chmod 0700 /run/nftfw-ipv6-early-test
+    /run/nftfw-ipv6-early-test
+    [[ $(sysctl -n net.ipv6.conf.default.disable_ipv6) == "$before_default" ]]
+    [[ $(sysctl -n net.ipv6.conf.lo.disable_ipv6) == "$before_loopback" ]]
     ip link add nftfwtest0 type dummy
-    [[ $(sysctl -n net.ipv6.conf.nftfwtest0.disable_ipv6) == 1 ]]
+    [[ $(sysctl -n net.ipv6.conf.nftfwtest0.disable_ipv6) == "$before_default" ]]
     nft --json list table inet nftfw_initramfs_guard >/dev/null
     [[ -s /run/nftfw-initramfs/guard-ready.sha256 ]]
 

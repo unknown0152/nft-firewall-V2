@@ -131,6 +131,8 @@ chmod 0600 "$transition_root/var/lib/nftfw/generation-state/state.db"
 printf '%s\n' "$architecture" >"$transition_root/test/architecture"
 printf 'iHR 2.1.0\n' >"$transition_root/test/status"
 printf '1,2,3,4,5,6\n' >"$transition_root/test/history"
+printf '106\n' >"$transition_root/test/state-gid"
+chown root:106 "$transition_root/var/lib/nftfw/generation-state/state.db"
 
 cat >"$transition_root/test/bin/dpkg" <<'EOF'
 #!/bin/sh
@@ -151,8 +153,13 @@ cat >"$transition_root/test/bin/sqlite3" <<'EOF'
     [ "$4" = "SELECT group_concat(version, ',') FROM (SELECT version FROM schema_migrations ORDER BY version);" ] || exit 1
 cat /test/history
 EOF
+cat >"$transition_root/test/bin/id" <<'EOF'
+#!/bin/sh
+[ "$#" -eq 2 ] && [ "$1" = -g ] && [ "$2" = nftfw-web ] || exit 1
+cat /test/state-gid
+EOF
 chmod 0755 "$transition_root/test/bin/dpkg" "$transition_root/test/bin/dpkg-query" \
-    "$transition_root/test/bin/sqlite3"
+    "$transition_root/test/bin/id" "$transition_root/test/bin/sqlite3"
 
 run_preinst() {
     chroot "$transition_root" /bin/sh -c 'PATH=/test/bin:/bin; export PATH; exec /preinst "$@"' preinst "$@"
@@ -169,6 +176,9 @@ expect_refusal() {
 
 # Exact Debian 13 downgrade boundary observed by the disposable dpkg probe.
 run_preinst upgrade 2.1.0 "$bridge_version"
+chown root:root "$transition_root/var/lib/nftfw/generation-state/state.db"
+run_preinst upgrade 2.1.0 "$bridge_version"
+chown root:106 "$transition_root/var/lib/nftfw/generation-state/state.db"
 mv "$transition_root/var/lib/nftfw/generation-state/state.db" \
     "$transition_root/test/database.absent"
 run_preinst upgrade 2.1.0 "$bridge_version"
@@ -227,7 +237,15 @@ expect_refusal 'database permission mismatch' upgrade 2.1.0 "$bridge_version"
 chmod 0600 "$database"
 chown 65534:65534 "$database"
 expect_refusal 'database ownership mismatch' upgrade 2.1.0 "$bridge_version"
-chown root:root "$database"
+chown root:106 "$database"
+printf '0\n' >"$transition_root/test/state-gid"
+expect_refusal 'root runtime group' upgrade 2.1.0 "$bridge_version"
+printf 'unexpected\n' >"$transition_root/test/state-gid"
+expect_refusal 'malformed runtime group' upgrade 2.1.0 "$bridge_version"
+printf '106\n' >"$transition_root/test/state-gid"
+chown root:65534 "$database"
+expect_refusal 'unrecognized database group' upgrade 2.1.0 "$bridge_version"
+chown root:106 "$database"
 ln "$database" "$transition_root/test/database-hardlink"
 expect_refusal 'hard-linked database' upgrade 2.1.0 "$bridge_version"
 rm -f "$transition_root/test/database-hardlink"
@@ -237,12 +255,14 @@ expect_refusal 'symlinked database' upgrade 2.1.0 "$bridge_version"
 rm -f "$database"
 printf 'fixture database\n' >"$database"
 chmod 0600 "$database"
+chown root:106 "$database"
 chmod 0770 "$transition_root/var/lib/nftfw/generation-state"
 expect_refusal 'writable database parent' upgrade 2.1.0 "$bridge_version"
 chmod 0700 "$transition_root/var/lib/nftfw/generation-state"
 
 cp "$transition_root/preinst" "$transition_root/test/preinst.backup"
-sed -i 's/^old_sha256=./old_sha256=0/' "$transition_root/preinst"
+sed -i 's/^old_sha256=.*/old_sha256=0000000000000000000000000000000000000000000000000000000000000000/' \
+    "$transition_root/preinst"
 expect_refusal 'transition identity mismatch' upgrade 2.1.0 "$bridge_version"
 install -o root -g root -m 0755 "$transition_root/test/preinst.backup" "$transition_root/preinst"
 run_preinst upgrade 2.1.0 "$bridge_version"

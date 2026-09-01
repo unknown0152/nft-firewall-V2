@@ -4,137 +4,563 @@ umask 077
 
 readonly action=${1:-}
 readonly marker=/etc/nftfw/initramfs-managed-disabled-v1
+readonly owner=/etc/nftfw/initramfs-source-owner-v1
 readonly installed_loader=/usr/lib/nftfw/initramfs/nftfw-ipv6-early
+readonly installed_gate=/usr/lib/nftfw/initramfs/nftfw-udev-gate
 readonly installed_rules=/usr/lib/nftfw/initramfs/nftfw-initramfs-guard.nft
+readonly source_root=/etc/initramfs-tools/scripts/init-top
+readonly source_loader=$source_root/nftfw-ipv6-early
+readonly source_gate=$source_root/udev
+readonly vendor_udev=/usr/share/initramfs-tools/scripts/init-top/udev
+readonly vendor_alias=nftfw-udev-vendor
 readonly marker_value=nftfw.initramfs-managed-disabled.v1
+readonly owner_value=nftfw.initramfs-source-owner.v1
+temporary_path=
+verification_list=
+verification_directory=
+state_directory_identity=
+source_directory_identity=
 
 fail() {
     echo "NFTFW initramfs guard: $*" >&2
     exit 1
 }
 
+cleanup() {
+    [[ -z ${temporary_path:-} ]] || rm -f -- "$temporary_path" || true
+    [[ -z ${verification_list:-} ]] || rm -f -- "$verification_list" || true
+    if [[ ${verification_directory:-} == /tmp/nftfw-initramfs-verify.* &&
+        -d ${verification_directory:-} && ! -L ${verification_directory:-} ]]; then
+        find "$verification_directory" -depth -delete || true
+    fi
+}
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
 require_root() {
     [[ ${EUID:-$(id -u)} -eq 0 ]] || fail "root is required"
 }
 
-require_safe_marker() {
-    [[ -f $marker && ! -L $marker ]] || fail "managed marker is absent or unsafe"
-    [[ $(stat -c '%a:%u:%g' "$marker") == 600:0:0 ]] || fail "managed marker metadata is unsafe"
-    [[ $(<"$marker") == "$marker_value" ]] || fail "managed marker content is invalid"
+directory_identity() {
+    stat -c '%d:%i:%u:%g:%a' "$1" || return 1
+}
+
+nftfw_group_id() {
+    local record
+    record=$(getent group nftfw) || fail "NFTFW package group is absent or unsafe"
+    [[ $record != *$'\n'* ]] || fail "NFTFW package group is ambiguous"
+    [[ $record =~ ^nftfw:[^:]*:(0|[1-9][0-9]{0,9}):[^:]*$ ]] || \
+        fail "NFTFW package group record is invalid"
+    printf '%s\n' "${BASH_REMATCH[1]}"
+}
+
+require_state_directory() {
+    local path=$1 expected_gid
+    expected_gid=$(nftfw_group_id) || return 1
+    [[ -d $path && ! -L $path ]] || fail "NFTFW package state directory is absent or unsafe"
+    [[ $(stat -c '%u:%g' "$path") == "0:$expected_gid" ]] || \
+        fail "NFTFW package state directory ownership is unsafe"
+    [[ $(stat -c '%a' "$path") == 750 ]] || fail "NFTFW package state directory mode is unsafe"
+    directory_identity "$path"
+}
+
+require_native_source_directory() {
+    local path=$1 writable
+    [[ -d $path && ! -L $path ]] || fail "required native initramfs source directory is absent or unsafe"
+    [[ $(stat -c '%u:%g' "$path") == 0:0 ]] || fail "native initramfs source directory ownership is unsafe"
+    writable=$(find "$path" -maxdepth 0 -type d -perm /022 -print -quit) || return 1
+    [[ -z $writable ]] || \
+        fail "native initramfs source directory is group- or other-writable"
+    directory_identity "$path"
+}
+
+revalidate_transaction_directories() {
+    local current_state current_source
+    [[ -n $state_directory_identity && -n $source_directory_identity ]] || \
+        fail "initramfs ownership transaction directory identity is absent"
+    current_state=$(require_state_directory /etc/nftfw) || return 1
+    current_source=$(require_native_source_directory "$source_root") || return 1
+    [[ $current_state == "$state_directory_identity" ]] || \
+        fail "NFTFW package state directory changed during ownership transaction"
+    [[ $current_source == "$source_directory_identity" ]] || \
+        fail "native initramfs source directory changed during ownership transaction"
+}
+
+require_safe_regular() {
+    local path=$1 mode=${2:-} writable
+    [[ -f $path && ! -L $path ]] || fail "required initramfs input is absent or unsafe"
+    [[ $(stat -c '%u:%g:%h' "$path") == 0:0:1 ]] || fail "initramfs input ownership or link count is unsafe"
+    writable=$(find "$path" -maxdepth 0 -type f -perm /022 -print -quit) || return 1
+    [[ -z $writable ]] || \
+        fail "initramfs input is group- or other-writable"
+    [[ $(stat -c '%s' "$path") -gt 0 && $(stat -c '%s' "$path") -le 1048576 ]] || \
+        fail "initramfs input size is unsafe"
+    [[ -z $mode || $(stat -c '%a' "$path") == "$mode" ]] || fail "initramfs input mode is unsafe"
+}
+
+require_extracted_regular() {
+    local path=$1 mode=$2
+    [[ -f $path && ! -L $path ]] || return 1
+    [[ $(stat -c '%u:%g:%h:%a' "$path") == "0:0:1:$mode" ]] || return 1
+    [[ $(stat -c '%s' "$path") -gt 0 && $(stat -c '%s' "$path") -le 1048576 ]] || return 1
+}
+
+digest() {
+    sha256sum "$1" | awk '{print $1}'
+}
+
+owner_data() {
+    local loader_digest gate_digest
+    loader_digest=$(digest "$installed_loader") || return 1
+    gate_digest=$(digest "$installed_gate") || return 1
+    printf '%s\nloader_sha256=%s\ngate_sha256=%s\n' \
+        "$owner_value" "$loader_digest" "$gate_digest"
+}
+
+require_installed_inputs() {
+    state_directory_identity=$(require_state_directory /etc/nftfw) || return 1
+    require_native_source_directory /etc/initramfs-tools >/dev/null || return 1
+    require_native_source_directory /etc/initramfs-tools/scripts >/dev/null || return 1
+    source_directory_identity=$(require_native_source_directory "$source_root") || return 1
+    for path in "$installed_loader" "$installed_gate" "$vendor_udev"; do
+        require_safe_regular "$path" || return 1
+        [[ -x $path ]] || fail "required initramfs executable is not executable"
+    done
+    require_safe_regular "$installed_rules" || return 1
+    for collision in "$source_root/$vendor_alias" \
+        "/usr/share/initramfs-tools/scripts/init-top/$vendor_alias"; do
+        [[ ! -e $collision && ! -L $collision ]] || fail "delegated vendor udev name is already occupied"
+    done
+}
+
+require_marker() {
+    local content
+    require_safe_regular "$marker" 600 || return 1
+    content=$(<"$marker") || return 1
+    [[ $content == "$marker_value" ]] || fail "managed marker content is invalid"
+}
+
+require_owned_sources() {
+    local source_loader_digest installed_loader_digest source_gate_digest installed_gate_digest
+    local ownership expected_ownership prerequisite
+    require_installed_inputs || return 1
+    require_marker || return 1
+    require_safe_regular "$owner" 600 || return 1
+    require_safe_regular "$source_loader" 755 || return 1
+    require_safe_regular "$source_gate" 755 || return 1
+    [[ -x $source_loader && -x $source_gate ]] || fail "managed source scripts are not executable"
+    source_loader_digest=$(digest "$source_loader") || return 1
+    installed_loader_digest=$(digest "$installed_loader") || return 1
+    source_gate_digest=$(digest "$source_gate") || return 1
+    installed_gate_digest=$(digest "$installed_gate") || return 1
+    [[ $source_loader_digest == "$installed_loader_digest" ]] || \
+        fail "managed loader source differs from the installed template"
+    [[ $source_gate_digest == "$installed_gate_digest" ]] || \
+        fail "managed udev gate differs from the installed template"
+    ownership=$(cat "$owner") || return 1
+    expected_ownership=$(owner_data) || return 1
+    [[ $ownership == "$expected_ownership" ]] || fail "managed source ownership record is invalid"
+    prerequisite=$("$source_gate" prereqs) || return 1
+    [[ $prerequisite == nftfw-ipv6-early ]] || fail "managed udev gate prerequisite is invalid"
+}
+
+state() {
+    local path present=0
+    for path in "$marker" "$owner" "$source_loader" "$source_gate"; do
+        if [[ -e $path || -L $path ]]; then
+            present=$((present + 1))
+        fi
+    done
+    case $present in
+        0) printf '%s\n' disabled ;;
+        4) require_owned_sources || return 1; printf '%s\n' enabled ;;
+        *) fail "managed initramfs source state is partial or ambiguous" ;;
+    esac
+}
+
+publish_file() {
+    local source=$1 target=$2 mode=$3
+    (revalidate_transaction_directories) || return 1
+    [[ ! -e $target && ! -L $target ]] || {
+        echo "NFTFW initramfs guard: managed initramfs target already exists" >&2
+        return 1
+    }
+    temporary_path=$(mktemp "${target}.nftfw.XXXXXX") || return 1
+    install -o root -g root -m "$mode" "$source" "$temporary_path" || return 1
+    sync -f "$temporary_path" || return 1
+    (revalidate_transaction_directories) || return 1
+    [[ ! -e $target && ! -L $target ]] || {
+        echo "NFTFW initramfs guard: managed initramfs target changed during publication" >&2
+        return 1
+    }
+    mv -f -- "$temporary_path" "$target" || return 1
+    temporary_path=
+    (revalidate_transaction_directories) || return 1
+    sync -f "$(dirname "$target")" || return 1
+}
+
+publish_text() {
+    local data=$1 target=$2 mode=$3
+    (revalidate_transaction_directories) || return 1
+    [[ ! -e $target && ! -L $target ]] || {
+        echo "NFTFW initramfs guard: managed initramfs target already exists" >&2
+        return 1
+    }
+    temporary_path=$(mktemp "${target}.nftfw.XXXXXX") || return 1
+    install -o root -g root -m "$mode" /dev/null "$temporary_path" || return 1
+    printf '%s' "$data" >"$temporary_path" || return 1
+    chmod "$mode" "$temporary_path" || return 1
+    sync -f "$temporary_path" || return 1
+    (revalidate_transaction_directories) || return 1
+    [[ ! -e $target && ! -L $target ]] || {
+        echo "NFTFW initramfs guard: managed initramfs target changed during publication" >&2
+        return 1
+    }
+    mv -f -- "$temporary_path" "$target" || return 1
+    temporary_path=
+    (revalidate_transaction_directories) || return 1
+    sync -f "$(dirname "$target")" || return 1
+}
+
+remove_exact() {
+    local path=$1 expected=$2 mode=$3 actual_digest expected_digest
+    (revalidate_transaction_directories) || return 1
+    [[ ! -e $path && ! -L $path ]] && return 0
+    (require_safe_regular "$path" "$mode") || return 1
+    actual_digest=$(digest "$path") || return 1
+    expected_digest=$(digest "$expected") || return 1
+    [[ $actual_digest == "$expected_digest" ]] || return 1
+    rm -f -- "$path" || return 1
+}
+
+remove_marker_exact() {
+    (revalidate_transaction_directories) || return 1
+    [[ ! -e $marker && ! -L $marker ]] && return 0
+    (require_marker) || return 1
+    rm -f -- "$marker" || return 1
+}
+
+remove_owner_exact() {
+    local ownership expected_ownership
+    (revalidate_transaction_directories) || return 1
+    [[ ! -e $owner && ! -L $owner ]] && return 0
+    (require_safe_regular "$owner" 600) || return 1
+    ownership=$(cat "$owner") || return 1
+    expected_ownership=$(owner_data) || return 1
+    [[ $ownership == "$expected_ownership" ]] || return 1
+    rm -f -- "$owner" || return 1
 }
 
 initrds() {
-    local current
-    current=/boot/initrd.img-$(uname -r)
-    [[ -f $current && ! -L $current ]] || fail "current kernel initramfs is absent or unsafe"
-    find /boot -maxdepth 1 -type f -name 'initrd.img-*' -print0 | sort -z
+    local current kernel
+    kernel=$(uname -r) || return 1
+    current=/boot/initrd.img-$kernel
+    [[ -f $current && ! -L $current ]] || {
+        echo "NFTFW initramfs guard: current kernel initramfs is absent or unsafe" >&2
+        return 1
+    }
+    find /boot -maxdepth 1 -type f -name 'initrd.img-*' -print0 | sort -z || return 1
 }
 
 one_path() {
-    local root=$1 suffix=$2
+    local root=$1 suffix=$2 listing
     local -a matches=()
-    mapfile -d '' -t matches < <(find "$root" -type f -path "*/$suffix" -print0)
+    listing=$(mktemp /tmp/nftfw-initramfs-paths.XXXXXX) || return 1
+    if ! find "$root" -path "*/$suffix" -print0 >"$listing"; then
+        rm -f -- "$listing" || true
+        return 1
+    fi
+    mapfile -d '' -t matches <"$listing" || {
+        rm -f -- "$listing" || true
+        return 1
+    }
+    rm -f -- "$listing" || return 1
     [[ ${#matches[@]} -eq 1 ]] || return 1
     printf '%s\n' "${matches[0]}"
 }
 
-verify_image_enabled() {
-    local image=$1 temporary=$2 root loader rules digest copied_marker order udev
-    root=$temporary/extracted
-    install -d -o root -g root -m 0700 "$root"
-    unmkinitramfs "$image" "$root" >/dev/null
-    loader=$(one_path "$root" scripts/init-top/nftfw-ipv6-early) || return 1
-    rules=$(one_path "$root" etc/nftfw/initramfs-guard.nft) || return 1
-    digest=$(one_path "$root" etc/nftfw/initramfs-guard.sha256) || return 1
-    copied_marker=$(one_path "$root" etc/nftfw/initramfs-managed-disabled-v1) || return 1
-    order=$(one_path "$root" scripts/init-top/ORDER) || return 1
-    udev=$(one_path "$root" scripts/init-top/udev) || return 1
-    [[ $(sha256sum "$loader" | awk '{print $1}') == $(sha256sum "$installed_loader" | awk '{print $1}') ]]
-    [[ $(sha256sum "$rules" | awk '{print $1}') == $(sha256sum "$installed_rules" | awk '{print $1}') ]]
-    [[ $(<"$copied_marker") == "$marker_value" ]]
-    [[ $(awk 'NR == 1 {print $1}' "$digest") == $(sha256sum "$rules" | awk '{print $1}') ]]
-    [[ $("$udev" prereqs) == nftfw-ipv6-early ]]
-    awk '
-        /\/scripts\/init-top\/nftfw-ipv6-early / { guard=NR }
-        /\/scripts\/init-top\/udev / { udev=NR }
-        END { exit !(guard > 0 && udev > guard) }
+verify_enabled_order() {
+    local order=$1
+    awk -v guard='/scripts/init-top/nftfw-ipv6-early "$@"' \
+        -v refresh='[ -e /conf/param.conf ] && . /conf/param.conf' \
+        -v gate='/scripts/init-top/udev "$@"' '
+        { line[NR]=$0 }
+        index($0, "/scripts/init-top/nftfw-ipv6-early") { guard_mentions++ }
+        index($0, "/scripts/init-top/nftfw-udev-vendor") { vendor_mentions++ }
+        index($0, "/scripts/init-top/udev") { gate_mentions++ }
+        $0 == guard { guard_exact++; guard_line=NR }
+        $0 == gate { gate_exact++; gate_line=NR }
+        END {
+            exit !(guard_mentions == 1 && guard_exact == 1 &&
+                vendor_mentions == 0 && gate_mentions == 1 && gate_exact == 1 &&
+                line[guard_line + 1] == refresh && gate_line == guard_line + 2 &&
+                line[gate_line + 1] == refresh)
+        }
     ' "$order"
 }
 
+verify_image_enabled() {
+    local image=$1 temporary=$2 root loader gate vendor rules digest_file copied_marker order
+    local expected_digest loader_digest installed_loader_digest gate_digest installed_gate_digest
+    local vendor_digest installed_vendor_digest rules_digest installed_rules_digest prerequisite
+    root=$temporary/extracted
+    install -d -o root -g root -m 0700 "$root" || return 1
+    unmkinitramfs "$image" "$root" >/dev/null || return 1
+    loader=$(one_path "$root" scripts/init-top/nftfw-ipv6-early) || return 1
+    gate=$(one_path "$root" scripts/init-top/udev) || return 1
+    vendor=$(one_path "$root" scripts/init-top/$vendor_alias) || return 1
+    rules=$(one_path "$root" etc/nftfw/initramfs-guard.nft) || return 1
+    digest_file=$(one_path "$root" etc/nftfw/initramfs-guard.sha256) || return 1
+    copied_marker=$(one_path "$root" etc/nftfw/initramfs-managed-disabled-v1) || return 1
+    order=$(one_path "$root" scripts/init-top/ORDER) || return 1
+    require_extracted_regular "$loader" 755 || return 1
+    require_extracted_regular "$gate" 755 || return 1
+    require_extracted_regular "$vendor" 755 || return 1
+    require_extracted_regular "$rules" 644 || return 1
+    require_extracted_regular "$digest_file" 600 || return 1
+    require_extracted_regular "$copied_marker" 600 || return 1
+    require_extracted_regular "$order" 644 || return 1
+    loader_digest=$(digest "$loader") || return 1
+    installed_loader_digest=$(digest "$installed_loader") || return 1
+    gate_digest=$(digest "$gate") || return 1
+    installed_gate_digest=$(digest "$installed_gate") || return 1
+    vendor_digest=$(digest "$vendor") || return 1
+    installed_vendor_digest=$(digest "$vendor_udev") || return 1
+    rules_digest=$(digest "$rules") || return 1
+    installed_rules_digest=$(digest "$installed_rules") || return 1
+    [[ $loader_digest == "$installed_loader_digest" ]] || return 1
+    [[ $gate_digest == "$installed_gate_digest" ]] || return 1
+    [[ $vendor_digest == "$installed_vendor_digest" ]] || return 1
+    [[ $rules_digest == "$installed_rules_digest" ]] || return 1
+    [[ $(<"$copied_marker") == "$marker_value" ]] || return 1
+    expected_digest="$rules_digest  /etc/nftfw/initramfs-guard.nft
+$vendor_digest  /scripts/init-top/$vendor_alias"
+    [[ $(cat "$digest_file") == "$expected_digest" ]] || return 1
+    prerequisite=$("$gate" prereqs) || return 1
+    [[ $prerequisite == nftfw-ipv6-early ]] || return 1
+    verify_enabled_order "$order" || return 1
+}
+
 verify_image_disabled() {
-    local image=$1 listing
+    local image=$1 temporary=$2 listing root order gate prerequisite gate_digest vendor_digest
     listing=$(lsinitramfs "$image") || return 1
-    if grep -Eq '(^|/)(nftfw-ipv6-early|initramfs-guard\.nft|initramfs-guard\.sha256|initramfs-managed-disabled-v1)$' <<<"$listing"; then
+    if grep -Eq '(^|/)(nftfw-ipv6-early|nftfw-udev-vendor|initramfs-guard\.nft|initramfs-guard\.sha256|initramfs-managed-disabled-v1)$' <<<"$listing"; then
         return 1
     fi
+    root=$temporary/extracted
+    install -d -o root -g root -m 0700 "$root" || return 1
+    unmkinitramfs "$image" "$root" >/dev/null || return 1
+    order=$(one_path "$root" scripts/init-top/ORDER) || return 1
+    gate=$(one_path "$root" scripts/init-top/udev) || return 1
+    require_extracted_regular "$order" 644 || return 1
+    require_extracted_regular "$gate" 755 || return 1
+    gate_digest=$(digest "$gate") || return 1
+    vendor_digest=$(digest "$vendor_udev") || return 1
+    [[ $gate_digest == "$vendor_digest" ]] || return 1
+    prerequisite=$("$gate" prereqs) || return 1
+    [[ $prerequisite != *nftfw* ]] || return 1
+    ! grep -F nftfw "$order" >/dev/null || return 1
+}
+
+clear_verification_work() {
+    local failed=0
+    if [[ -n ${verification_directory:-} ]]; then
+        if [[ -d $verification_directory && ! -L $verification_directory ]] &&
+            find "$verification_directory" -depth -delete; then
+            verification_directory=
+        else
+            failed=1
+        fi
+    fi
+    if [[ -n ${verification_list:-} ]]; then
+        if rm -f -- "$verification_list"; then
+            verification_list=
+        else
+            failed=1
+        fi
+    fi
+    (( failed == 0 ))
+}
+
+verification_failure() {
+    local reason=$1
+    echo "NFTFW initramfs guard: $reason" >&2
+    clear_verification_work ||
+        echo "NFTFW initramfs guard: verification workspace cleanup is incomplete" >&2
+    return 1
 }
 
 verify_all() {
-    local mode=$1 image temporary count=0
+    local mode=$1 image temporary listing count=0
+    [[ $mode == enabled || $mode == disabled ]] || {
+        verification_failure "invalid initramfs verification mode"
+        return 1
+    }
+    [[ -z ${verification_list:-} && -z ${verification_directory:-} ]] || {
+        verification_failure "prior initramfs verification workspace is incomplete"
+        return 1
+    }
+    verification_list=$(mktemp /tmp/nftfw-initramfs-images.XXXXXX) || {
+        verification_failure "cannot create initramfs verification list"
+        return 1
+    }
+    listing=$verification_list
+    if ! initrds >"$listing"; then
+        verification_failure "cannot enumerate installed initramfs images"
+        return 1
+    fi
     while IFS= read -r -d '' image; do
-        temporary=$(mktemp -d /tmp/nftfw-initramfs-verify.XXXXXX)
+        verification_directory=$(mktemp -d /tmp/nftfw-initramfs-verify.XXXXXX) || {
+            verification_failure "cannot create initramfs verification directory"
+            return 1
+        }
+        temporary=$verification_directory
         if [[ $mode == enabled ]]; then
             verify_image_enabled "$image" "$temporary" || {
-                rm -rf -- "$temporary"
-                fail "enabled guard verification failed for an installed initramfs"
+                verification_failure "enabled guard verification failed for an installed initramfs"
+                return 1
             }
         else
-            verify_image_disabled "$image" || {
-                rm -rf -- "$temporary"
-                fail "disabled guard verification failed for an installed initramfs"
+            verify_image_disabled "$image" "$temporary" || {
+                verification_failure "disabled guard verification failed for an installed initramfs"
+                return 1
             }
         fi
-        rm -rf -- "$temporary"
+        if ! find "$temporary" -depth -delete; then
+            verification_failure "cannot remove initramfs verification directory"
+            return 1
+        fi
+        verification_directory=
         count=$((count + 1))
-    done < <(initrds)
-    (( count > 0 )) || fail "no installed initramfs was verified"
+    done <"$listing"
+    rm -f -- "$listing" || {
+        verification_failure "cannot remove initramfs verification list"
+        return 1
+    }
+    verification_list=
+    (( count > 0 )) || {
+        verification_failure "no installed initramfs was verified"
+        return 1
+    }
+}
+
+rollback_fresh_enable() {
+    local failed=0
+    remove_exact "$source_gate" "$installed_gate" 755 || failed=1
+    remove_exact "$source_loader" "$installed_loader" 755 || failed=1
+    remove_owner_exact || failed=1
+    remove_marker_exact || failed=1
+    if ((failed == 0)) && update-initramfs -u -k all && verify_all disabled; then
+        return 0
+    fi
+    return 1
+}
+
+fail_enable_with_rollback() {
+    local reason=$1
+    rollback_fresh_enable || fail "$reason and disabled rollback both failed"
+    fail "$reason; enable transaction was rolled back"
 }
 
 rebuild_enabled() {
-    require_safe_marker
-    update-initramfs -u -k all
-    verify_all enabled
+    local current ownership
+    require_installed_inputs || return 1
+    current=$(state) || return 1
+    if [[ $current == enabled ]]; then
+        update-initramfs -u -k all || return 1
+        verify_all enabled || return 1
+        return
+    fi
+    ownership=$(owner_data) || return 1
+    publish_text "$marker_value"$'\n' "$marker" 0600 || \
+        fail_enable_with_rollback "marker publication failed"
+    publish_file "$installed_loader" "$source_loader" 0755 || \
+        fail_enable_with_rollback "loader publication failed"
+    publish_file "$installed_gate" "$source_gate" 0755 || \
+        fail_enable_with_rollback "udev gate publication failed"
+    publish_text "$ownership"$'\n' "$owner" 0600 || \
+        fail_enable_with_rollback "ownership record publication failed"
+    if update-initramfs -u -k all && verify_all enabled; then
+        return
+    fi
+    fail_enable_with_rollback "enabled rebuild or verification failed"
+}
+
+restore_disabled_backup() {
+    local backup=$1
+    publish_file "$backup/marker" "$marker" 0600 || return 1
+    publish_file "$backup/loader" "$source_loader" 0755 || return 1
+    publish_file "$backup/gate" "$source_gate" 0755 || return 1
+    publish_file "$backup/owner" "$owner" 0600 || return 1
+    require_owned_sources || return 1
 }
 
 disable_transaction() {
-    local backup
-    if [[ ! -e $marker && ! -L $marker ]]; then
-        verify_all disabled
+    local current backup failed=0
+    require_installed_inputs || return 1
+    current=$(state) || return 1
+    if [[ $current == disabled ]]; then
+        verify_all disabled || return 1
         return
     fi
-    require_safe_marker
-    backup=$(mktemp /etc/nftfw/.initramfs-managed-disabled-v1.XXXXXX)
-    install -o root -g root -m 0600 "$marker" "$backup"
-    rm -f -- "$marker"
-    if update-initramfs -u -k all && verify_all disabled; then
-        rm -f -- "$backup"
+    revalidate_transaction_directories || return 1
+    backup=$(mktemp -d /etc/nftfw/.initramfs-disable.XXXXXX) || return 1
+    revalidate_transaction_directories || return 1
+    install -o root -g root -m 0600 "$marker" "$backup/marker" || return 1
+    install -o root -g root -m 0600 "$owner" "$backup/owner" || return 1
+    install -o root -g root -m 0755 "$source_loader" "$backup/loader" || return 1
+    install -o root -g root -m 0755 "$source_gate" "$backup/gate" || return 1
+    remove_exact "$source_gate" "$installed_gate" 755 || failed=1
+    remove_exact "$source_loader" "$installed_loader" 755 || failed=1
+    remove_owner_exact || failed=1
+    remove_marker_exact || failed=1
+    if ((failed == 0)) && update-initramfs -u -k all && verify_all disabled; then
+        find "$backup" -depth -delete || fail "disabled transaction cleanup failed"
         return
     fi
-    install -o root -g root -m 0600 "$backup" "$marker"
-    rm -f -- "$backup"
-    update-initramfs -u -k all
-    verify_all enabled
+    for path in "$marker" "$owner" "$source_loader" "$source_gate"; do
+        if [[ -e $path || -L $path ]]; then
+            fail "disable transaction left ambiguous managed source state"
+        fi
+    done
+    restore_disabled_backup "$backup" || fail "disabled transaction restoration failed"
+    find "$backup" -depth -delete || fail "disabled rollback cleanup failed"
+    update-initramfs -u -k all || fail "disabled rollback rebuild failed"
+    verify_all enabled || fail "disabled rollback verification failed"
     fail "disable transaction was rolled back"
 }
 
 require_root
-for tool in awk chmod find grep install lsinitramfs mktemp rm sha256sum sort stat uname unmkinitramfs update-initramfs; do
+for tool in awk chmod dirname find flock getent grep install lsinitramfs mktemp mv rm \
+    sha256sum sort stat sync uname unmkinitramfs update-initramfs; do
     command -v "$tool" >/dev/null || fail "missing prerequisite"
 done
+if [[ ! -e /run/nftfw-initramfs && ! -L /run/nftfw-initramfs ]]; then
+    install -d -o root -g root -m 0700 /run/nftfw-initramfs
+fi
+[[ -d /run/nftfw-initramfs && ! -L /run/nftfw-initramfs && \
+    $(stat -c '%a:%u:%g' /run/nftfw-initramfs) == 700:0:0 ]] || fail "runtime lock directory is unsafe"
+exec 9>/run/nftfw-initramfs/transaction.lock || fail "cannot open initramfs ownership transaction lock"
+flock -n 9 || fail "another initramfs ownership transaction is running"
+
 case "$action" in
     rebuild-enabled)
-        rebuild_enabled
+        rebuild_enabled || fail "enabled ownership transaction failed"
         ;;
     verify-enabled)
-        require_safe_marker
-        verify_all enabled
+        current=$(state) || fail "cannot validate enabled ownership state"
+        [[ $current == enabled ]] || fail "managed initramfs source state is not enabled"
+        verify_all enabled || fail "enabled initramfs verification failed"
         ;;
     disable)
-        disable_transaction
+        disable_transaction || fail "disable ownership transaction failed"
         ;;
     verify-disabled)
-        [[ ! -e $marker && ! -L $marker ]] || fail "managed marker still exists"
-        verify_all disabled
+        current=$(state) || fail "cannot validate disabled ownership state"
+        [[ $current == disabled ]] || fail "managed initramfs source state is not disabled"
+        verify_all disabled || fail "disabled initramfs verification failed"
         ;;
     *)
         fail "usage: nftfw-initramfs-manage {rebuild-enabled|verify-enabled|disable|verify-disabled}"

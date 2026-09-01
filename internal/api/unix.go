@@ -394,11 +394,17 @@ func Call(ctx context.Context, path string, req Request) (Response, error) {
 		return Response{}, err
 	}
 	defer conn.Close()
+	stopCancellation := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	defer stopCancellation()
 	clientTimeout := statusClientTimeout
 	if req.Op != "status" {
 		clientTimeout = controlClientTimeout
 	}
-	_ = conn.SetDeadline(time.Now().Add(clientTimeout))
+	deadline := time.Now().Add(clientTimeout)
+	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
+		deadline = contextDeadline
+	}
+	_ = conn.SetDeadline(deadline)
 	if err := json.NewEncoder(conn).Encode(req); err != nil {
 		return Response{}, err
 	}

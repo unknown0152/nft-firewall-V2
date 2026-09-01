@@ -20,7 +20,8 @@ for argument in "$@"; do
                 echo "systemd unit was not verified from the isolated stage: $argument" >&2
                 exit 1
             }
-            if grep -F '/usr/lib/nftfw/' "$argument" >/dev/null; then
+            if grep -E '^Exec(Start|StartPre|StartPost|Stop|StopPost|Reload)=/usr/lib/nftfw/' \
+                "$argument" >/dev/null; then
                 echo "systemd unit retained a final-path executable during preflight: $argument" >&2
                 exit 1
             fi

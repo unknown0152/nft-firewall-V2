@@ -162,7 +162,11 @@ start_canonical_lock_probe() {
     local result=$1
     (
         found=0
-        for _ in $(seq 1 200); do
+        # The bridge package and boot-policy handoff deliberately run before
+        # the exact-old dpkg transaction creates this private lock.  Cover the
+        # complete protected transition instead of sampling only its first two
+        # seconds on slower disposable guests.
+        for _ in $(seq 1 3000); do
             if find /run/nftfw -maxdepth 1 -type f \
                 -name '.package-rollback-maintscript-lock.*' -print -quit | grep -q .; then
                 found=1
@@ -218,6 +222,19 @@ snapshot >"$work_root/before.snapshot"
 dpkg --install "$new_deb" >"$work_root/upgrade-complete.log" 2>&1
 [[ $(dpkg-query -W -f='${db:Status-Abbrev} ${Version}' "$package") == "ii  $new_version" ]]
 systemctl stop nftfw-web.service nftfwd.service
+install -o root -g root -m 0600 /etc/nftfw/nftfw.toml "$work_root/config.compatible"
+printf '\nunknown_2_1_only_fixture = "private-fixture-value"\n' >>/etc/nftfw/nftfw.toml
+if "$bundle/execute" execute --bundle "$bundle" >"$work_root/incompatible-refusal.log" 2>&1; then
+    fail "exact rollback accepted a configuration rejected by 2.0.3"
+fi
+[[ $(dpkg-query -W -f='${db:Status-Abbrev} ${Version}' "$package") == "ii  $new_version" ]] ||
+    fail "configuration refusal changed the installed package"
+grep -Fq 'current configuration is not exact 2.0.3-compatible' \
+    "$work_root/incompatible-refusal.log" || fail "configuration refusal was not actionable"
+if grep -Fq 'private-fixture-value' "$work_root/incompatible-refusal.log"; then
+    fail "configuration refusal disclosed a private value"
+fi
+install -o root -g nftfw -m 0640 "$work_root/config.compatible" /etc/nftfw/nftfw.toml
 lock_probe_result=$work_root/canonical-lock-probe.result
 start_canonical_lock_probe "$lock_probe_result"
 "$bundle/execute" execute --bundle "$bundle" >"$work_root/rollback-complete.log" 2>&1

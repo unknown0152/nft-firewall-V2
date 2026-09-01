@@ -25,12 +25,18 @@ operational state database in a report.
   preserves lower bits, and writes provenance once. Reply accepts require the
   exact matching provenance and egress interface. Interface IDs are permanent
   in a monotonic ledger and retired IDs are never reused.
-- IPv6 behavior is mandatory and explicit. Disabled mode installs early
-  IPv6 drop hooks; managed setup additionally installs an inert,
-  marker-activated initramfs loader that sets reversible non-loopback defaults
-  before udev creates interfaces and applies a checksum-bound temporary deny
-  guard. Committed early enforcement must verify before the exact guard is
-  removed. VPN and native modes use equivalent typed inet policy.
+- IPv6 behavior is mandatory and explicit. Managed disabled mode accepts only
+  a strict local Debian GRUB identity, owns one fixed root-only fragment that
+  adds exactly one `ipv6.disable=1`, verifies every generated Linux entry, and
+  requires an explicit reboot plus exact running-kernel proof before ordinary
+  setup mutation. The marker-activated native initramfs loader verifies that
+  kernel-wide contract and applies a checksum-bound temporary deny guard as
+  defense in depth; it never re-enables loopback. The resumed boot atomically
+  replaces it with a checksum-bound DHCP/LAN/endpoint-only guard, reuses a
+  root-only cached endpoint set without DNS, and holds Docker service/socket
+  activation until forwarding and daemon ownership are durable. Committed early enforcement
+  must verify before the exact guard is removed. VPN and native modes use
+  equivalent typed inet policy outside this managed one-file path.
 - Normal operation never invokes `flush ruleset` and never deletes a table it
   does not own.
 - Every candidate passes internal validation and `nft --check` before one

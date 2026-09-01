@@ -1,0 +1,32 @@
+#!/bin/sh
+set -eu
+
+PREREQ=nftfw-ipv6-early
+prereqs() {
+    echo "$PREREQ"
+}
+case "${1:-}" in
+    prereqs)
+        prereqs
+        exit 0
+        ;;
+esac
+
+vendor=/scripts/init-top/nftfw-udev-vendor
+digest=/etc/nftfw/initramfs-guard.sha256
+
+block_boot() {
+    message='NFTFW initramfs udev gate failed; non-loopback networking remains blocked'
+    printf '%s\n' "$message" >/dev/kmsg 2>/dev/null || true
+    printf '%s\n' "$message" >/dev/console 2>/dev/null || true
+    while :; do
+        sleep 60
+    done
+}
+
+test -f "$vendor" -a ! -L "$vendor" -a -x "$vendor" -a -r "$digest" || block_boot
+test "$(stat -c '%u:%g:%h' "$vendor")" = 0:0:1 || block_boot
+expected=$(awk '$2 == "/scripts/init-top/nftfw-udev-vendor" { count++; value=$1 } END { if (count == 1) print value }' "$digest")
+actual=$(sha256sum "$vendor" | awk '{print $1}')
+test -n "$expected" -a "$actual" = "$expected" || block_boot
+exec "$vendor" "$@"

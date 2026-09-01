@@ -1,0 +1,43 @@
+[Unit]
+Description=Hold network consumers during NFTFW managed setup reboot
+Documentation=file:/usr/share/doc/nft-firewall-v2/RECOVERY.md
+DefaultDependencies=no
+After=local-fs.target
+Before=network-pre.target
+
+[Service]
+Type=oneshot
+ExecStart=/usr/lib/nftfw/nftfw setup boot-hold
+TimeoutStartSec=infinity
+User=root
+Group=nftfw-web
+RuntimeDirectory=nftfw
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
+UMask=0077
+NoNewPrivileges=yes
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+PrivateDevices=yes
+ProtectClock=yes
+ProtectHostname=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectControlGroups=yes
+LockPersonality=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+MemoryDenyWriteExecute=yes
+RestrictNamespaces=yes
+SystemCallArchitectures=native
+RestrictAddressFamilies=AF_UNIX AF_NETLINK
+ReadOnlyPaths=/boot /etc/nftfw /etc/default/grub.d /etc/initramfs-tools/scripts/init-top /usr/lib/nftfw/initramfs /var/lib/nftfw /proc /sys
+ReadWritePaths=/run/nftfw
+# CAP_CHOWN is required only so the read-only initramfs verifier can preserve
+# archived root ownership while unpacking into PrivateTmp. ProtectSystem=strict
+# leaves that capability usable only in the unit's private writable workspace
+# and the explicitly writable runtime directory.
+CapabilityBoundingSet=CAP_CHOWN CAP_NET_ADMIN
+AmbientCapabilities=CAP_CHOWN CAP_NET_ADMIN

@@ -2,6 +2,7 @@ package wireguard
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net"
 	"os"
@@ -78,6 +79,78 @@ func TestEndpointCacheRejectsSymlinkAndOversize(t *testing.T) {
 	}
 	if cache := (&Resolver{CachePath: large}).loadLocked(); len(cache.Hosts) != 0 {
 		t.Fatal("oversized endpoint cache accepted")
+	}
+}
+
+func TestValidateRetainedCacheStrictlyRejectsAmbiguousEvidence(t *testing.T) {
+	directory := t.TempDir()
+	path := filepath.Join(directory, "endpoints.json")
+	canonical := func(cache Cache) []byte {
+		t.Helper()
+		encoded, err := json.MarshalIndent(cache, "", "  ")
+		if err != nil {
+			t.Fatal(err)
+		}
+		return append(encoded, '\n')
+	}
+	valid := canonical(Cache{Hosts: map[string][]CachedIP{
+		"vpn.example.test": {{
+			Address: "198.51.100.8", SeenAt: time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC),
+		}},
+	}})
+	if err := os.WriteFile(path, valid, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cache, err := ValidateRetainedCache(path)
+	if err != nil || len(cache.Hosts["vpn.example.test"]) != 1 {
+		t.Fatalf("valid retained cache rejected: %#v %v", cache, err)
+	}
+	future := canonical(Cache{Hosts: map[string][]CachedIP{
+		"vpn.example.test": {{Address: "198.51.100.8", SeenAt: time.Now().UTC().Add(time.Hour)}},
+	}})
+	duplicateAddress := canonical(Cache{Hosts: map[string][]CachedIP{
+		"vpn.example.test": {
+			{Address: "198.51.100.8", SeenAt: time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)},
+			{Address: "198.51.100.8", SeenAt: time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC)},
+		},
+	}})
+	invalidAddress := canonical(Cache{Hosts: map[string][]CachedIP{
+		"vpn.example.test": {{
+			Address: "127.0.0.1", SeenAt: time.Date(2026, 8, 30, 12, 0, 0, 0, time.UTC),
+		}},
+	}})
+	for _, test := range []struct {
+		name string
+		data []byte
+		mode os.FileMode
+	}{
+		{"unknown-field", []byte(`{"hosts":{},"extra":true}`), 0o600},
+		{"duplicate-key", []byte("{\"hosts\":{},\"hosts\":{}}\n"), 0o600},
+		{"noncanonical", []byte(`{"hosts":{"vpn.example.test":[{"address":"198.51.100.8","seen_at":"2026-08-30T12:00:00Z"}]}}` + "\n"), 0o600},
+		{"duplicate-address", duplicateAddress, 0o600},
+		{"invalid-address", invalidAddress, 0o600},
+		{"future-time", future, 0o600},
+		{"unsafe-mode", valid, 0o644},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			candidate := filepath.Join(directory, test.name+".json")
+			if err := os.WriteFile(candidate, test.data, test.mode); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Chmod(candidate, test.mode); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := ValidateRetainedCache(candidate); err == nil {
+				t.Fatal("ambiguous retained cache accepted")
+			}
+		})
+	}
+	link := filepath.Join(directory, "strict-link.json")
+	if err := os.Symlink(path, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ValidateRetainedCache(link); err == nil {
+		t.Fatal("symlinked retained cache accepted")
 	}
 }
 

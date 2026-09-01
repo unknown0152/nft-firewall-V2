@@ -25,10 +25,10 @@ Package installation:
 - does not import a VPN, create an interface, alter routes, apply nftables,
   disable IPv6, or open a port.
 
-The package also installs inert initramfs and exact-package rollback tooling.
-The initramfs hook copies nothing unless successful managed setup publishes
-its protected marker; package installation and an advanced-mode upgrade do
-not regenerate an initramfs.
+The package also installs inert initramfs, Debian GRUB, and exact-package
+rollback tooling. Package installation does not publish the managed GRUB
+fragment or regenerate GRUB/initramfs state; only an approved managed setup
+transaction can take that ownership. Advanced-mode upgrades remain inert.
 
 ## Clean-server setup
 
@@ -52,6 +52,28 @@ Inspect without mutation:
 ```bash
 sudo nftfw setup --vpn /path/to/working-vpn.conf --dry-run
 ```
+
+The first real invocation prepares and verifies the native initramfs guard and
+one fixed Debian GRUB fragment, then exits successfully with
+`reboot_required`. It does not yet apply NFTFW policy, start the tunnel, alter
+Docker, or enable forwarding. Reboot explicitly and resume the same protected
+transaction with the same profile-only command:
+
+```bash
+sudo reboot
+sudo nftfw setup status
+sudo nftfw setup --vpn /path/to/working-vpn.conf
+```
+
+`setup status` changes to `resume_ready` only after the boot ID changes and the
+prepared GRUB, kernel argument, kernel disable parameter, empty IPv6 address
+state, and native guard all verify. NFTFW never reboots automatically.
+Before normal networking starts, the generated boot dependency swaps the
+exact initramfs deny table for a checksum-bound resume guard that allows only
+DHCP, reviewed LAN management, and the privately cached provider endpoint.
+Docker service/socket activation stays blocked until the same setup command
+has written NFTFW ownership, applied IPv4 forwarding, and received the
+immediate restart confirmation.
 
 Setup fails before mutation when the OS, route, LAN, resolver, firewall
 ownership, Docker topology, existing NFTFW state, reserved routing identities,
@@ -93,7 +115,10 @@ bypass refusal.
 Before an approved 2.0.3-to-2.1.0 upgrade, extract the 2.1.0 package and use
 its `usr/lib/nftfw/package-rollback` helper to prepare and verify the exact
 rollback bundle as described in `docs/UPGRADING.md`. Do not install 2.1.0
-until that bundle exists.
+until that bundle exists and its exact 2.0.3 parser accepts the configuration
+that would be restored. A managed 2.1-only configuration is not an exact
+package-downgrade target; use the protected pre-upgrade configuration or the
+documented package-removal handoff instead.
 
 Generate the nonactivating local adoption worksheet with:
 
@@ -143,6 +168,7 @@ and remains nonactivating.
 | `/etc/docker/daemon.json` | Semantically merged Docker ownership settings when adopted |
 | `/etc/sysctl.d/90-nftfw-managed.conf` | Managed IPv4 forwarding and IPv6 disablement |
 | `/etc/nftfw/initramfs-managed-disabled-v1` | Managed-only initramfs guard activation marker |
+| `/etc/default/grub.d/90-nftfw-ipv6-disabled.cfg` | Managed root-only kernel-wide IPv6-disable fragment |
 | `/usr/lib/nftfw/initramfs/` | Guard loader, rules, archive verifier, and reversible removal tool |
 | `/usr/lib/nftfw/package-rollback` | Pre-upgrade exact-package rollback bundle tool |
 | `/run/nftfw/control.sock` | Root-only mutation API |

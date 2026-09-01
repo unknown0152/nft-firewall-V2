@@ -12,18 +12,41 @@ sudo nftfw setup --vpn /path/to/working-vpn.conf
 The package installation is inert. The setup command then discovers the
 uplink, private LAN, SSH management ports, resolver, firewall ownership, and
 container state. It imports the VPN profile without printing secrets,
-generates the strict policy, creates the managed WireGuard interface and
-policy routing, installs an independent rollback guard, applies safely,
-validates the tunnel and kill switch, commits, and enables boot protection.
+generates the strict policy, prepares one exact Debian GRUB/initramfs boot
+boundary, and pauses for an explicit reboot. The operator reruns the same
+profile-only command after that reboot; only then does setup create the
+managed WireGuard interface and policy routing, install the rollback guard,
+apply safely, validate the tunnel and kill switch, commit, and enable boot
+protection. NFTFW never reboots the server automatically.
 All parsing and clean-host discovery finish before the setup journal exists.
 The journal is published with the complete redacted plan immediately before
 the backup and protected mutation phases begin.
 
-First setup deliberately starts `nftfwd` before publishing its final
+Before the first reboot, setup owns only the protected backup, native
+initramfs sources, fixed root-only
+`90-nftfw-ipv6-disabled.cfg` fragment, regenerated GRUB configuration, and
+durable `reboot_required` journal. It has not enabled forwarding, changed
+Docker ownership, started the VPN, published enforcement, or exposed a port.
+Resume requires a changed boot ID, exactly one `ipv6.disable=1` kernel token,
+the kernel disable parameter, no IPv6 address state, and unchanged prepared
+boot and plan identities.
+
+On the resumed boot, the packaged pre-network service atomically replaces the
+initramfs all-interface deny table with a checksum-bound resume guard. That
+guard permits only DHCP, the already reviewed private-LAN management ports,
+and the cached WireGuard endpoint; the cached root-only endpoint set means DNS
+is not required at this boundary. Docker service and socket activation remain
+held separately. Rerunning the same setup command verifies the guard, writes
+NFTFW's Docker and forwarding ownership, asks for the restart confirmation,
+and only then releases Docker. Any missing, additional, changed, or
+contradictory table/hold state fails closed.
+
+After resume, setup deliberately starts `nftfwd` before publishing its final
 `Requisite=nftfw-early.service` drop-ins. After commit it starts and verifies
-early enforcement, builds a checksum-bound initramfs deny guard with IPv6
-disabled before udev creates a NIC, and only then publishes the final boot
-dependencies. The guard is removed only by the verified readiness service.
+early enforcement, verifies the checksum-bound initramfs deny guard, and only
+then publishes the final boot dependencies. The kernel argument is the
+pre-driver IPv6 boundary; the initramfs nftables guard remains defense in
+depth and is removed only by the verified readiness service.
 
 The clean-host result is:
 
@@ -41,14 +64,22 @@ The clean-host result is:
 The current tree targets **2.1.0** and requires **Go 1.27.0**. Until Stage
 E-R2, tagging, and final publication approval are complete, local Stage E-R
 candidate artifacts are deliberately quarantined and cannot run or install.
-The last published stable line remains 2.0.3. After Amendment M corrected its
-four prior blockers, the latest privileged 2.1.0 run reached the real Debian
-rollback and hard-stopped because the bridge expected configured `ii` after
-dpkg had already entered `iHR`. Amendment N corrects that exact transition
-contract. Its disposable source regression also found and corrected the
-legacy pre-install backup's same-lock self-deadlock while retaining the real
-global lock. Complete renewed E-R2 validation is still required before a tag
-exists.
+The last published stable line remains 2.0.3. An earlier privileged 2.1.0
+source run safely rolled an interrupted first setup back, then found that its
+required retained audit state prevented an ordinary retry. Amendment W adds a
+strict terminal retry classification and checksum-bound journal lineage. Its
+protected W6 source matrix passes two failed retries, successful generation 3,
+Docker VPN/leak recovery, and two managed boots; W7 also passes the native
+initramfs package lifecycle. The mandatory W11 packet capture nevertheless
+observed two IPv6 MLD/DAD frames before init-top readiness. Amendment X
+replaces that insufficient boundary with a strict two-pass Debian GRUB
+ownership transaction. The source-stage disposable matrix now passes failed
+boot preparation, both process-death boundaries, explicit reboot/resume,
+two consecutive managed boots with zero pre-readiness packets, a
+contradictory boot with zero guest packets, package removal, and exact 2.0.3
+rollback. The complete source gates pass as well. A frozen commit, two
+independent quarantined candidates, and their external comparison are still
+required before renewed E-R2; this tree is not yet a release.
 
 ## Supported clean-host setup
 
@@ -60,7 +91,11 @@ The one-file path intentionally supports a narrow first matrix:
 - local console or directly connected private LAN management;
 - one strict wg-quick-style profile with one peer and `0.0.0.0/0`;
 - nftables JSON support and no competing firewall owner;
-- no existing NFTFW state;
+- one unambiguous local Debian GRUB installation (`grub-pc` on BIOS or the
+  matching GRUB EFI family), writable local boot storage, and no systemd-boot,
+  UKI, extlinux, alternate GRUB tree, or existing IPv6-disable argument;
+- no existing NFTFW state, except one fully verified terminal first-setup
+  rollback described below;
 - Docker absent, or reachable only through the local socket with no running
   or retained containers and only eligible, non-overlapping IPv4 bridge
   networks.
@@ -74,6 +109,14 @@ before mutation. If Docker daemon settings must change, setup asks again
 immediately before one Docker restart. Macvlan, ipvlan, overlay, Swarm,
 Kubernetes, internal, IPv6, overlapping, malformed, or changing Docker
 topologies are refused.
+
+A failed first setup does not erase audit or provenance evidence. After
+`nftfw setup rollback` reports `rolled_back`, the same setup command permits a
+terminal retry only when the exact restored backup, inactive managed units,
+clean firewall/routing state, rolled-back immutable generations, endpoint
+cache, and monotonic provenance ledger all validate together. The previous
+terminal journal is archived durably before a new transaction can mutate;
+every incomplete or ambiguous state still requires adoption or recovery.
 
 Existing NFTFW installations, multiple uplinks, split tunnels, provider
 hooks, multiple peers, and native IPv6 are not silently changed. An existing
@@ -139,6 +182,12 @@ identity; configured or neighboring package states fail closed. While exact
 global mutation lock and gives only the dpkg descendant tree a protected
 transaction-local view of that pathname in a private mount namespace. This
 avoids self-deadlock without exposing an unlocked mutation interval.
+Before boot handoff or either dpkg step, the controller extracts the bound
+exact 2.0.3 binary and silently validates the current configuration with that
+parser; a v2.1-only field refuses without disclosing configuration content.
+The bridge accepts a schema-6 database only as a root-owned, single-link,
+mode-0600 regular file whose group is either the legacy `root` group or the
+exact `nftfw-web` service group.
 
 The VPN importer accepts only documented WireGuard data fields. It rejects
 hooks, commands, `SaveConfig`, provider routing directives, split tunnels,

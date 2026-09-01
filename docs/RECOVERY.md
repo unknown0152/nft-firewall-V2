@@ -41,6 +41,18 @@ bundle:
 sudo nftfw setup rollback
 ```
 
+After status is exactly phase `failed`, status `rolled_back`, generate a new
+dry-run with the intended VPN profile. This terminal retry is not a general
+existing-host adoption path. It proceeds only if the current and archived
+journals are canonical and checksum-bound; captured files, sysctls, and unit
+state exactly match the backup; managed firewall/routing/tunnel state is
+absent; every retained generation is `rolled_back`; immutable snapshots,
+endpoint cache, and monotonic provenance mappings verify; and the newly
+compiled stable identities match. The next real run archives the exact old
+journal durably before its first mutation and the daemon allocates the next
+generation ID. Any failed predicate returns
+`DISCOVERY_EXISTING_NFTFW_REQUIRES_ADOPT` without changing the host.
+
 An interrupted `inspect` phase, or `backup` phase without a recorded backup,
 is still before protected mutation. Recovery marks it terminal without
 stopping services, changing nftables, or attempting a nonexistent restore.
@@ -66,6 +78,11 @@ exact prior `daemon.json`, the Docker socket drop-in state, the previous
 `net.ipv4.ip_forward` value, and Docker enabled/active state. A failure before,
 during, or after the confirmed Docker restart restores those exact resources
 while the temporary setup guard still blocks physical container forwarding.
+On a post-reboot resume, `docker.service` and `docker.socket` are additionally
+held inactive. Restart confirmation occurs before that hold is released; on
+rollback, the exact prior Docker files are restored and systemd is reloaded
+before release. The hold's ready/release files are fixed-content, root-owned,
+single-link runtime state and are removed after a successful handoff.
 Checksum failure stops restoration with
 `SETUP_BACKUP_RESTORE_CHECKSUM_FAILED`.
 
@@ -111,7 +128,10 @@ Docker-specific setup failures are actionable and remain pre-commit:
 
 Do not retry by enabling Docker iptables or adding a broad forwarding rule.
 Let rollback complete, inspect Docker through `docs/DOCKER.md`, and run a new
-dry-run.
+dry-run. The disposable exact-rollback fixture keeps Docker's five firewall,
+forwarding, masquerade, and proxy ownership settings coherent at baseline;
+when a restart must be exercised, only a restart-requiring proxy setting such
+as the prior `userland-proxy` value differs before setup.
 
 ## Docker runtime rebind
 
@@ -275,6 +295,20 @@ bridge accepts only that transient boundary and the manifest-named target;
 `ii`, unpacked, failed, malformed, unrelated, or ambiguous states are not
 recovery shortcuts.
 
+Before restoring any boot ownership or invoking dpkg, the controller extracts
+the manifest-bound exact 2.0.3 binary and validates the current configuration
+with that parser while suppressing parser output. It repeats the check
+immediately before package replacement. A failure means the current file uses
+fields that exact 2.0.3 cannot restore; put back the protected pre-upgrade
+configuration or use the package-removal handoff. Do not remove fields merely
+to bypass the refusal, and do not expect the error to print private content.
+
+The optional schema database may come from either supported ownership
+history: legacy root CLI creation (`root:root`) or v2.1 systemd creation
+(`root:nftfw-web`). In both cases the bridge requires UID 0, exactly mode
+0600, one hard link, an exact runtime service GID when that group is used, and
+schema history `1,2,3,4,5,6`. Any other group or metadata is a hard stop.
+
 The controller must retain the canonical `/run/nftfw/mutation.lock` for the
 whole transaction. Exact 2.0.3's historical pre-install backup also takes that
 pathname, so dpkg runs in a private mount namespace where only that pathname
@@ -289,13 +323,50 @@ reviewed package-manager recovery procedure.
 
 ## Boot enforcement
 
-Managed setup adds a pre-network initramfs boundary before the ordinary boot
-units. The hook is inactive without the root-only managed marker. When active,
-its loader runs as an explicit prerequisite of initramfs-tools' udev script,
-sets reversible IPv6 defaults before a NIC can be created, verifies the
-embedded rules checksum, and applies `inet nftfw_initramfs_guard` with drop
-policies. Any missing input, checksum error, ordering error, module failure,
-or nftables failure blocks boot networking in the initramfs.
+Managed setup first creates a durable `reboot_required` transaction. It owns
+one fixed GRUB fragment containing one `ipv6.disable=1`, regenerates and
+verifies every Linux boot entry, and enables the native checksum-bound
+initramfs guard. It does not auto-reboot. Before the explicit reboot, do not
+delete the journal, backup, fragment, or initramfs marker; rerunning the same
+setup command on the same boot simply remains `reboot_required`.
+
+After reboot, `nftfw setup status` reports `resume_ready` only when the boot ID
+changed, the fixed fragment/generated configuration still match, the running
+command line contains exactly one token, the kernel disable parameter is set,
+no IPv6 address state exists, and the native guard verifies. Rerun the same
+profile-only setup command to continue the original transaction. Missing,
+quoted, duplicated, conflicting, or changed proof fails closed before Docker,
+forwarding, VPN, routing, or firewall mutation.
+
+During root switch the initramfs table still denies all interfaces. Before
+`network-pre.target` is released, `nftfw-setup-boot-hold.service` takes the
+canonical setup lock, proves the exact pending transaction, and atomically
+replaces that table with `inet nftfw_setup_resume_guard`. Only DHCP, declared
+LAN management, reply traffic, loopback, and marked UDP to the protected
+cached provider endpoint are allowed. DNS is deliberately unnecessary.
+`nftfw-setup-docker-hold.service` independently blocks both Docker consumers
+until setup owns their configuration and forwarding. A crash after the table
+swap but before the ready marker is recoverable by exact revalidation; zero,
+two, changed, or additional tables remain blocked.
+
+The initramfs loader is an explicit prerequisite of initramfs-tools' udev
+script. It verifies the kernel-wide disable contract, never re-enables
+loopback, checks the embedded rules checksum, and applies
+`inet nftfw_initramfs_guard` with drop policies as defense in depth. Any
+missing input, checksum, ordering, module, command-line, or nftables error
+blocks boot networking in the initramfs.
+
+Useful midpoint diagnostics, without weakening the holds:
+
+```bash
+sudo nftfw setup status
+sudo systemctl status nftfw-setup-boot-hold nftfw-setup-docker-hold
+sudo journalctl -b -u nftfw-setup-boot-hold -u nftfw-setup-docker-hold
+```
+
+Do not manually start Docker, remove generator output, delete either guard, or
+add a broad nftables accept. Correct the protected evidence or invoke the
+normal setup rollback path.
 
 When a generation is committed, V2 writes an immutable checked snapshot and a
 generation/checksum enforcement pointer. At boot, `nftfw-early.service`
@@ -318,8 +389,8 @@ takes the canonical mutation lock and removes the bootstrap table only when
 its table comment and all three chain hook/priority/policy/comment identities
 match exactly. Absence is valid on the first live setup. An unexpected rule,
 set, chain, alias, or table identity is foreign state and is never deleted.
-Final managed sysctls keep every non-loopback interface disabled for IPv6 and
-explicitly retain `::1` on loopback.
+Final managed sysctls retain disabled-mode defense in depth. Kernel-wide
+disablement means no loopback IPv6 address exists in this managed mode.
 
 If a required pointer or snapshot is missing, corrupt, symlinked, oversized,
 or has an invalid checksum, recovery fails before an nftables mutation and
@@ -335,12 +406,18 @@ sudo nftfw reconcile
 sudo /usr/lib/nftfw/initramfs/nftfw-initramfs-manage verify-enabled
 ```
 
-If an initramfs rebuild fails during the committed setup handoff, do not
-reboot. Keep LAN/local-console recovery, inspect `nftfw setup status`, fix the
-local initramfs-tools error, and let `nftfw-setup-rollback.timer` retry the
-committed recover-forward path. Removing the package or using the source
-uninstaller first runs the reversible `disable` transaction; it refuses
-removal if every installed initramfs cannot be proved free of the guard.
+Manual rollback before the first reboot restores the captured fragment and
+generated configuration and reaches `rolled_back`. Rollback after the kernel
+has booted with managed disablement restores the next-boot files exactly but
+reports `rollback_reboot_required`; it never claims the running kernel has
+changed. Reboot explicitly, then run `nftfw setup rollback` once more to
+verify the restored boot and terminalize `rolled_back`.
+
+Package removal, the source uninstaller, and exact-2.0.3 downgrade invoke the
+same narrow boot handoff before the 2.1.0 helper disappears. They refuse a
+foreign or changed fragment/generated configuration or an unverifiable
+initramfs. When they print `rollback_reboot_required`, a reboot is still
+mandatory even though the on-disk next boot has already been restored.
 
 ## Managed WireGuard failure
 

@@ -13,7 +13,7 @@ DOC_EXAMPLE_DIR=$DOC_DIR/examples
 RUNTIME_DIR=/run/nftfw
 case "$(uname -m)" in x86_64) ARCH=amd64 ;; aarch64|arm64) ARCH=arm64 ;; *) echo "Unsupported architecture: $(uname -m)" >&2; exit 1 ;; esac
 
-for command_name in nft ip wg systemctl systemd-analyze sha256sum awk getent groupadd useradd install readlink mktemp sed grep find dpkg jq sqlite3 lsinitramfs unmkinitramfs update-initramfs; do
+for command_name in nft ip wg systemctl systemd-analyze sha256sum awk getent groupadd useradd install readlink mktemp sed grep find findmnt dpkg dpkg-query jq sqlite3 lsinitramfs unmkinitramfs update-initramfs update-grub efibootmgr; do
     command -v "$command_name" >/dev/null || { echo "Missing prerequisite: $command_name" >&2; exit 1; }
 done
 protected_root_file() {
@@ -86,6 +86,9 @@ for input in \
     "$ROOT_DIR/packaging/systemd/nftfw-rollback.timer" \
     "$ROOT_DIR/packaging/systemd/nftfw-setup-rollback.service" \
     "$ROOT_DIR/packaging/systemd/nftfw-setup-rollback.timer" \
+    "$ROOT_DIR/packaging/systemd/nftfw-setup-boot-hold.service" \
+    "$ROOT_DIR/packaging/systemd/nftfw-setup-docker-hold.service" \
+    "$ROOT_DIR/packaging/systemd/nftfw-setup-boot-hold-generator" \
     "$ROOT_DIR/packaging/systemd/nftfw-managed-rollback.service" \
     "$ROOT_DIR/packaging/systemd/nftfw-managed-rollback.timer" \
     "$ROOT_DIR/packaging/systemd/nftfw-vpn.service" \
@@ -102,6 +105,7 @@ for input in \
 done
 for input in \
     "$ROOT_DIR/packaging/initramfs/nftfw-ipv6-early" \
+    "$ROOT_DIR/packaging/initramfs/nftfw-udev-gate" \
     "$ROOT_DIR/packaging/initramfs/nftfw-initramfs-guard.nft" \
     "$ROOT_DIR/packaging/initramfs/nftfw-initramfs-manage" \
     "$ROOT_DIR/packaging/initramfs/nftfw-early-guard-hook"; do
@@ -300,9 +304,11 @@ install -o root -g root -m 0755 "$ROOT_DIR/dist/nftfw-linux-$ARCH" "$BIN_DIR/nft
 install -o root -g root -m 0755 "$ROOT_DIR/dist/nftfwd-linux-$ARCH" "$BIN_DIR/nftfwd"
 install -o root -g root -m 0755 "$ROOT_DIR/dist/nftfw-web-linux-$ARCH" "$BIN_DIR/nftfw-web"
 install -o root -g root -m 0755 "$ROOT_DIR/scripts/package-rollback.sh" "$BIN_DIR/package-rollback"
-install -d -o root -g root -m 0755 "$BIN_DIR/initramfs" /usr/share/initramfs-tools/hooks
+install -d -o root -g root -m 0755 "$BIN_DIR/initramfs" /usr/share/initramfs-tools/hooks /etc/default/grub.d
 install -o root -g root -m 0755 "$ROOT_DIR/packaging/initramfs/nftfw-ipv6-early" \
     "$BIN_DIR/initramfs/nftfw-ipv6-early"
+install -o root -g root -m 0755 "$ROOT_DIR/packaging/initramfs/nftfw-udev-gate" \
+    "$BIN_DIR/initramfs/nftfw-udev-gate"
 install -o root -g root -m 0644 "$ROOT_DIR/packaging/initramfs/nftfw-initramfs-guard.nft" \
     "$BIN_DIR/initramfs/nftfw-initramfs-guard.nft"
 install -o root -g root -m 0755 "$ROOT_DIR/packaging/initramfs/nftfw-initramfs-manage" \
@@ -328,6 +334,8 @@ systemd_units=(
     nftfw-rollback.timer
     nftfw-setup-rollback.service
     nftfw-setup-rollback.timer
+    nftfw-setup-boot-hold.service
+    nftfw-setup-docker-hold.service
     nftfw-managed-rollback.service
     nftfw-managed-rollback.timer
     nftfw-vpn.service
@@ -342,6 +350,25 @@ for unit in "${systemd_units[@]}"; do
     }
     install -o root -g root -m 0644 "$ROOT_DIR/packaging/systemd/$unit" "$target"
 done
+generator_dir=/usr/lib/systemd/system-generators
+generator_target=$generator_dir/nftfw-setup-boot-hold-generator
+[[ ! -L "$generator_dir" && ( ! -e "$generator_dir" || -d "$generator_dir" ) &&
+    ! -L "$generator_target" && ( ! -e "$generator_target" || -f "$generator_target" ) ]] || {
+    echo "Refusing unsafe systemd generator target: $generator_target" >&2
+    exit 1
+}
+if [[ -f "$generator_target" ]]; then
+    installed_generator_sha=$(sha256sum "$generator_target" | awk '{ print $1 }')
+    source_generator_sha=$(sha256sum \
+        "$ROOT_DIR/packaging/systemd/nftfw-setup-boot-hold-generator" | awk '{ print $1 }')
+    [[ "$installed_generator_sha" == "$source_generator_sha" ]] || {
+        echo "Refusing to overwrite a foreign systemd generator: $generator_target" >&2
+        exit 1
+    }
+fi
+install -d -o root -g root -m 0755 "$generator_dir"
+install -o root -g root -m 0755 \
+    "$ROOT_DIR/packaging/systemd/nftfw-setup-boot-hold-generator" "$generator_target"
 for example in nftfwd-docker-access.conf.example nftfwd-final-early.conf.example \
     nftfw-rollback-final-early.conf.example nftfw-consumer-final-ready.conf.example; do
     install -o root -g root -m 0644 "$ROOT_DIR/packaging/systemd/$example" \

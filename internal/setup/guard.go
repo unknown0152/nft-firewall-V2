@@ -1,6 +1,7 @@
 package setup
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"net/netip"
@@ -8,6 +9,8 @@ import (
 	"strconv"
 	"strings"
 )
+
+const resumeGuardTable = "nftfw_setup_resume_guard"
 
 func renderGuard(uplink, vpnInterface, fwmark string, endpointPort int, endpoints []string, lan []string, management []int) ([]byte, error) {
 	if uplink == "" || vpnInterface == "" || uplink == vpnInterface || fwmark == "" ||
@@ -69,4 +72,16 @@ func renderGuard(uplink, vpnInterface, fwmark string, endpointPort int, endpoint
 	builder.WriteString("    }\n")
 	builder.WriteString("}\n")
 	return []byte(builder.String()), nil
+}
+
+func renderResumeGuard(setupGuard []byte) ([]byte, error) {
+	const header = "table inet nftfw_setup_guard {\n"
+	if len(setupGuard) == 0 || len(setupGuard) > 1<<20 ||
+		bytes.Count(setupGuard, []byte(header)) != 1 || !bytes.HasPrefix(setupGuard, []byte(header)) ||
+		bytes.Contains(setupGuard, []byte(resumeGuardTable)) {
+		return nil, errors.New("SETUP_RESUME_GUARD_INVALID")
+	}
+	replacement := "table inet " + resumeGuardTable + " {\n" +
+		"    comment \"nftfw:setup-resume-guard:v1\"\n"
+	return bytes.Replace(setupGuard, []byte(header), []byte(replacement), 1), nil
 }

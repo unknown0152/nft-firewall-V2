@@ -310,6 +310,38 @@ func TestUnixStatusAndControl(t *testing.T) {
 	cancel()
 }
 
+func TestCallCancellationClosesAnUnresponsiveConnection(t *testing.T) {
+	dir := secureTestDir(t)
+	path := filepath.Join(dir, "hung.sock")
+	listener, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+	accepted := make(chan net.Conn, 1)
+	go func() {
+		connection, acceptErr := listener.Accept()
+		if acceptErr == nil {
+			accepted <- connection
+		}
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	if _, err := Call(ctx, path, Request{Op: "status"}); err == nil {
+		t.Fatal("unresponsive API call ignored context cancellation")
+	}
+	if elapsed := time.Since(started); elapsed > time.Second {
+		t.Fatalf("API cancellation was not bounded: %s", elapsed)
+	}
+	select {
+	case connection := <-accepted:
+		_ = connection.Close()
+	case <-time.After(time.Second):
+		t.Fatal("test server did not accept the API connection")
+	}
+}
+
 func waitForUnixSocket(t *testing.T, path string, serveErr <-chan error) {
 	t.Helper()
 	deadline := time.Now().Add(time.Second)

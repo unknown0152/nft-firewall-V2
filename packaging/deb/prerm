@@ -9,19 +9,45 @@ case "${1:-}" in
         :
         ;;
     remove|deconfigure)
+        journal=/var/lib/nftfw/setup/journal.json
+        if [ -L "$journal" ]; then
+            echo "Refusing removal: setup journal is an unsafe link." >&2
+            exit 1
+        fi
+        if [ -e /etc/default/grub.d/90-nftfw-ipv6-disabled.cfg ] || \
+            [ -L /etc/default/grub.d/90-nftfw-ipv6-disabled.cfg ] || \
+            { [ -f "$journal" ] && grep -Fq \
+                '"boot_policy": "debian-grub-ipv6-disabled-v1"' "$journal"; }; then
+            [ -x /usr/lib/nftfw/nftfw ] || {
+                echo "Refusing removal: managed boot-policy helper is missing." >&2
+                exit 1
+            }
+            /usr/lib/nftfw/nftfw setup boot-handoff --package-remove
+            boot_handoff=1
+        else
+            boot_handoff=0
+        fi
         if [ -e /etc/nftfw/initramfs-managed-disabled-v1 ] || \
-            [ -L /etc/nftfw/initramfs-managed-disabled-v1 ]; then
+            [ -L /etc/nftfw/initramfs-managed-disabled-v1 ] || \
+            [ -e /etc/nftfw/initramfs-source-owner-v1 ] || \
+            [ -L /etc/nftfw/initramfs-source-owner-v1 ] || \
+            [ -e /etc/initramfs-tools/scripts/init-top/nftfw-ipv6-early ] || \
+            [ -L /etc/initramfs-tools/scripts/init-top/nftfw-ipv6-early ] || \
+            [ -e /etc/initramfs-tools/scripts/init-top/udev ] || \
+            [ -L /etc/initramfs-tools/scripts/init-top/udev ]; then
             [ -x /usr/lib/nftfw/initramfs/nftfw-initramfs-manage ] || {
                 echo "Refusing removal: managed initramfs guard helper is missing." >&2
                 exit 1
             }
         fi
-        if [ -x /usr/lib/nftfw/initramfs/nftfw-initramfs-manage ]; then
+        if [ "$boot_handoff" -eq 0 ] && [ -x /usr/lib/nftfw/initramfs/nftfw-initramfs-manage ]; then
             /usr/lib/nftfw/initramfs/nftfw-initramfs-manage disable
         fi
         if [ -d /run/systemd/system ]; then
             systemctl disable --now nftfw-web.service nftfw-vpn.service \
                 nftfw-setup-rollback.timer nftfw-setup-rollback.service \
+                nftfw-setup-boot-hold.service \
+                nftfw-setup-docker-hold.service \
                 nftfw-managed-rollback.timer nftfw-managed-rollback.service \
                 nftfw-rollback.timer nftfw-rollback.service nftfwd.service \
                 nftfw-enforcement-ready.service nftfw-early.service \

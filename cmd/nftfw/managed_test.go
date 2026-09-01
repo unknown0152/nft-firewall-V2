@@ -6,8 +6,10 @@ import (
 	"errors"
 	"io"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -36,6 +38,13 @@ func withManagedTestEnvironment(t *testing.T) (string, string) {
 	t.Helper()
 	oldDockerDaemon, oldDockerDropIn := managedDockerDaemon, managedDockerDropIn
 	oldAdoptionPlan := managedAdoptionPlan
+	oldSetupRollbackAcquire := setupRollbackAcquire
+	oldSetupRecoverySystem := setupRecoverySystem
+	oldSetupRecoveryJournal := setupRecoveryJournal
+	oldSetupBootStatus := setupBootStatus
+	oldSetupBootHandoff := setupBootHandoff
+	oldSetupBootHold := setupBootHold
+	oldSetupDockerHold := setupDockerHold
 	oldValues := []any{
 		managedIntentPath, managedConfigPath, managedVPNPath, setupJournalPath,
 		setupLockPath, managedStatusSock, managedControlSock, managedStateDB,
@@ -74,6 +83,13 @@ func withManagedTestEnvironment(t *testing.T) (string, string) {
 		managedChangeNow = oldValues[23].(func() time.Time)
 		managedChangeTimeout = oldValues[24].(time.Duration)
 		managedAdoptionPlan = oldAdoptionPlan
+		setupRollbackAcquire = oldSetupRollbackAcquire
+		setupRecoverySystem = oldSetupRecoverySystem
+		setupRecoveryJournal = oldSetupRecoveryJournal
+		setupBootStatus = oldSetupBootStatus
+		setupBootHandoff = oldSetupBootHandoff
+		setupBootHold = oldSetupBootHold
+		setupDockerHold = oldSetupDockerHold
 	})
 
 	root := t.TempDir()
@@ -164,6 +180,64 @@ Endpoint = vpn.example.test:51820
 		t.Fatal(err)
 	}
 	return root, source
+}
+
+type setupRecoveryFixture struct {
+	committed   bool
+	err         error
+	rollbackErr error
+	recoveryErr error
+	calls       []string
+	onRollback  func(managedsetup.Journal)
+	onRecovery  func(managedsetup.Journal)
+}
+
+func (f *setupRecoveryFixture) GenerationCommitted(_ context.Context, generation uint64) (bool, error) {
+	f.calls = append(f.calls, "inspect:"+strconv.FormatUint(generation, 10))
+	return f.committed, f.err
+}
+
+func (f *setupRecoveryFixture) Rollback(
+	_ context.Context, _ managedsetup.Plan, journal managedsetup.Journal,
+) error {
+	f.calls = append(f.calls, "rollback:"+string(journal.Phase))
+	if f.onRollback != nil {
+		f.onRollback(journal)
+	}
+	return f.rollbackErr
+}
+
+func (f *setupRecoveryFixture) RecoverCommitted(
+	_ context.Context, _ managedsetup.Plan, journal managedsetup.Journal,
+) error {
+	f.calls = append(f.calls, "recover:"+string(journal.Phase))
+	if f.onRecovery != nil {
+		f.onRecovery(journal)
+	}
+	return f.recoveryErr
+}
+
+type setupRecoveryJournalFixture struct {
+	journal   managedsetup.Journal
+	writes    []managedsetup.Journal
+	failWrite int
+}
+
+func (s *setupRecoveryJournalFixture) Read() (managedsetup.Journal, error) {
+	return s.journal, nil
+}
+
+func (s *setupRecoveryJournalFixture) Write(journal managedsetup.Journal) error {
+	s.writes = append(s.writes, journal)
+	if s.failWrite == len(s.writes) {
+		return errors.New("injected journal write failure")
+	}
+	s.journal = journal
+	return nil
+}
+
+func (s *setupRecoveryJournalFixture) Begin(journal managedsetup.Journal, _ string) error {
+	return s.Write(journal)
 }
 
 func TestManagedMutationCommitDryRunNoOpAndRollback(t *testing.T) {
@@ -327,6 +401,7 @@ func TestManagedSetupStatusRollbackAndUsageFailures(t *testing.T) {
 		Schema: "nftfw.setup-journal.v1", Transaction: "complete",
 		Phase: managedsetup.PhaseComplete, Status: "complete",
 		StartedAt: now, UpdatedAt: now, Deadline: now.Add(time.Minute),
+		Generation: 7, Committed: true,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -347,6 +422,650 @@ func TestManagedSetupStatusRollbackAndUsageFailures(t *testing.T) {
 		if err := call(); err == nil {
 			t.Fatal("invalid managed command accepted")
 		}
+	}
+}
+
+func TestExpiredSetupWatchdogDoesNotContendWithLiveTransaction(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	store := managedsetup.FileJournal{Path: setupJournalPath}
+	now := time.Now().UTC()
+	journal := managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "foreground",
+		Phase: managedsetup.PhaseRuntime, Status: "running",
+		StartedAt: now.Add(-time.Hour), UpdatedAt: now, Deadline: now.Add(time.Hour),
+		BackupDir: filepath.Join(managedStateRoot, "setup/backups/foreground"),
+		Summary:   managedsetup.Summary{Schema: "nftfw.setup-plan.v1"},
+	}
+	if err := store.Write(journal); err != nil {
+		t.Fatal(err)
+	}
+	release, err := acquireSetupLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release()
+	if err := setupRollbackCommand([]string{"--expired"}); err != nil {
+		t.Fatalf("unexpired watchdog contended with foreground setup: %v", err)
+	}
+	journal.Deadline = now.Add(-time.Second)
+	journal.UpdatedAt = now
+	if err := store.Write(journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupRollbackCommand([]string{"--expired"}); err == nil ||
+		err.Error() != "SETUP_ALREADY_RUNNING" {
+		t.Fatalf("expired watchdog bypassed canonical lock: %v", err)
+	}
+}
+
+func TestExpiredSetupWatchdogRevalidatesJournalAfterLock(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	store := managedsetup.FileJournal{Path: setupJournalPath}
+	now := time.Now().UTC()
+	original := managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "expired-original",
+		Phase: managedsetup.PhaseBackup, Status: "running",
+		StartedAt: now.Add(-time.Hour), UpdatedAt: now, Deadline: now.Add(-time.Minute),
+	}
+	if err := store.Write(original); err != nil {
+		t.Fatal(err)
+	}
+	setupRollbackAcquire = func() (func(), error) {
+		replacement := original
+		replacement.Transaction = "replacement"
+		replacement.StartedAt = replacement.StartedAt.Add(time.Second)
+		if err := store.Write(replacement); err != nil {
+			return nil, err
+		}
+		return acquireSetupLock()
+	}
+	if err := setupRollbackCommand([]string{"--expired"}); err == nil ||
+		err.Error() != "SETUP_JOURNAL_CHANGED" {
+		t.Fatalf("replacement journal was not refused: %v", err)
+	}
+	replacement, err := store.Read()
+	if err != nil || replacement.Status != "running" || replacement.Transaction != "replacement" {
+		t.Fatalf("replacement journal was mutated: %#v %v", replacement, err)
+	}
+}
+
+func TestExpiredSetupWatchdogRechecksDeadlineUnderLock(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	store := managedsetup.FileJournal{Path: setupJournalPath}
+	now := time.Now().UTC()
+	journal := managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "same-transaction",
+		Phase: managedsetup.PhaseBackup, Status: "running",
+		StartedAt: now.Add(-time.Hour), UpdatedAt: now, Deadline: now.Add(-time.Minute),
+	}
+	if err := store.Write(journal); err != nil {
+		t.Fatal(err)
+	}
+	setupRollbackAcquire = func() (func(), error) {
+		journal.Deadline = now.Add(time.Hour)
+		journal.UpdatedAt = now.Add(time.Second)
+		if err := store.Write(journal); err != nil {
+			return nil, err
+		}
+		return acquireSetupLock()
+	}
+	if err := setupRollbackCommand([]string{"--expired"}); err != nil {
+		t.Fatalf("renewed same transaction was not rechecked under lock: %v", err)
+	}
+	current, err := store.Read()
+	if err != nil || current.Status != "running" || !current.Deadline.Equal(journal.Deadline) {
+		t.Fatalf("renewed journal was mutated: %#v %v", current, err)
+	}
+}
+
+func TestSetupLockIsReleasedWhenOwnerProcessDies(t *testing.T) {
+	if os.Getenv("NFTFW_SETUP_LOCK_OWNER_HELPER") == "1" {
+		setupLockPath = os.Getenv("NFTFW_SETUP_LOCK_HELPER_PATH")
+		release, err := acquireSetupLock()
+		if err != nil {
+			os.Exit(2)
+		}
+		defer release()
+		if err := os.WriteFile(os.Getenv("NFTFW_SETUP_LOCK_HELPER_READY"), []byte("ready\n"), 0o600); err != nil {
+			os.Exit(3)
+		}
+		time.Sleep(time.Minute)
+		return
+	}
+	root, _ := withManagedTestEnvironment(t)
+	ready := filepath.Join(root, "lock-owner-ready")
+	command := exec.Command(os.Args[0], "-test.run=^TestSetupLockIsReleasedWhenOwnerProcessDies$", "-test.count=1")
+	command.Env = []string{
+		"NFTFW_SETUP_LOCK_OWNER_HELPER=1",
+		"NFTFW_SETUP_LOCK_HELPER_PATH=" + setupLockPath,
+		"NFTFW_SETUP_LOCK_HELPER_READY=" + ready,
+	}
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	for deadline := time.Now().Add(5 * time.Second); ; {
+		if _, err := os.Stat(ready); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			_ = command.Process.Kill()
+			_ = command.Wait()
+			t.Fatal("lock-owner helper did not become ready")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	if err := command.Wait(); err == nil {
+		t.Fatal("killed lock-owner helper exited successfully")
+	}
+	now := time.Now().UTC()
+	store := managedsetup.FileJournal{Path: setupJournalPath}
+	if err := store.Write(managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "owner-died",
+		Phase: managedsetup.PhaseBackup, Status: "running",
+		StartedAt: now.Add(-time.Hour), UpdatedAt: now, Deadline: now.Add(-time.Minute),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupRollbackCommand([]string{"--expired"}); err != nil {
+		t.Fatalf("dead owner left the kernel lock held: %v", err)
+	}
+	journal, err := store.Read()
+	if err != nil || journal.Status != "rolled_back" {
+		t.Fatalf("expired journal was not recovered after owner death: %#v %v", journal, err)
+	}
+}
+
+func TestOutOfProcessSetupRollbackClassifiesEveryPostApplyPrecommitPhase(t *testing.T) {
+	for _, phase := range []managedsetup.Phase{
+		managedsetup.PhaseApply,
+		managedsetup.PhaseTunnel,
+		managedsetup.PhaseValidate,
+		managedsetup.PhaseCommit,
+	} {
+		t.Run(string(phase), func(t *testing.T) {
+			_, _ = withManagedTestEnvironment(t)
+			fixture := &setupRecoveryFixture{}
+			setupRecoverySystem = func() setupRecoveryExecutor { return fixture }
+			now := time.Now().UTC()
+			store := managedsetup.FileJournal{Path: setupJournalPath}
+			if err := store.Write(managedsetup.Journal{
+				Schema: "nftfw.setup-journal.v1", Transaction: "dead-" + string(phase),
+				Phase: phase, Status: "running", StartedAt: now.Add(-time.Minute),
+				UpdatedAt: now, Deadline: now.Add(time.Minute), Generation: 7,
+				BackupDir: filepath.Join(managedStateRoot, "setup/backups/dead-"+string(phase)),
+				Summary:   managedsetup.Summary{Schema: "nftfw.setup-plan.v1"},
+			}); err != nil {
+				t.Fatal(err)
+			}
+			if err := setupRollbackCommand(nil); err != nil {
+				t.Fatalf("out-of-process recovery failed: %v", err)
+			}
+			wantCalls := "inspect:7,rollback:" + string(phase)
+			if strings.Join(fixture.calls, ",") != wantCalls {
+				t.Fatalf("recovery calls=%v want=%s", fixture.calls, wantCalls)
+			}
+			journal, err := store.Read()
+			if err != nil || journal.Status != "rolled_back" || journal.Committed {
+				t.Fatalf("uncommitted process-death journal not terminalized: %#v %v", journal, err)
+			}
+		})
+	}
+}
+
+func TestOutOfProcessSetupRollbackRecoversCommitJournalGapForward(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	fixture := &setupRecoveryFixture{committed: true}
+	setupRecoverySystem = func() setupRecoveryExecutor { return fixture }
+	now := time.Now().UTC()
+	store := managedsetup.FileJournal{Path: setupJournalPath}
+	if err := store.Write(managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "dead-after-commit",
+		Phase: managedsetup.PhaseCommit, Status: "running",
+		StartedAt: now.Add(-time.Minute), UpdatedAt: now, Deadline: now.Add(time.Minute),
+		Generation: 7,
+		BackupDir:  filepath.Join(managedStateRoot, "setup/backups/dead-after-commit"),
+		Summary:    managedsetup.Summary{Schema: "nftfw.setup-plan.v1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupRollbackCommand(nil); err != nil {
+		t.Fatalf("commit-gap recovery failed: %v", err)
+	}
+	if strings.Join(fixture.calls, ",") != "inspect:7,recover:commit" {
+		t.Fatalf("commit-gap recovery calls=%v", fixture.calls)
+	}
+	journal, err := store.Read()
+	if err != nil || journal.Status != "complete" || !journal.Committed {
+		t.Fatalf("committed process-death journal not recovered forward: %#v %v", journal, err)
+	}
+}
+
+func TestOutOfProcessRecoveryPublishesTransitionsBeforeMutation(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		committed  bool
+		transition string
+		terminal   string
+	}{
+		{name: "rollback", transition: "rolling_back", terminal: "rolled_back"},
+		{name: "committed", committed: true, transition: "recovering_committed", terminal: "complete"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _ = withManagedTestEnvironment(t)
+			now := time.Now().UTC()
+			store := &setupRecoveryJournalFixture{journal: managedsetup.Journal{
+				Schema: "nftfw.setup-journal.v1", Transaction: "transition-" + test.name,
+				Phase: managedsetup.PhaseValidate, Status: "running",
+				StartedAt: now.Add(-time.Minute), UpdatedAt: now, Deadline: now.Add(time.Minute),
+				Generation: 7,
+				BackupDir:  filepath.Join(managedStateRoot, "setup/backups/transition-"+test.name),
+				Summary:    managedsetup.Summary{Schema: "nftfw.setup-plan.v1"},
+			}}
+			setupRecoveryJournal = func() managedsetup.JournalStore { return store }
+			fixture := &setupRecoveryFixture{committed: test.committed}
+			assertTransition := func(journal managedsetup.Journal) {
+				if len(store.writes) != 1 || store.journal.Status != test.transition ||
+					store.journal.Phase != managedsetup.PhaseValidate || journal.Phase != managedsetup.PhaseValidate {
+					t.Fatalf("recovery mutation preceded its durable origin transition: writes=%#v journal=%#v", store.writes, journal)
+				}
+			}
+			fixture.onRollback = assertTransition
+			fixture.onRecovery = assertTransition
+			setupRecoverySystem = func() setupRecoveryExecutor { return fixture }
+			if err := setupRollbackCommand(nil); err != nil {
+				t.Fatal(err)
+			}
+			if len(store.writes) != 2 || store.journal.Status != test.terminal {
+				t.Fatalf("recovery result was not durable: writes=%#v final=%#v", store.writes, store.journal)
+			}
+		})
+	}
+}
+
+func TestOutOfProcessRecoveryTransitionWriteFailureDoesNotMutate(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	now := time.Now().UTC()
+	store := &setupRecoveryJournalFixture{
+		failWrite: 1,
+		journal: managedsetup.Journal{
+			Schema: "nftfw.setup-journal.v1", Transaction: "transition-write-failure",
+			Phase: managedsetup.PhaseRuntime, Status: "running",
+			StartedAt: now.Add(-time.Minute), UpdatedAt: now, Deadline: now.Add(time.Minute),
+			BackupDir: filepath.Join(managedStateRoot, "setup/backups/transition-write-failure"),
+			Summary:   managedsetup.Summary{Schema: "nftfw.setup-plan.v1"},
+		},
+	}
+	setupRecoveryJournal = func() managedsetup.JournalStore { return store }
+	fixture := &setupRecoveryFixture{}
+	setupRecoverySystem = func() setupRecoveryExecutor { return fixture }
+	err := setupRollbackCommand(nil)
+	if err == nil || err.Error() != "SETUP_RECOVERY_TRANSITION_WRITE_FAILED" {
+		t.Fatalf("transition write failure=%v", err)
+	}
+	if len(fixture.calls) != 0 {
+		t.Fatalf("recovery mutated before transition publication: %v", fixture.calls)
+	}
+}
+
+func TestOutOfProcessRecoveryFailureIsRedactedAndRetryable(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	now := time.Now().UTC()
+	store := managedsetup.FileJournal{Path: setupJournalPath}
+	if err := store.Write(managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "retry-rollback",
+		Phase: managedsetup.PhaseValidate, Status: "running",
+		StartedAt: now.Add(-time.Minute), UpdatedAt: now, Deadline: now.Add(time.Minute),
+		Generation: 7,
+		BackupDir:  filepath.Join(managedStateRoot, "setup/backups/retry-rollback"),
+		Summary:    managedsetup.Summary{Schema: "nftfw.setup-plan.v1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture := &setupRecoveryFixture{rollbackErr: errors.New("provider secret must never reach the journal")}
+	setupRecoverySystem = func() setupRecoveryExecutor { return fixture }
+	if err := setupRollbackCommand(nil); err == nil || err.Error() != "SETUP_ROLLBACK_FAILED" {
+		t.Fatalf("rollback failure=%v", err)
+	}
+	failed, err := store.Read()
+	if err != nil || failed.Status != "rollback_failed" ||
+		failed.Phase != managedsetup.PhaseValidate || failed.ErrorCode != "SETUP_RECOVERY_FAILED" {
+		t.Fatalf("rollback failure evidence invalid: %#v %v", failed, err)
+	}
+
+	fixture.calls = nil
+	fixture.rollbackErr = nil
+	fixture.err = errors.New("known uncommitted retry must not re-inspect")
+	if err := setupRollbackCommand(nil); err != nil {
+		t.Fatalf("rollback retry failed: %v", err)
+	}
+	if strings.Join(fixture.calls, ",") != "rollback:validate" {
+		t.Fatalf("known uncommitted retry was reclassified: %v", fixture.calls)
+	}
+	final, err := store.Read()
+	if err != nil || final.Status != "rolled_back" || final.Phase != managedsetup.PhaseFailed {
+		t.Fatalf("rollback retry not terminal: %#v %v", final, err)
+	}
+}
+
+func TestOutOfProcessCommittedRecoveryFailureIsRetryable(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	now := time.Now().UTC()
+	store := managedsetup.FileJournal{Path: setupJournalPath}
+	if err := store.Write(managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "retry-committed",
+		Phase: managedsetup.PhaseCommit, Status: "recovering_committed",
+		StartedAt: now.Add(-time.Minute), UpdatedAt: now, Deadline: now.Add(time.Minute),
+		Generation: 7, Committed: true,
+		BackupDir: filepath.Join(managedStateRoot, "setup/backups/retry-committed"),
+		Summary:   managedsetup.Summary{Schema: "nftfw.setup-plan.v1"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	fixture := &setupRecoveryFixture{recoveryErr: errors.New("SETUP_BOOT_ENABLE_FAILED")}
+	setupRecoverySystem = func() setupRecoveryExecutor { return fixture }
+	if err := setupRollbackCommand(nil); err == nil || err.Error() != "SETUP_COMMITTED_RECOVERY_FAILED" {
+		t.Fatalf("committed recovery failure=%v", err)
+	}
+	failed, err := store.Read()
+	if err != nil || failed.Status != "committed_recovery_failed" || !failed.Committed ||
+		failed.Phase != managedsetup.PhaseCommit || failed.ErrorCode != "SETUP_BOOT_ENABLE_FAILED" {
+		t.Fatalf("committed recovery evidence invalid: %#v %v", failed, err)
+	}
+	fixture.calls = nil
+	fixture.recoveryErr = nil
+	if err := setupRollbackCommand(nil); err != nil {
+		t.Fatalf("committed recovery retry failed: %v", err)
+	}
+	if strings.Join(fixture.calls, ",") != "recover:commit" {
+		t.Fatalf("committed recovery retry crossed classification: %v", fixture.calls)
+	}
+}
+
+func TestSetupWatchdogRejectsMalformedRecoveryStateBeforeLock(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	store := managedsetup.FileJournal{Path: setupJournalPath}
+	now := time.Now().UTC()
+	journal := managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "invalid",
+		Phase: managedsetup.PhaseRuntime, Status: "running",
+		StartedAt: now, UpdatedAt: now, Deadline: now.Add(time.Hour),
+	}
+	if err := store.Write(journal); err != nil {
+		t.Fatal(err)
+	}
+	called := false
+	setupRollbackAcquire = func() (func(), error) {
+		called = true
+		return acquireSetupLock()
+	}
+	if err := setupRollbackCommand([]string{"--expired"}); err == nil ||
+		err.Error() != "SETUP_JOURNAL_STATE_INVALID" {
+		t.Fatalf("invalid recovery evidence accepted: %v", err)
+	}
+	if called {
+		t.Fatal("invalid unexpired journal acquired the setup lock")
+	}
+}
+
+func TestSetupRecoveryJournalTransitionValidation(t *testing.T) {
+	now := time.Now().UTC()
+	base := managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "transition-validation",
+		StartedAt: now.Add(-time.Minute), UpdatedAt: now, Deadline: now.Add(time.Minute),
+		Generation: 7, BackupDir: "/var/lib/nftfw/setup/backups/transition-validation",
+		Summary: managedsetup.Summary{Schema: "nftfw.setup-plan.v1"},
+	}
+	for _, valid := range []managedsetup.Journal{
+		func() managedsetup.Journal {
+			j := base
+			j.Phase, j.Status, j.Generation = managedsetup.PhaseBootPrep, "reboot_required", 0
+			return j
+		}(),
+		func() managedsetup.Journal {
+			j := base
+			j.Phase, j.Status, j.Generation = managedsetup.PhaseBootPrep, "resume_ready", 0
+			return j
+		}(),
+		func() managedsetup.Journal {
+			j := base
+			j.Phase, j.Status = managedsetup.PhaseValidate, "rolling_back"
+			return j
+		}(),
+		func() managedsetup.Journal {
+			j := base
+			j.Phase, j.Status = managedsetup.PhaseFailed, "rollback_failed"
+			return j
+		}(),
+		func() managedsetup.Journal {
+			j := base
+			j.Phase, j.Status = managedsetup.PhaseCommit, "commit_state_unknown"
+			return j
+		}(),
+		func() managedsetup.Journal {
+			j := base
+			j.Phase, j.Status, j.Committed = managedsetup.PhaseBoot, "recovering_committed", true
+			return j
+		}(),
+		func() managedsetup.Journal {
+			j := base
+			j.Phase, j.Status, j.Committed = managedsetup.PhaseFinalize, "committed_recovery_failed", true
+			return j
+		}(),
+		func() managedsetup.Journal {
+			j := base
+			j.Phase, j.Status, j.Committed = managedsetup.PhaseFailed, "rollback_reboot_required", true
+			return j
+		}(),
+	} {
+		if err := validateSetupWatchdogJournal(valid); err != nil {
+			t.Fatalf("valid recovery transition rejected: %#v %v", valid, err)
+		}
+	}
+	for _, invalid := range []managedsetup.Journal{
+		func() managedsetup.Journal {
+			j := base
+			j.Phase, j.Status = managedsetup.PhaseHandoff, "rolling_back"
+			return j
+		}(),
+		func() managedsetup.Journal {
+			j := base
+			j.Phase, j.Status = managedsetup.PhaseValidate, "recovering_committed"
+			j.Committed = true
+			return j
+		}(),
+		func() managedsetup.Journal {
+			j := base
+			j.Phase, j.Status = managedsetup.PhaseRuntime, "commit_state_unknown"
+			return j
+		}(),
+		func() managedsetup.Journal {
+			j := base
+			j.Phase, j.Status = managedsetup.PhaseComplete, "running"
+			return j
+		}(),
+	} {
+		if err := validateSetupWatchdogJournal(invalid); err == nil || err.Error() != "SETUP_JOURNAL_STATE_INVALID" {
+			t.Fatalf("invalid recovery transition accepted: %#v err=%v", invalid, err)
+		}
+	}
+}
+
+func TestSetupBootStatusIsRedactedAndReportsResumeReady(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	now := time.Now().UTC()
+	journal := managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "boot-status",
+		Phase: managedsetup.PhaseBootPrep, Status: "reboot_required",
+		StartedAt: now, UpdatedAt: now, Deadline: now.Add(time.Minute),
+		BackupDir: "/private/boot/identity",
+		Summary: managedsetup.Summary{
+			Schema: "nftfw.setup-plan.v1", BootPolicy: managedsetup.ManagedBootPolicy,
+		},
+	}
+	if err := (managedsetup.FileJournal{Path: setupJournalPath}).Write(journal); err != nil {
+		t.Fatal(err)
+	}
+	setupBootStatus = func(context.Context, managedsetup.Journal) (string, error) {
+		return "resume_ready", nil
+	}
+	var commandErr error
+	output := captureManagedOutput(t, func() {
+		commandErr = setupCommand([]string{"status", "--json"})
+	})
+	if commandErr != nil || !strings.Contains(output, `"status": "resume_ready"`) {
+		t.Fatalf("resume-ready status missing: %v %s", commandErr, output)
+	}
+	for _, secret := range []string{"/private/boot/identity", "cmdline", "disk_uuid", "admin_argument"} {
+		if strings.Contains(output, secret) {
+			t.Fatalf("setup status leaked %q: %s", secret, output)
+		}
+	}
+}
+
+func TestSetupBootStatusFailsClosedOnInvalidProof(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	now := time.Now().UTC()
+	journal := managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "boot-status-invalid",
+		Phase: managedsetup.PhaseBootPrep, Status: "reboot_required",
+		StartedAt: now, UpdatedAt: now, Deadline: now.Add(time.Minute),
+		BackupDir: "/private/boot/identity",
+		Summary:   managedsetup.Summary{Schema: "nftfw.setup-plan.v1", BootPolicy: managedsetup.ManagedBootPolicy},
+	}
+	if err := (managedsetup.FileJournal{Path: setupJournalPath}).Write(journal); err != nil {
+		t.Fatal(err)
+	}
+	setupBootStatus = func(context.Context, managedsetup.Journal) (string, error) {
+		return "", errors.New("private detail /boot/secret")
+	}
+	err := setupCommand([]string{"status", "--json"})
+	if err == nil || err.Error() != "SETUP_BOOT_STATUS_INVALID" || strings.Contains(err.Error(), "/boot/secret") {
+		t.Fatalf("invalid boot status was not redacted and refused: %v", err)
+	}
+}
+
+func TestSetupTransientHoldCommandsAreExactAndRootOnly(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	bootCalls, dockerCalls := 0, 0
+	setupBootHold = func(_ context.Context, store managedsetup.JournalStore) error {
+		bootCalls++
+		if _, ok := store.(managedsetup.FileJournal); !ok {
+			t.Fatalf("boot hold did not receive the canonical journal store: %T", store)
+		}
+		return nil
+	}
+	setupDockerHold = func(context.Context) error {
+		dockerCalls++
+		return nil
+	}
+	if err := setupCommand([]string{"boot-hold"}); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupCommand([]string{"docker-hold"}); err != nil {
+		t.Fatal(err)
+	}
+	if bootCalls != 1 || dockerCalls != 1 {
+		t.Fatalf("transient hold calls boot=%d docker=%d", bootCalls, dockerCalls)
+	}
+	for _, args := range [][]string{{"boot-hold", "extra"}, {"docker-hold", "extra"}} {
+		if err := setupCommand(args); err == nil {
+			t.Fatalf("hidden hold accepted extra arguments: %v", args)
+		}
+	}
+	managedEUID = func() int { return 1000 }
+	for _, args := range [][]string{{"boot-hold"}, {"docker-hold"}} {
+		if err := setupCommand(args); err == nil {
+			t.Fatalf("non-root hidden hold was accepted: %v", args)
+		}
+	}
+	if bootCalls != 1 || dockerCalls != 1 {
+		t.Fatal("refused hidden hold crossed its execution boundary")
+	}
+}
+
+func TestSetupPackageUpgradePreflightRefusesActiveBootTransaction(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	now := time.Now().UTC()
+	store := managedsetup.FileJournal{Path: setupJournalPath}
+	journal := managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "package-upgrade-preflight",
+		Phase: managedsetup.PhaseComplete, Status: "complete",
+		StartedAt: now.Add(-time.Minute), UpdatedAt: now, Deadline: now.Add(time.Minute),
+		BackupDir:  "/var/lib/nftfw/setup/backups/package-upgrade-preflight",
+		Generation: 7, Committed: true,
+		Summary: managedsetup.Summary{
+			Schema: "nftfw.setup-plan.v1", BootPolicy: managedsetup.ManagedBootPolicy,
+		},
+	}
+	if err := store.Write(journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupCommand([]string{"package-upgrade-preflight"}); err != nil {
+		t.Fatalf("terminal managed boot state blocked an inert package upgrade: %v", err)
+	}
+	journal.Phase, journal.Status, journal.Generation, journal.Committed =
+		managedsetup.PhaseBootPrep, "reboot_required", 0, false
+	if err := store.Write(journal); err != nil {
+		t.Fatal(err)
+	}
+	if err := setupCommand([]string{"package-upgrade-preflight"}); err == nil ||
+		err.Error() != "SETUP_PACKAGE_UPGRADE_BOOT_TRANSACTION_ACTIVE" {
+		t.Fatalf("pending reboot transaction allowed package replacement: %v", err)
+	}
+	journal.Phase, journal.Status, journal.Generation, journal.Committed =
+		managedsetup.PhaseComplete, "complete", 7, true
+	if err := store.Write(journal); err != nil {
+		t.Fatal(err)
+	}
+	release, err := acquireSetupLock()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := setupCommand([]string{"package-upgrade-preflight"}); err == nil ||
+		err.Error() != "SETUP_PACKAGE_UPGRADE_BOOT_TRANSACTION_ACTIVE" {
+		t.Fatalf("concurrent setup owner allowed package replacement: %v", err)
+	}
+	release()
+	managedEUID = func() int { return 1000 }
+	if err := setupCommand([]string{"package-upgrade-preflight"}); err == nil {
+		t.Fatal("non-root package upgrade preflight was accepted")
+	}
+}
+
+func TestSetupPackageBootHandoffPublishesRollbackRebootState(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	now := time.Now().UTC()
+	store := managedsetup.FileJournal{Path: setupJournalPath}
+	journal := managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "boot-handoff",
+		Phase: managedsetup.PhaseComplete, Status: "complete",
+		StartedAt: now, UpdatedAt: now, Deadline: now.Add(time.Minute),
+		BackupDir: "/var/lib/nftfw/setup/backups/boot-handoff", Generation: 7, Committed: true,
+		Summary: managedsetup.Summary{
+			Schema: "nftfw.setup-plan.v1", BootPolicy: managedsetup.ManagedBootPolicy,
+		},
+	}
+	if err := store.Write(journal); err != nil {
+		t.Fatal(err)
+	}
+	called := 0
+	setupBootHandoff = func(context.Context, managedsetup.Journal) (bool, error) {
+		called++
+		return true, nil
+	}
+	if err := setupBootHandoffCommand([]string{"--package-remove"}); err != nil {
+		t.Fatal(err)
+	}
+	updated, err := store.Read()
+	if err != nil || called != 1 || updated.Status != "rollback_reboot_required" ||
+		updated.Phase != managedsetup.PhaseFailed || !updated.Committed {
+		t.Fatalf("package handoff state invalid: %#v called=%d err=%v", updated, called, err)
+	}
+	if err := validateSetupWatchdogJournal(updated); err != nil {
+		t.Fatalf("package handoff journal was not a valid explicit state: %v", err)
 	}
 }
 

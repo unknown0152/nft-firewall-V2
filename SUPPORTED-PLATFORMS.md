@@ -6,7 +6,7 @@
 | --- | --- |
 | OS | Debian 13 stable |
 | Init | systemd |
-| Boot image | Local-disk `initramfs-tools`; every installed initramfs must regenerate and verify |
+| Boot chain | Local Debian GRUB only: `grub-pc` on amd64 BIOS, `grub-efi-amd64` on amd64 EFI, or `grub-efi-arm64` on arm64 EFI; local writable boot storage, fixed source/generated paths, exact active kernel, and `initramfs-tools` must all verify |
 | Architectures | amd64, arm64 |
 | Network | Exactly one usable IPv4 default uplink |
 | Management | Local console or directly connected private LAN |
@@ -33,8 +33,9 @@ matrix.
 - macvlan, ipvlan, overlay, Swarm, Kubernetes, Podman, internal-only, IPv6,
   overlapping, malformed, or changing Docker networks;
 - public administration or automatic public SSH;
-- network-root boot, an unsupported initramfs generator, or an initramfs that
-  cannot prove the NFTFW loader precedes udev;
+- network-root/read-only boot, systemd-boot, UKI, extlinux, multiple/wrong GRUB
+  families, alternate GRUB trees, an unsupported initramfs generator, or a
+  boot identity that cannot be backed up and verified exactly;
 - native IPv6 or VPN IPv6.
 
 These cases require an explicit advanced/adoption design and their own

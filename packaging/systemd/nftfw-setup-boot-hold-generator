@@ -1,0 +1,105 @@
+#!/bin/sh
+set -eu
+umask 022
+
+marker=/etc/nftfw/setup-boot-hold-v1
+unit=/usr/lib/systemd/system/nftfw-setup-boot-hold.service
+normal=${1:-}
+
+# Absence is the inert package state. Every other marker identity, including a
+# dangling link, emits the hold and lets the protected binary decide whether a
+# locally recoverable resume is valid. A malformed marker must never result in
+# networking being released by omission.
+if [ ! -e "$marker" ] && [ ! -L "$marker" ]; then
+    exit 0
+fi
+case "$normal" in
+    /run/systemd/generator|/run/systemd/generator.early|/run/systemd/generator.late) ;;
+    *) exit 1 ;;
+esac
+[ -d "$normal" ] && [ ! -L "$normal" ] || exit 1
+if [ ! -f "$unit" ] || [ -L "$unit" ]; then
+    unit=/etc/systemd/system/nftfw-setup-boot-hold.service
+fi
+[ -f "$unit" ] && [ ! -L "$unit" ] || exit 1
+docker_hold_unit=/usr/lib/systemd/system/nftfw-setup-docker-hold.service
+if [ ! -f "$docker_hold_unit" ] || [ -L "$docker_hold_unit" ]; then
+    docker_hold_unit=/etc/systemd/system/nftfw-setup-docker-hold.service
+fi
+[ -f "$docker_hold_unit" ] && [ ! -L "$docker_hold_unit" ] || exit 1
+target=$normal/network-pre.target.requires
+if [ -L "$target" ]; then
+    exit 1
+elif [ ! -e "$target" ]; then
+    mkdir "$target"
+elif [ ! -d "$target" ]; then
+    exit 1
+fi
+link=$target/nftfw-setup-boot-hold.service
+if [ -L "$link" ]; then
+    [ "$(readlink "$link")" = "$unit" ] || exit 1
+elif [ -e "$link" ]; then
+    exit 1
+else
+    ln -s "$unit" "$link"
+fi
+
+# Debian's ifupdown units order themselves after network-pre.target but do not
+# pull that passive target into the boot transaction. Make network.target pull
+# the boundary while the managed marker exists, so every conforming network
+# producer must wait for the checksum-bound resume guard. This is generated
+# state only and disappears automatically after the marker is removed.
+network_dropin_dir=$normal/network.target.d
+if [ -L "$network_dropin_dir" ]; then
+    exit 1
+elif [ ! -e "$network_dropin_dir" ]; then
+    mkdir "$network_dropin_dir"
+elif [ ! -d "$network_dropin_dir" ]; then
+    exit 1
+fi
+network_fragment=$network_dropin_dir/50-nftfw-setup-hold.conf
+network_expected='[Unit]
+Requires=network-pre.target
+After=network-pre.target'
+if [ -L "$network_fragment" ]; then
+    exit 1
+elif [ -f "$network_fragment" ]; then
+    [ "$(cat "$network_fragment")" = "$network_expected" ] || exit 1
+elif [ -e "$network_fragment" ]; then
+    exit 1
+else
+    printf '%s\n' "$network_expected" >"$network_fragment"
+fi
+
+for consumer in docker.service docker.socket; do
+    dropin_dir=$normal/$consumer.d
+    if [ -L "$dropin_dir" ]; then
+        exit 1
+    elif [ ! -e "$dropin_dir" ]; then
+        mkdir "$dropin_dir"
+    elif [ ! -d "$dropin_dir" ]; then
+        exit 1
+    fi
+    fragment=$dropin_dir/50-nftfw-setup-hold.conf
+    if [ "$consumer" = docker.service ]; then
+        expected='[Unit]
+Requires=nftfw-setup-docker-hold.service
+After=nftfw-setup-docker-hold.service'
+    else
+        # Ordering docker.socket after an indefinite oneshot would block
+        # sockets.target and therefore basic.target. The socket pulls the
+        # hold in concurrently; socket-triggered docker.service still waits
+        # behind its own exact ordered dependency.
+        expected='[Unit]
+Requires=nftfw-setup-docker-hold.service'
+    fi
+    if [ -L "$fragment" ]; then
+        exit 1
+    elif [ -f "$fragment" ]; then
+        [ "$(cat "$fragment")" = "$expected" ] || exit 1
+    elif [ -e "$fragment" ]; then
+        exit 1
+    else
+        printf '%s\n' "$expected" >"$fragment"
+    fi
+done

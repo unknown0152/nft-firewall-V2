@@ -1,6 +1,7 @@
 package wireguard
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -15,6 +16,65 @@ import (
 	"syscall"
 	"time"
 )
+
+// ValidateRetainedCache reads an existing endpoint cache without modifying it.
+// It is intentionally stricter than the runtime's best-effort cache reader:
+// managed first-setup retry may proceed only when every retained artifact is
+// unambiguous, bounded, and safe.
+func ValidateRetainedCache(path string) (Cache, error) {
+	if !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return Cache{}, errors.New("endpoint cache path is invalid")
+	}
+	file, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return Cache{}, errors.New("endpoint cache is unreadable")
+	}
+	defer file.Close()
+	before, err := file.Stat()
+	if err != nil || !before.Mode().IsRegular() || before.Mode().Perm()&0o077 != 0 ||
+		before.Size() <= 0 || before.Size() > 1<<20 {
+		return Cache{}, errors.New("endpoint cache is unsafe")
+	}
+	stat, ok := before.Sys().(*syscall.Stat_t)
+	if !ok || int64(stat.Uid) != int64(os.Geteuid()) {
+		return Cache{}, errors.New("endpoint cache is unsafe")
+	}
+	raw, err := io.ReadAll(io.LimitReader(file, (1<<20)+1))
+	if err != nil || len(raw) == 0 || len(raw) > 1<<20 {
+		return Cache{}, errors.New("endpoint cache is unreadable")
+	}
+	after, err := file.Stat()
+	if err != nil || after.Size() != before.Size() || !after.ModTime().Equal(before.ModTime()) {
+		return Cache{}, errors.New("endpoint cache changed while being read")
+	}
+	var cache Cache
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if decoder.Decode(&cache) != nil || decoder.Decode(&struct{}{}) != io.EOF ||
+		cache.Hosts == nil || len(cache.Hosts) > 64 {
+		return Cache{}, errors.New("endpoint cache is invalid")
+	}
+	canonical, err := json.MarshalIndent(cache, "", "  ")
+	if err != nil || !bytes.Equal(raw, append(canonical, '\n')) {
+		return Cache{}, errors.New("endpoint cache is invalid")
+	}
+	now := time.Now().UTC()
+	for host, entries := range cache.Hosts {
+		if host == "" || len(host) > 253 || len(entries) > 64 {
+			return Cache{}, errors.New("endpoint cache is invalid")
+		}
+		seen := map[string]bool{}
+		for _, entry := range entries {
+			address, parseErr := netip.ParseAddr(entry.Address)
+			if parseErr != nil || !usableEndpointAddress(address) || address.String() != entry.Address ||
+				entry.SeenAt.IsZero() || entry.SeenAt.After(now.Add(5*time.Minute)) || seen[entry.Address] {
+				return Cache{}, errors.New("endpoint cache is invalid")
+			}
+			seen[entry.Address] = true
+		}
+	}
+	return cache, nil
+}
 
 type Resolver struct {
 	Resolver   LookupResolver

@@ -100,6 +100,20 @@ installed 2.1.0 binary and protected metadata, exact optional schema-6
 history, and the transition identity bound to both package and binary hashes
 in the verified bundle manifest.
 
+Before boot-policy handoff or dpkg mutation, the controller extracts the
+bundle-bound exact 2.0.3 binary and uses it to validate the current
+`nftfw.toml` with output suppressed. It repeats that validation immediately
+before package replacement. A configuration containing 2.1-only managed
+fields refuses with a fixed message and no configuration value disclosure;
+restore the protected pre-upgrade configuration or use the package-removal
+handoff instead of weakening this check.
+
+When the schema-6 database exists, the bridge accepts both real ownership
+histories: a root CLI-created mode-0600 `root:root` file and a v2.1
+systemd-created mode-0600 `root:nftfw-web` file. The UID, exact runtime group
+GID, mode, regular-file type, single link, protected parent chain, and exact
+migration history are all checked. No other group identity is accepted.
+
 The outer controller holds the real canonical mutation lock throughout both
 dpkg steps. Because exact 2.0.3's historical `preinst` takes the same pathname
 for its verified backup, only the dpkg descendant tree receives a private
@@ -118,11 +132,17 @@ sudo /var/backups/nftfw-migration/UTC-2.1.0-package-rollback/execute \
 ```
 
 Execution is resumable from configured 2.1.0, the exact named bridge, or
-already-restored 2.0.3. It holds the global NFTFW mutation lock, reversibly
-removes a managed-only 2.1.0 initramfs guard before downgrade, verifies the
-old binary identity and package payload, and leaves compatible schema-6
-state, configuration, provenance, generations, drop-ins, WireGuard, Docker,
-and unit lifecycle state in place.
+already-restored 2.0.3. It holds the global NFTFW mutation lock and, when the
+one-file setup owns the IPv6-disabled boot policy, invokes the protected boot
+handoff first. That handoff restores the exact captured GRUB fragment state,
+regenerates and verifies the captured next-boot command line, and restores the
+captured initramfs ownership state before downgrade. If the running kernel
+still has the managed `ipv6.disable=1`, the transaction remains durably
+`rollback_reboot_required`; neither package removal nor the rollback bridge
+may claim that the running boot was restored. The bridge then verifies the old
+binary identity and package payload and leaves compatible schema-6 state,
+configuration, provenance, generations, drop-ins, WireGuard, Docker, and unit
+lifecycle state in place.
 
 The Debian `preinst` creates an additional timestamped verified backup when a
 nonempty compatible generation database exists. The source installer follows
@@ -133,6 +153,13 @@ while holding the canonical NFTFW mutation lock, and that binary verifies the
 backup through its read-only state path. There is no unlocked `sqlite3` backup
 fallback. Either installation path aborts if the lock, installed backup
 command, schema check, backup, or verification cannot be proven safe.
+
+An upgrade is refused while managed setup is between `reboot_required` and a
+terminal result. The installed helper takes the canonical setup lock and
+accepts package replacement only for an exact `complete` or `rolled_back`
+managed boot journal. Finish the same profile-only setup command, or complete
+`nftfw setup rollback` (including any required reboot), before retrying the
+package upgrade. Do not replace the binary, generator, or hold units manually.
 
 The monotonic provenance ledger has a different lifecycle. A generation-state
 backup never replaces or rewinds it. Preserve a protected copy as evidence;

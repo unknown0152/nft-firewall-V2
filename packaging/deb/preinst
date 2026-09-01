@@ -78,7 +78,7 @@ if [ -e "$state_dir/state.db" ] || [ -L "$state_dir/state.db" ]; then
     exit 1
 fi
 
-unit_names='nftfw-early.service nftfw-enforcement-ready.service nftfw-rollback.service nftfw-rollback.timer nftfw-setup-rollback.service nftfw-setup-rollback.timer nftfw-managed-rollback.service nftfw-managed-rollback.timer nftfw-vpn.service nftfw-web.service nftfwd.service'
+unit_names='nftfw-early.service nftfw-enforcement-ready.service nftfw-rollback.service nftfw-rollback.timer nftfw-setup-rollback.service nftfw-setup-rollback.timer nftfw-setup-boot-hold.service nftfw-setup-docker-hold.service nftfw-managed-rollback.service nftfw-managed-rollback.timer nftfw-vpn.service nftfw-web.service nftfwd.service'
 for shadow_root in /etc/systemd/system /run/systemd/system /usr/local/lib/systemd/system; do
     for unit_name in $unit_names; do
         shadow=$shadow_root/$unit_name
@@ -88,6 +88,15 @@ for shadow_root in /etc/systemd/system /run/systemd/system /usr/local/lib/system
             exit 1
         fi
     done
+done
+generator_name=nftfw-setup-boot-hold-generator
+for shadow_root in /etc/systemd/system-generators /run/systemd/system-generators \
+    /usr/local/lib/systemd/system-generators; do
+    shadow=$shadow_root/$generator_name
+    if [ -e "$shadow" ] || [ -L "$shadow" ]; then
+        echo "Refusing a package install/upgrade shadowed by an unmanaged systemd generator: $shadow" >&2
+        exit 1
+    fi
 done
 
 old_version=${2:-}
@@ -104,7 +113,8 @@ case "$action" in
                 "$state_dir/enforcement-enabled" \
                 "$state_dir/provenance-ledger.db" \
                 /usr/lib/nftfw/nftfw \
-                /usr/lib/systemd/system/nftfwd.service; do
+                /usr/lib/systemd/system/nftfwd.service \
+                /usr/lib/systemd/system-generators/nftfw-setup-boot-hold-generator; do
                 if [ -e "$retained" ] || [ -L "$retained" ]; then
                     echo "Refusing retained or shadowing NFTFW state on a fresh install: $retained" >&2
                     echo "A separately reviewed recovery/import contract is required." >&2
@@ -130,6 +140,31 @@ if dpkg --compare-versions "$old_version" gt "$package_version"; then
     echo "Refusing to downgrade NFT Firewall V2 from $old_version to $package_version." >&2
     echo "A newer generation schema must not be opened by an older package." >&2
     exit 1
+fi
+
+# Never replace the helper, generator, or units in the middle of the explicit
+# reboot/resume ownership transaction. The installed binary takes the same
+# canonical setup lock and accepts only a terminal managed boot journal.
+if [ "$action" = upgrade ] && \
+    { [ -e /etc/nftfw/setup-boot-hold-v1 ] || \
+      [ -L /etc/nftfw/setup-boot-hold-v1 ] || \
+      [ -e /etc/default/grub.d/90-nftfw-ipv6-disabled.cfg ] || \
+      [ -L /etc/default/grub.d/90-nftfw-ipv6-disabled.cfg ] || \
+      [ -L "$state_dir/setup/journal.json" ] || \
+      { [ -f "$state_dir/setup/journal.json" ] && grep -Fq \
+          '"boot_policy": "debian-grub-ipv6-disabled-v1"' \
+          "$state_dir/setup/journal.json"; }; }; then
+    if [ -L "$installed_binary" ] || [ ! -f "$installed_binary" ] || \
+        [ ! -x "$installed_binary" ] || \
+        [ "$(find "$installed_binary" -maxdepth 0 -type f -uid 0 ! -perm /022 -print -quit)" != "$installed_binary" ]; then
+        echo "Refusing package upgrade: the managed boot helper is unprotected." >&2
+        exit 1
+    fi
+    if ! "$installed_binary" setup package-upgrade-preflight; then
+        echo "Refusing package upgrade during an incomplete or ambiguous managed boot transaction." >&2
+        echo "Finish the same setup command or complete nftfw setup rollback first." >&2
+        exit 1
+    fi
 fi
 if dpkg --compare-versions "$old_version" eq "$package_version"; then
     if [ -L "$installed_binary" ] || [ ! -f "$installed_binary" ] || \

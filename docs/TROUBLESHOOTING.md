@@ -43,6 +43,48 @@ The independent setup timer rolls back an expired pre-commit transaction.
 After a durable commit, recovery proceeds forward to the verified boot state.
 An unknown commit state fails closed and requires inspection.
 
+An exact terminal `rolled_back` state may be retried without deleting retained
+evidence. Run the dry-run again: terminal retry verifies the current journal,
+all history checksums, exact backup restoration, inactive units, clean managed
+routing/firewall identities, rolled-back immutable generations, endpoint
+cache, and the monotonic provenance ledger. If it still returns
+`DISCOVERY_EXISTING_NFTFW_REQUIRES_ADOPT`, preserve `/var/lib/nftfw`, because
+one of those predicates is missing, changed, unsafe, or ambiguous. Manual
+cleanup would destroy the evidence needed to distinguish a safe retry.
+
+### Setup reports `reboot_required` or `resume_ready`
+
+This is the expected midpoint of clean-host setup, not completion. Keep LAN or
+console recovery, reboot explicitly, and rerun the same `nftfw setup --vpn`
+command. Do not run `update-grub` manually, edit the NFTFW fragment, delete the
+journal/backup, or start Docker/VPN/firewall pieces out of order.
+
+On a valid resumed boot, LAN management is available only through
+`nftfw_setup_resume_guard`; physical Internet and public ingress remain
+denied. DNS resolution is not part of resume because the first pass stored the
+canonical endpoint set in the root-only backup identity. Docker being inactive
+is expected: its service and socket remain queued behind the transient Docker
+hold until setup durably takes ownership and receives restart confirmation.
+Inspect the two hold units with `systemctl status`; do not bypass them.
+
+If status remains `reboot_required` after a reboot, the boot ID or exact
+kernel/GRUB/initramfs proof did not validate. Preserve the root-only state and
+bounded error code. A missing, quoted, duplicate, or conflicting
+`ipv6.disable` argument, wrong GRUB family, systemd-boot/UKI/extlinux layout,
+remote/read-only boot filesystem, or changed generated configuration is a
+hard refusal.
+
+`SETUP_RESUME_GUARD_*`, `SETUP_BOOT_HOLD_*`, or
+`SETUP_DOCKER_HOLD_*` means an exact guard, journal, generator fragment, or
+runtime handshake could not be proved. Preserve the journal and backup. A
+manual nft delete, service override, or Docker start would erase the safe
+classification and is not a recovery procedure.
+
+`rollback_reboot_required` means the captured next-boot GRUB state was already
+restored but the running kernel still has IPv6 disabled by its old command
+line. Reboot explicitly, then run `sudo nftfw setup rollback`; do not claim or
+attempt a live kernel reversal.
+
 ### Committed setup is waiting for boot handoff
 
 `SETUP_EARLY_ENFORCEMENT_FAILED`, `SETUP_INITRAMFS_MARKER_*`,
@@ -214,6 +256,14 @@ A checksum, package field, architecture, bridge identity, payload digest,
 helper self-binding, schema-history, or protected-path failure invalidates the
 bundle. Do not edit dpkg status, force maintainer scripts, copy the old payload
 over the installed package, or regenerate the manifest by hand.
+
+`current configuration is not exact 2.0.3-compatible` is a pre-mutation
+refusal. The helper has run the bound exact old parser without exposing its
+output, before boot handoff or dpkg. Restore the protected pre-upgrade
+configuration or use the package-removal handoff; do not delete unknown fields
+blindly. A database-metadata refusal may also mean the mode-0600 file is not
+UID 0, has multiple links, or has a group other than `root` or the exact
+runtime `nftfw-web` GID.
 
 When the outer helper starts from configured 2.1.0, the bridge pre-install
 script must observe exactly the Debian 13 three-argument downgrade call and

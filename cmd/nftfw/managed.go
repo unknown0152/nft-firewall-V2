@@ -49,8 +49,25 @@ var (
 	managedStateRoot    = "/var/lib/nftfw"
 	managedRuntimeRoot  = "/run/nftfw"
 
-	managedEUID     = os.Geteuid
-	managedAPICall  = api.Call
+	managedEUID          = os.Geteuid
+	managedAPICall       = api.Call
+	setupRollbackAcquire = acquireSetupLock
+	setupRecoverySystem  = func() setupRecoveryExecutor { return &managedsetup.System{} }
+	setupRecoveryJournal = func() managedsetup.JournalStore {
+		return managedsetup.FileJournal{Path: setupJournalPath}
+	}
+	setupBootStatus = func(ctx context.Context, journal managedsetup.Journal) (string, error) {
+		return (&managedsetup.System{}).PendingBootStatus(ctx, journal)
+	}
+	setupBootHandoff = func(ctx context.Context, journal managedsetup.Journal) (bool, error) {
+		return (&managedsetup.System{}).HandoffBootPolicy(ctx, journal)
+	}
+	setupBootHold = func(ctx context.Context, store managedsetup.JournalStore) error {
+		return (&managedsetup.System{}).WaitBootHold(ctx, store)
+	}
+	setupDockerHold = func(ctx context.Context) error {
+		return (&managedsetup.System{}).WaitDockerHold(ctx)
+	}
 	managedTunnelUp = func(ctx context.Context, config routing.Config) error {
 		return (routing.Manager{}).Up(ctx, config)
 	}
@@ -69,6 +86,12 @@ var (
 	}
 )
 
+type setupRecoveryExecutor interface {
+	GenerationCommitted(context.Context, uint64) (bool, error)
+	Rollback(context.Context, managedsetup.Plan, managedsetup.Journal) error
+	RecoverCommitted(context.Context, managedsetup.Plan, managedsetup.Journal) error
+}
+
 func setupCommand(args []string) error {
 	if len(args) > 0 && args[0] == "status" {
 		if len(args) > 2 || (len(args) == 2 && args[1] != "--json") {
@@ -78,10 +101,22 @@ func setupCommand(args []string) error {
 		if err != nil {
 			return err
 		}
-		if has(args, "--json") {
-			return printJSONOr(journal, true)
+		status := journal.Status
+		if status == "reboot_required" {
+			observed, statusErr := setupBootStatus(context.Background(), journal)
+			if statusErr != nil {
+				return errors.New("SETUP_BOOT_STATUS_INVALID")
+			}
+			status = observed
 		}
-		fmt.Printf("Setup: %s\nPhase: %s\nTransaction: %s\n", journal.Status, journal.Phase, journal.Transaction)
+		if has(args, "--json") {
+			return printJSONOr(map[string]any{
+				"schema": journal.Schema, "status": status, "phase": journal.Phase,
+				"transaction": journal.Transaction, "plan": journal.Summary,
+				"error_code": journal.ErrorCode,
+			}, true)
+		}
+		fmt.Printf("Setup: %s\nPhase: %s\nTransaction: %s\n", status, journal.Phase, journal.Transaction)
 		if journal.ErrorCode != "" {
 			fmt.Printf("Last error: %s\n", journal.ErrorCode)
 		}
@@ -89,6 +124,29 @@ func setupCommand(args []string) error {
 	}
 	if len(args) > 0 && args[0] == "rollback" {
 		return setupRollbackCommand(args[1:])
+	}
+	if len(args) > 0 && args[0] == "boot-handoff" {
+		return setupBootHandoffCommand(args[1:])
+	}
+	if len(args) > 0 && args[0] == "boot-hold" {
+		if len(args) != 1 || managedEUID() != 0 {
+			return errors.New("SETUP_BOOT_HOLD_INVALID")
+		}
+		release, err := acquireSetupLock()
+		if err != nil {
+			return err
+		}
+		defer release()
+		return setupBootHold(context.Background(), managedsetup.FileJournal{Path: setupJournalPath})
+	}
+	if len(args) > 0 && args[0] == "docker-hold" {
+		if len(args) != 1 || managedEUID() != 0 {
+			return errors.New("SETUP_DOCKER_HOLD_INVALID")
+		}
+		return setupDockerHold(context.Background())
+	}
+	if len(args) > 0 && args[0] == "package-upgrade-preflight" {
+		return setupPackageUpgradePreflightCommand(args[1:])
 	}
 	if len(args) > 0 && args[0] == "adopt" {
 		return setupAdoptCommand(args[1:])
@@ -162,6 +220,17 @@ func setupCommand(args []string) error {
 		}
 	}
 	plan, err = engine.Run(context.Background(), *vpnPath)
+	if errors.Is(err, managedsetup.ErrRebootRequired) {
+		if *jsonMode {
+			return printJSONOr(map[string]any{
+				"status": "reboot_required", "automatic_reboot": false, "plan": plan.Summary,
+			}, true)
+		}
+		fmt.Println("Boot preparation: VERIFIED")
+		fmt.Println("Status: reboot_required")
+		fmt.Println("Reboot this server explicitly, then rerun the same nftfw setup --vpn command.")
+		return nil
+	}
 	if err != nil {
 		return err
 	}
@@ -169,6 +238,68 @@ func setupCommand(args []string) error {
 		return printJSONOr(map[string]any{"status": "PROTECTED", "plan": plan.Summary}, true)
 	}
 	printProtectedSummary(plan.Summary, false)
+	return nil
+}
+
+func setupPackageUpgradePreflightCommand(args []string) error {
+	if len(args) != 0 || managedEUID() != 0 {
+		return errors.New("SETUP_PACKAGE_UPGRADE_PREFLIGHT_INVALID")
+	}
+	release, err := acquireSetupLock()
+	if err != nil {
+		return errors.New("SETUP_PACKAGE_UPGRADE_BOOT_TRANSACTION_ACTIVE")
+	}
+	defer release()
+	journal, err := (managedsetup.FileJournal{Path: setupJournalPath}).Read()
+	if err != nil || validateSetupWatchdogJournal(journal) != nil ||
+		journal.Summary.BootPolicy != managedsetup.ManagedBootPolicy {
+		return errors.New("SETUP_PACKAGE_UPGRADE_BOOT_STATE_INVALID")
+	}
+	if journal.Status != "complete" && journal.Status != "rolled_back" {
+		return errors.New("SETUP_PACKAGE_UPGRADE_BOOT_TRANSACTION_ACTIVE")
+	}
+	return nil
+}
+
+func setupBootHandoffCommand(args []string) error {
+	if len(args) != 1 || args[0] != "--package-remove" && args[0] != "--package-downgrade" {
+		return errors.New("SETUP_BOOT_HANDOFF_USAGE_INVALID")
+	}
+	if managedEUID() != 0 {
+		return errors.New("SETUP_REQUIRES_ROOT")
+	}
+	release, err := acquireSetupLock()
+	if err != nil {
+		return err
+	}
+	defer release()
+	store := managedsetup.FileJournal{Path: setupJournalPath}
+	journal, err := store.Read()
+	if err != nil {
+		return err
+	}
+	if journal.Status != "complete" && journal.Status != "reboot_required" &&
+		journal.Status != "resume_ready" && journal.Status != "rollback_reboot_required" {
+		return errors.New("SETUP_BOOT_HANDOFF_STATE_INVALID")
+	}
+	rebootRequired, err := setupBootHandoff(context.Background(), journal)
+	if err != nil {
+		return err
+	}
+	journal.Phase, journal.ErrorCode, journal.UpdatedAt = managedsetup.PhaseFailed, "", time.Now().UTC()
+	if rebootRequired {
+		journal.Status = "rollback_reboot_required"
+	} else {
+		journal.Status, journal.Committed, journal.Generation = "rolled_back", false, 0
+	}
+	if err := store.Write(journal); err != nil {
+		return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
+	}
+	if rebootRequired {
+		fmt.Println("NFTFW boot policy: rollback_reboot_required")
+	} else {
+		fmt.Println("NFTFW boot policy: restored")
+	}
 	return nil
 }
 
@@ -209,45 +340,281 @@ func setupRollbackCommand(args []string) error {
 	if managedEUID() != 0 {
 		return errors.New("SETUP_REQUIRES_ROOT")
 	}
-	release, err := acquireSetupLock()
+	store := setupRecoveryJournal()
+	var observed managedsetup.Journal
+	if *expiredOnly {
+		// The watchdog normally runs while the foreground setup process owns the
+		// canonical lock. Read the atomically published journal first so a
+		// terminal or unexpired transaction can be dismissed without contending
+		// with that process. An apparently expired transaction is always checked
+		// again after acquiring the lock below.
+		journal, err := store.Read()
+		if err != nil {
+			return err
+		}
+		if err := validateSetupWatchdogJournal(journal); err != nil {
+			return err
+		}
+		if !setupJournalNeedsRecovery(journal) || time.Now().UTC().Before(journal.Deadline) {
+			return nil
+		}
+		observed = journal
+	}
+	release, err := setupRollbackAcquire()
 	if err != nil {
 		return err
 	}
 	defer release()
-	store := managedsetup.FileJournal{Path: setupJournalPath}
 	journal, err := store.Read()
 	if err != nil {
 		return err
 	}
-	if journal.Status != "running" && journal.Status != "rolling_back" &&
-		journal.Status != "recovering_committed" {
+	if err := validateSetupWatchdogJournal(journal); err != nil {
+		return err
+	}
+	if *expiredOnly && (journal.Transaction != observed.Transaction ||
+		!journal.StartedAt.Equal(observed.StartedAt)) {
+		return errors.New("SETUP_JOURNAL_CHANGED")
+	}
+	system := setupRecoverySystem()
+	if journal.Status == "rollback_reboot_required" && !*expiredOnly {
+		finalizer, ok := system.(interface {
+			FinalizeBootRollback(context.Context, managedsetup.Journal) error
+		})
+		if !ok || finalizer.FinalizeBootRollback(context.Background(), journal) != nil {
+			return errors.New("SETUP_ROLLBACK_REBOOT_STILL_REQUIRED")
+		}
+		journal.Status, journal.Phase, journal.ErrorCode = "rolled_back", managedsetup.PhaseFailed, ""
+		journal.Committed, journal.Generation = false, 0
+		journal.UpdatedAt = time.Now().UTC()
+		if err := store.Write(journal); err != nil {
+			return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
+		}
+		return nil
+	}
+	if !setupJournalNeedsRecovery(journal) && journal.Status != "reboot_required" {
 		return nil
 	}
 	if *expiredOnly && time.Now().UTC().Before(journal.Deadline) {
 		return nil
 	}
-	system := &managedsetup.System{}
 	plan := managedsetup.Plan{Summary: journal.Summary}
-	if !journal.Committed && journal.Generation != 0 {
-		committed, err := system.GenerationCommitted(context.Background(), journal.Generation)
+	uncommittedKnown := journal.Status == "rolling_back" || journal.Status == "rollback_failed"
+	if !journal.Committed && !uncommittedKnown && journal.Generation != 0 {
+		inspectionCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		committed, err := system.GenerationCommitted(inspectionCtx, journal.Generation)
+		cancel()
 		if err != nil {
-			return err
+			journal.Status = "commit_state_unknown"
+			journal.ErrorCode = "SETUP_COMMIT_STATE_UNKNOWN"
+			journal.UpdatedAt = time.Now().UTC()
+			if writeErr := store.Write(journal); writeErr != nil {
+				return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
+			}
+			return errors.New("SETUP_COMMIT_STATE_UNKNOWN")
 		}
 		journal.Committed = committed
 	}
 	if journal.Committed {
-		if err := system.RecoverCommitted(context.Background(), plan, journal); err != nil {
-			return err
+		journal.Status = "recovering_committed"
+		journal.UpdatedAt = time.Now().UTC()
+		if err := store.Write(journal); err != nil {
+			return errors.New("SETUP_RECOVERY_TRANSITION_WRITE_FAILED")
+		}
+		recoveryCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		recoveryErr := system.RecoverCommitted(recoveryCtx, plan, journal)
+		cancel()
+		if recoveryErr != nil {
+			journal.Status = "committed_recovery_failed"
+			journal.ErrorCode = setupRecoveryErrorCode(recoveryErr)
+			journal.UpdatedAt = time.Now().UTC()
+			if err := store.Write(journal); err != nil {
+				return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
+			}
+			return errors.New("SETUP_COMMITTED_RECOVERY_FAILED")
 		}
 		journal.Status, journal.Phase = "complete", managedsetup.PhaseComplete
+		journal.ErrorCode = ""
 	} else {
-		if err := system.Rollback(context.Background(), plan, journal); err != nil {
-			return err
+		// Status publishes the recovery transition while Phase retains the
+		// originating setup phase needed for an exact retry after process death.
+		journal.Status = "rolling_back"
+		journal.UpdatedAt = time.Now().UTC()
+		if err := store.Write(journal); err != nil {
+			return errors.New("SETUP_RECOVERY_TRANSITION_WRITE_FAILED")
+		}
+		rollbackCtx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+		rollbackErr := system.Rollback(rollbackCtx, plan, journal)
+		cancel()
+		if errors.Is(rollbackErr, managedsetup.ErrRollbackRebootRequired) {
+			journal.Status, journal.Phase, journal.ErrorCode = "rollback_reboot_required", managedsetup.PhaseFailed, ""
+			journal.UpdatedAt = time.Now().UTC()
+			if err := store.Write(journal); err != nil {
+				return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
+			}
+			return nil
+		}
+		if rollbackErr != nil {
+			journal.Status = "rollback_failed"
+			journal.ErrorCode = setupRecoveryErrorCode(rollbackErr)
+			journal.UpdatedAt = time.Now().UTC()
+			if err := store.Write(journal); err != nil {
+				return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
+			}
+			return errors.New("SETUP_ROLLBACK_FAILED")
 		}
 		journal.Status, journal.Phase = "rolled_back", managedsetup.PhaseFailed
 	}
 	journal.UpdatedAt = time.Now().UTC()
-	return store.Write(journal)
+	if err := store.Write(journal); err != nil {
+		return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")
+	}
+	return nil
+}
+
+func setupJournalNeedsRecovery(journal managedsetup.Journal) bool {
+	switch journal.Status {
+	case "running", "resume_ready", "rolling_back", "recovering_committed", "rollback_failed",
+		"commit_state_unknown", "committed_recovery_failed":
+		return true
+	default:
+		return false
+	}
+}
+
+func setupRecoveryErrorCode(err error) string {
+	if err == nil {
+		return ""
+	}
+	value := err.Error()
+	if len(value) == 0 || len(value) > 96 {
+		return "SETUP_RECOVERY_FAILED"
+	}
+	for _, character := range value {
+		if character != '_' && (character < 'A' || character > 'Z') &&
+			(character < '0' || character > '9') {
+			return "SETUP_RECOVERY_FAILED"
+		}
+	}
+	return value
+}
+
+func validateSetupWatchdogJournal(journal managedsetup.Journal) error {
+	knownPhase := map[managedsetup.Phase]bool{
+		managedsetup.PhaseInspect: true, managedsetup.PhaseBackup: true,
+		managedsetup.PhaseBootPrep: true,
+		managedsetup.PhaseGuard:    true, managedsetup.PhaseInstall: true,
+		managedsetup.PhaseDocker: true, managedsetup.PhaseRuntime: true,
+		managedsetup.PhaseApply: true, managedsetup.PhaseTunnel: true,
+		managedsetup.PhaseValidate: true, managedsetup.PhaseCommit: true,
+		managedsetup.PhaseHandoff: true, managedsetup.PhaseBoot: true,
+		managedsetup.PhaseFinalize: true, managedsetup.PhaseComplete: true,
+		managedsetup.PhaseRollback: true, managedsetup.PhaseFailed: true,
+	}
+	knownStatus := map[string]bool{
+		"running": true, "rolling_back": true, "recovering_committed": true,
+		"complete": true, "rolled_back": true, "rollback_failed": true,
+		"reboot_required": true, "resume_ready": true, "rollback_reboot_required": true,
+		"commit_state_unknown": true, "committed_recovery_failed": true,
+	}
+	if !knownPhase[journal.Phase] || !knownStatus[journal.Status] || journal.UpdatedAt.IsZero() ||
+		journal.Deadline.Before(journal.StartedAt) || journal.Committed && journal.Generation == 0 {
+		return errors.New("SETUP_JOURNAL_STATE_INVALID")
+	}
+	if journal.BackupDir != "" && (!filepath.IsAbs(journal.BackupDir) ||
+		filepath.Clean(journal.BackupDir) != journal.BackupDir) {
+		return errors.New("SETUP_JOURNAL_STATE_INVALID")
+	}
+	switch journal.Status {
+	case "running":
+		if !setupRunningPhase(journal.Phase) {
+			return errors.New("SETUP_JOURNAL_STATE_INVALID")
+		}
+	case "complete":
+		if journal.Phase != managedsetup.PhaseComplete || !journal.Committed {
+			return errors.New("SETUP_JOURNAL_STATE_INVALID")
+		}
+	case "rolled_back":
+		if journal.Phase != managedsetup.PhaseFailed || journal.Committed {
+			return errors.New("SETUP_JOURNAL_STATE_INVALID")
+		}
+	case "reboot_required", "resume_ready":
+		if journal.Phase != managedsetup.PhaseBootPrep || journal.Committed || journal.Generation != 0 ||
+			journal.BackupDir == "" || journal.ErrorCode != "" {
+			return errors.New("SETUP_JOURNAL_STATE_INVALID")
+		}
+	case "rollback_reboot_required":
+		if journal.Phase != managedsetup.PhaseFailed || journal.BackupDir == "" ||
+			journal.ErrorCode != "" {
+			return errors.New("SETUP_JOURNAL_STATE_INVALID")
+		}
+	case "rolling_back", "rollback_failed":
+		if !setupRollbackOriginPhase(journal.Phase) || journal.Committed {
+			return errors.New("SETUP_JOURNAL_STATE_INVALID")
+		}
+	case "recovering_committed", "committed_recovery_failed":
+		if !setupCommittedOriginPhase(journal.Phase) || !journal.Committed || journal.Generation == 0 {
+			return errors.New("SETUP_JOURNAL_STATE_INVALID")
+		}
+	case "commit_state_unknown":
+		if !setupCommitInspectionPhase(journal.Phase) || journal.Committed || journal.Generation == 0 {
+			return errors.New("SETUP_JOURNAL_STATE_INVALID")
+		}
+	}
+	if setupJournalNeedsRecovery(journal) && journal.Phase != managedsetup.PhaseInspect &&
+		journal.Phase != managedsetup.PhaseBackup {
+		if journal.BackupDir == "" || journal.Summary.Schema != "nftfw.setup-plan.v1" {
+			return errors.New("SETUP_JOURNAL_STATE_INVALID")
+		}
+	}
+	return nil
+}
+
+func setupRunningPhase(phase managedsetup.Phase) bool {
+	switch phase {
+	case managedsetup.PhaseInspect, managedsetup.PhaseBackup, managedsetup.PhaseGuard,
+		managedsetup.PhaseBootPrep,
+		managedsetup.PhaseInstall, managedsetup.PhaseDocker, managedsetup.PhaseRuntime,
+		managedsetup.PhaseApply, managedsetup.PhaseTunnel, managedsetup.PhaseValidate,
+		managedsetup.PhaseCommit, managedsetup.PhaseHandoff, managedsetup.PhaseBoot,
+		managedsetup.PhaseFinalize:
+		return true
+	default:
+		return false
+	}
+}
+
+func setupRollbackOriginPhase(phase managedsetup.Phase) bool {
+	switch phase {
+	case managedsetup.PhaseInspect, managedsetup.PhaseBackup, managedsetup.PhaseGuard,
+		managedsetup.PhaseBootPrep,
+		managedsetup.PhaseInstall, managedsetup.PhaseDocker, managedsetup.PhaseRuntime,
+		managedsetup.PhaseApply, managedsetup.PhaseTunnel, managedsetup.PhaseValidate,
+		managedsetup.PhaseCommit, managedsetup.PhaseRollback, managedsetup.PhaseFailed:
+		return true
+	default:
+		return false
+	}
+}
+
+func setupCommittedOriginPhase(phase managedsetup.Phase) bool {
+	switch phase {
+	case managedsetup.PhaseCommit, managedsetup.PhaseHandoff,
+		managedsetup.PhaseBoot, managedsetup.PhaseFinalize:
+		return true
+	default:
+		return false
+	}
+}
+
+func setupCommitInspectionPhase(phase managedsetup.Phase) bool {
+	switch phase {
+	case managedsetup.PhaseApply, managedsetup.PhaseTunnel,
+		managedsetup.PhaseValidate, managedsetup.PhaseCommit:
+		return true
+	default:
+		return false
+	}
 }
 
 func tunnelCommand(args []string) error {
@@ -789,7 +1156,7 @@ func existingManagedSetup(ctx context.Context, sourceVPN string) (bool, manageds
 		ManagementTCP: append([]int(nil), value.ManagementTCP...),
 		PublicTCP:     append([]int(nil), value.PublicTCP...),
 		PublicUDP:     append([]int(nil), value.PublicUDP...),
-		IPv6Mode:      "disabled", DockerMode: dockerMode,
+		IPv6Mode:      "disabled", BootPolicy: managedsetup.ManagedBootPolicy, DockerMode: dockerMode,
 		DockerNetworks: dockerNetworkNames(value.DockerNetworks),
 		ResolverMode:   value.ResolverMode,
 	}, nil

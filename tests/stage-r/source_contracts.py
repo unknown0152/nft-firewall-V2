@@ -227,6 +227,8 @@ class InstallerLifecycleContracts(unittest.TestCase):
             "nftfw-rollback.timer",
             "nftfw-setup-rollback.service",
             "nftfw-setup-rollback.timer",
+            "nftfw-setup-boot-hold.service",
+            "nftfw-setup-docker-hold.service",
             "nftfw-managed-rollback.service",
             "nftfw-managed-rollback.timer",
             "nftfw-vpn.service",
@@ -562,6 +564,8 @@ class InstallerLifecycleContracts(unittest.TestCase):
             "nftfw-rollback.timer",
             "nftfw-setup-rollback.service",
             "nftfw-setup-rollback.timer",
+            "nftfw-setup-boot-hold.service",
+            "nftfw-setup-docker-hold.service",
             "nftfw-managed-rollback.service",
             "nftfw-managed-rollback.timer",
             "nftfw-vpn.service",
@@ -613,11 +617,132 @@ class SystemdGraphContracts(unittest.TestCase):
         capabilities = set(one(unit, "Service", "CapabilityBoundingSet").split())
         self.assertIn("CAP_NET_ADMIN", capabilities)
         self.assertIn("CAP_CHOWN", capabilities)
-        writable = one(unit, "Service", "ReadWritePaths").split()
-        self.assertIn("-/etc/wireguard", writable)
-        self.assertIn("/etc/sysctl.d", writable)
-        self.assertIn("/etc/systemd/system", writable)
-        self.assertIn("-/etc/docker", writable)
+        writable = words(unit, "Service", "ReadWritePaths")
+        self.assertEqual(
+            writable,
+            {
+                "/boot",
+                "-/var/lib/initramfs-tools",
+                "/etc/nftfw",
+                "-/etc/default/grub.d",
+                "-/etc/initramfs-tools/scripts/init-top",
+                "-/etc/wireguard",
+                "-/etc/docker",
+                "/etc/sysctl.d",
+                "/etc/systemd/system",
+                "/var/lib/nftfw",
+                "/run/nftfw",
+                "-/run/resolvconf",
+                "-/run/systemd/resolve",
+            },
+            "setup rollback must retain its exact reviewed write surface; the "
+            "initramfs-tools transaction path is writable when present but must not "
+            "prevent clean-host activation when absent",
+        )
+        self.assertNotIn(
+            "/var/lib/initramfs-tools",
+            writable,
+            "systemd treats an absent mandatory ReadWritePaths entry as a namespace "
+            "failure before the rollback command can execute",
+        )
+
+    def test_all_shipped_unit_path_directives_match_the_clean_host_audit(self) -> None:
+        expected = {
+            "nftfw-early.service": {
+                "ReadWritePaths": {"/var/lib/nftfw/generation-state"},
+                "ReadOnlyPaths": self.EARLY_RO,
+            },
+            "nftfw-enforcement-ready.service": {
+                "ReadWritePaths": {"/run/nftfw"},
+                "ReadOnlyPaths": {"/var/lib/nftfw"},
+            },
+            "nftfw-managed-rollback.service": {
+                "ReadWritePaths": {"/etc/nftfw", "/var/lib/nftfw", "/run/nftfw"},
+            },
+            "nftfw-rollback.service": {
+                "ReadWritePaths": {"/var/lib/nftfw/generation-state", "/run/nftfw"},
+                "ReadOnlyPaths": {
+                    "/etc/nftfw",
+                    "/var/lib/nftfw/provenance-ledger.db",
+                    "-/var/lib/nftfw/provenance-ledger.db-journal",
+                    "-/var/lib/nftfw/provenance-ledger.db-wal",
+                    "-/var/lib/nftfw/provenance-ledger.db-shm",
+                    "/var/lib/nftfw/generations",
+                    "/var/lib/nftfw/backups",
+                    "-/var/lib/nftfw/active.snapshot.json",
+                    "-/var/lib/nftfw/enforcement-enabled",
+                },
+            },
+            "nftfw-setup-rollback.service": {
+                "ReadWritePaths": {
+                    "/boot",
+                    "-/var/lib/initramfs-tools",
+                    "/etc/nftfw",
+                    "-/etc/default/grub.d",
+                    "-/etc/initramfs-tools/scripts/init-top",
+                    "-/etc/wireguard",
+                    "-/etc/docker",
+                    "/etc/sysctl.d",
+                    "/etc/systemd/system",
+                    "/var/lib/nftfw",
+                    "/run/nftfw",
+                    "-/run/resolvconf",
+                    "-/run/systemd/resolve",
+                },
+            },
+            "nftfw-setup-boot-hold.service": {
+                "ReadWritePaths": {"/run/nftfw"},
+                "ReadOnlyPaths": {
+                    "/boot",
+                    "/etc/nftfw",
+                    "/etc/default/grub.d",
+                    "/etc/initramfs-tools/scripts/init-top",
+                    "/usr/lib/nftfw/initramfs",
+                    "/var/lib/nftfw",
+                    "/proc",
+                    "/sys",
+                },
+            },
+            "nftfw-setup-docker-hold.service": {
+                "ReadWritePaths": {"/run/nftfw"},
+                "ReadOnlyPaths": {"/etc/nftfw"},
+            },
+            "nftfw-vpn.service": {
+                "ReadOnlyPaths": {
+                    "/etc/nftfw/intent.toml",
+                    "/etc/wireguard/nftfw0.conf",
+                },
+                "ReadWritePaths": {
+                    "/run/nftfw",
+                    "-/run/resolvconf",
+                    "-/run/systemd/resolve",
+                },
+            },
+            "nftfwd.service": {
+                "ReadWritePaths": {"/var/lib/nftfw", "/run/nftfw"},
+                "InaccessiblePaths": {"-/run/docker.sock", "-/var/run/docker.sock"},
+            },
+        }
+        directives = (
+            "ReadWritePaths",
+            "ReadOnlyPaths",
+            "InaccessiblePaths",
+            "BindPaths",
+            "BindReadOnlyPaths",
+        )
+        for path in sorted((ROOT / "packaging/systemd").glob("*.service")):
+            unit = parse_unit(str(path.relative_to(ROOT)))
+            actual = {
+                directive: words(unit, "Service", directive)
+                for directive in directives
+                if values(unit, "Service", directive)
+            }
+            self.assertEqual(
+                actual,
+                expected.get(path.name, {}),
+                f"{path.name} path sandbox differs from the reviewed Debian 13 "
+                "clean-host contract",
+            )
 
     def test_managed_policy_rollback_is_narrow_and_generation_scoped(self) -> None:
         service = parse_unit("packaging/systemd/nftfw-managed-rollback.service")
@@ -710,6 +835,8 @@ class SystemdGraphContracts(unittest.TestCase):
         for relative in (
             "packaging/systemd/nftfw-early.service",
             "packaging/systemd/nftfw-rollback.service",
+            "packaging/systemd/nftfw-setup-boot-hold.service",
+            "packaging/systemd/nftfw-setup-docker-hold.service",
             "packaging/systemd/nftfwd.service",
         ):
             unit = parse_unit(relative)
@@ -1221,7 +1348,7 @@ class AmendmentMContracts(unittest.TestCase):
         tests = read("internal/setup/system_test.go")
         self.assertLess(engine.index("PhaseRuntime"), engine.index("PhaseCommit"))
         self.assertLess(engine.index("PhaseCommit"), engine.index("PhaseHandoff"))
-        self.assertLess(engine.index("PhaseHandoff"), engine.index("PhaseBoot"))
+        self.assertLess(engine.index("PhaseHandoff"), engine.index('PhaseBoot     Phase = "boot"'))
         install_body = system.split("func (s *System) Install", 1)[1].split(
             "func sameDockerNetworks", 1
         )[0]
@@ -1245,6 +1372,7 @@ class AmendmentMContracts(unittest.TestCase):
 
     def test_initramfs_guard_is_inert_packaged_and_strictly_handed_off(self) -> None:
         hook = read("packaging/initramfs/nftfw-early-guard-hook")
+        gate = read("packaging/initramfs/nftfw-udev-gate")
         loader = read("packaging/initramfs/nftfw-ipv6-early")
         manager = read("packaging/initramfs/nftfw-initramfs-manage")
         rules = read("packaging/initramfs/nftfw-initramfs-guard.nft")
@@ -1252,9 +1380,12 @@ class AmendmentMContracts(unittest.TestCase):
         service = parse_unit("packaging/systemd/nftfw-enforcement-ready.service")
         prerm = read("packaging/deb/prerm")
         self.assertIn("test -e \"$marker\" || exit 0", hook)
-        self.assertIn('PREREQS="nftfw-ipv6-early"', hook)
-        self.assertIn("conf/default/disable_ipv6 1", loader)
-        self.assertIn("conf/lo/disable_ipv6 0", loader)
+        self.assertIn("PREREQ=nftfw-ipv6-early", gate)
+        self.assertIn('exec "$vendor" "$@"', gate)
+        self.assertIn("/proc/cmdline", loader)
+        self.assertIn("/sys/module/ipv6/parameters/disable", loader)
+        self.assertIn('test "$managed_ipv6_disable" -eq 1', loader)
+        self.assertNotIn("conf/lo/disable_ipv6", loader)
         self.assertIn("nft --check --file", loader)
         self.assertIn('comment "nftfw:initramfs-guard:v1"', rules)
         self.assertEqual(rules.count("policy drop;"), 3)
@@ -1262,6 +1393,7 @@ class AmendmentMContracts(unittest.TestCase):
         self.assertIn('listing=$(lsinitramfs "$image") || return 1', manager)
         for artifact in (
             "nftfw-ipv6-early",
+            "nftfw-udev-gate",
             "nftfw-initramfs-guard.nft",
             "nftfw-initramfs-manage",
             "nftfw-early-guard-hook",
@@ -1271,10 +1403,7 @@ class AmendmentMContracts(unittest.TestCase):
             "/usr/lib/nftfw/nftfwd --handoff-initramfs-guard --state-dir /var/lib/nftfw",
             values(service, "Service", "ExecStartPost"),
         )
-        self.assertLess(
-            prerm.index("nftfw-initramfs-manage disable"),
-            prerm.index("if [ -d /run/systemd/system ]"),
-        )
+        self.assertLess(prerm.index("boot-handoff --package-remove"), prerm.index("if [ -d /run/systemd/system ]"))
         self.assertIn("tests/initramfs-guard-namespace.sh", read("docs/TESTING.md"))
 
     def test_exact_203_rollback_bridge_is_prepared_and_fail_closed(self) -> None:
@@ -1300,6 +1429,16 @@ class AmendmentMContracts(unittest.TestCase):
         self.assertIn('[ "\\$#" -eq 3 ]', helper)
         self.assertIn('[ "\\$3" = "\\$bridge_version" ]', helper)
         self.assertIn('= "iHR \\$new_version" ]', helper)
+        self.assertIn('state_gid=\\$(id -g nftfw-web)', helper)
+        self.assertIn("'0:0:600:1'|\"0:\\$state_gid:600:1\")", helper)
+        self.assertIn("'unrecognized database group'", test)
+        self.assertIn("validate_exact_old_configuration", helper)
+        execute = helper.split("execute_bundle()", 1)[1]
+        self.assertLess(
+            execute.index('validate_exact_old_configuration "$bundle"'),
+            execute.index("setup boot-handoff --package-downgrade"),
+        )
+        self.assertIn("chown root:root /run/nftfw/mutation.lock", helper)
         self.assertNotIn('= "ii  $new_version" ]', helper)
         self.assertIn("stat -c '%u:%g:%a:%h'", helper)
         self.assertIn("installed package is outside the resumable rollback states", helper)
@@ -1317,6 +1456,414 @@ class AmendmentMContracts(unittest.TestCase):
         self.assertIn("private maintainer-script lock residue remains", disposable)
         self.assertIn("idempotent rollback changed protected state", disposable)
         self.assertIn("PACKAGE_ROLLBACK_DISPOSABLE_COMPLETE_PASS", disposable)
+
+
+class AmendmentPContracts(unittest.TestCase):
+    def test_expired_setup_watchdog_reads_before_lock_and_revalidates(self) -> None:
+        source = read("cmd/nftfw/managed.go")
+        body = source.split("func setupRollbackCommand", 1)[1].split(
+            "func setupJournalNeedsRecovery", 1
+        )[0]
+        first_read = body.index("journal, err := store.Read()")
+        acquire = body.index("release, err := setupRollbackAcquire()")
+        second_read = body.index("journal, err := store.Read()", first_read + 1)
+        self.assertLess(first_read, acquire)
+        self.assertLess(acquire, second_read)
+        self.assertIn("validateSetupWatchdogJournal(journal)", body)
+        self.assertIn('errors.New("SETUP_JOURNAL_CHANGED")', body)
+        tests = read("cmd/nftfw/managed_test.go")
+        for expected in (
+            "TestExpiredSetupWatchdogDoesNotContendWithLiveTransaction",
+            "TestExpiredSetupWatchdogRevalidatesJournalAfterLock",
+            "TestExpiredSetupWatchdogRechecksDeadlineUnderLock",
+            "TestSetupLockIsReleasedWhenOwnerProcessDies",
+            "TestSetupWatchdogRejectsMalformedRecoveryStateBeforeLock",
+        ):
+            self.assertIn(expected, tests)
+
+    def test_runtime_readiness_proves_process_sockets_and_both_apis(self) -> None:
+        source = read("internal/setup/system.go")
+        body = source.split("func (s *System) StartRuntime", 1)[1].split(
+            "func (s *System) ApplySafe", 1
+        )[0]
+        for expected in (
+            "s.runtimeProcessReady",
+            "s.runtimeSocketContracts(s.expectedRuntimeUID())",
+            "s.status(ctx)",
+            's.control(ctx, api.Request{Op: "status"})',
+            '"/usr/lib/nftfw/nftfwd"',
+            '"/usr/lib/systemd/systemd-executor"',
+            'errors.New("SETUP_DAEMON_READINESS_TIMEOUT")',
+            'errors.New("SETUP_DAEMON_READINESS_CANCELED")',
+            'errors.New("SETUP_DAEMON_DEGRADED")',
+        ):
+            self.assertIn(expected, body)
+        uid_default = body.split("func (s *System) expectedRuntimeUID", 1)[1].split(
+            "func validateRuntimeExecutable", 1
+        )[0]
+        self.assertIn("return 0", uid_default)
+        self.assertIn("context.AfterFunc(ctx", read("internal/api/unix.go"))
+        tests = read("internal/setup/system_test.go")
+        for expected in (
+            "TestStartRuntimeWaitsForDaemonReadiness",
+            "TestStartRuntimeReadinessFailuresAreBounded",
+            "TestRuntimeSocketContracts",
+            "TestRuntimeExecutableAllowsOnlySystemdExecTransition",
+            "TestRuntimeAPIReadinessUsesStatusAndAuthenticatedControl",
+            "TestRuntimeSnapshotRejectsEstablishedDegradation",
+            "TestRuntimeReadinessRequiresBothAPIsAndExactProcess",
+            "TestRuntimeReadinessStopsBeforeUnsafeDependencies",
+        ):
+            self.assertIn(expected, tests)
+
+    def test_docker_restore_resets_only_backed_up_active_docker(self) -> None:
+        source = read("internal/setup/backup.go")
+        restore = source.split("func restoreBackup", 1)[1].split(
+            "func restoreUnitOrder", 1
+        )[0]
+        self.assertIn('resetUnits := []string{"reset-failed", "docker.service"}', restore)
+        self.assertIn('manifest.Units["docker.socket"]', restore)
+        self.assertIn('if state.Active {', restore)
+        self.assertNotIn("reset-failed nftfw", restore)
+        system = read("internal/setup/system.go")
+        self.assertIn('service["ActiveState"] != "active"', system)
+        self.assertIn("ActiveState=failed", read("internal/setup/system_test.go"))
+        tests = read("internal/setup/backup_test.go")
+        self.assertIn("TestDockerRestoreClearsOnlyBackedUpActiveUnits", tests)
+        self.assertIn("TestDockerRestoreReportsResetAndRestartFailures", tests)
+
+    def test_real_systemd_fixture_covers_optional_path_and_lock_contention(self) -> None:
+        source = read("tests/packaging/setup_rollback_systemd.sh")
+        self.assertIn("flock -n \"$lock_fd\"", source)
+        self.assertIn("expired watchdog bypassed the live foreground lock", source)
+        self.assertIn("optional systemd path declaration created", source)
+        self.assertIn("lock-contended expiry changed the setup journal", source)
+
+
+class AmendmentRContracts(unittest.TestCase):
+    def test_native_initramfs_sources_are_explicitly_owned_and_ordered(self) -> None:
+        manager = read("packaging/initramfs/nftfw-initramfs-manage")
+        hook = read("packaging/initramfs/nftfw-early-guard-hook")
+        gate = read("packaging/initramfs/nftfw-udev-gate")
+        build = read("scripts/build-deb.sh")
+        system = read("internal/setup/system.go")
+        for path in (
+            "/etc/nftfw/initramfs-source-owner-v1",
+            "source_root=/etc/initramfs-tools/scripts/init-top",
+            "source_loader=$source_root/nftfw-ipv6-early",
+            "source_gate=$source_root/udev",
+            "/usr/share/initramfs-tools/scripts/init-top/udev",
+        ):
+            self.assertIn(path, manager)
+        for expected in (
+            "managed initramfs source state is partial or ambiguous",
+            "managed initramfs target changed during publication",
+            "another initramfs ownership transaction is running",
+            "rollback_fresh_enable",
+            "restore_disabled_backup",
+            "verify_image_enabled",
+            "verify_image_disabled",
+            "vendor_mentions == 0",
+            "gate_line == guard_line + 2",
+        ):
+            self.assertIn(expected, manager)
+        self.assertIn('copy_file script "$vendor_udev"', hook)
+        self.assertNotIn("scripts/init-top/ORDER", hook)
+        self.assertIn("PREREQ=nftfw-ipv6-early", gate)
+        self.assertIn("nftfw-udev-gate", build)
+        handoff = system.split("func (s *System) PublishFinalDependencies", 1)[1].split(
+            "func (s *System) EnableBoot", 1
+        )[0]
+        self.assertIn('managerAction := "rebuild-enabled"', handoff)
+        self.assertIn('managerAction = "verify-enabled"', handoff)
+        self.assertNotIn("ensureManagedInitramfsMarker", system)
+        touched = system.split("func (s *System) touchedFiles", 1)[1].split(
+            "func privatePlan", 1
+        )[0]
+        for expected in (
+            "s.Paths.InitramfsMarker",
+            "s.Paths.InitramfsOwner",
+            "s.Paths.InitramfsLoader",
+            "s.Paths.InitramfsGate",
+        ):
+            self.assertIn(expected, touched)
+
+    def test_remove_paths_refuse_without_the_ownership_transaction(self) -> None:
+        for relative in ("scripts/uninstall.sh", "packaging/deb/prerm"):
+            source = read(relative)
+            self.assertIn("initramfs-source-owner-v1", source)
+            self.assertIn("scripts/init-top/nftfw-ipv6-early", source)
+            self.assertIn("scripts/init-top/udev", source)
+            self.assertIn("nftfw-initramfs-manage", source)
+
+
+class AmendmentTContracts(unittest.TestCase):
+    def test_initramfs_verifier_propagates_every_security_result(self) -> None:
+        source = read("packaging/initramfs/nftfw-initramfs-manage")
+        enabled = source.split("verify_image_enabled()", 1)[1].split(
+            "verify_image_disabled()", 1
+        )[0]
+        disabled = source.split("verify_image_disabled()", 1)[1].split(
+            "verify_all()", 1
+        )[0]
+        aggregate = source.split("verify_all()", 1)[1].split(
+            "rollback_fresh_enable()", 1
+        )[0]
+        for expected in (
+            "require_extracted_regular",
+            'loader_digest=$(digest "$loader") || return 1',
+            'gate_digest=$(digest "$gate") || return 1',
+            'vendor_digest=$(digest "$vendor") || return 1',
+            'rules_digest=$(digest "$rules") || return 1',
+            'prerequisite=$("$gate" prereqs) || return 1',
+            'verify_enabled_order "$order" || return 1',
+        ):
+            self.assertIn(expected, enabled)
+        for expected in (
+            'listing=$(lsinitramfs "$image") || return 1',
+            'gate_digest=$(digest "$gate") || return 1',
+            'prerequisite=$("$gate" prereqs) || return 1',
+            '[[ $prerequisite != *nftfw* ]] || return 1',
+            '! grep -F nftfw "$order" >/dev/null || return 1',
+        ):
+            self.assertIn(expected, disabled)
+        self.assertIn("cannot enumerate installed initramfs images", aggregate)
+        self.assertIn("cannot remove initramfs verification directory", aggregate)
+        self.assertIn("verification_list=", source)
+        self.assertIn("verification_directory=", source)
+
+    def test_conditional_corruption_and_publication_matrix_is_required(self) -> None:
+        source = read("tests/packaging/initramfs_native_sources.sh")
+        for expected in (
+            "marker-mktemp loader-install gate-move owner-post-sync",
+            "loader gate vendor rules marker checksum order mode owner missing symlink duplicate",
+            "gate order artifact mode owner missing duplicate listing",
+            "wrong gate prerequisite",
+            "NFTFW disabled prerequisite",
+            "exact verifier failure bypassed enable rollback",
+            "aggregate verifier masked a later invalid image",
+            "aggregate verifier masked cleanup failure",
+        ):
+            self.assertIn(expected, source)
+        manager = read("packaging/initramfs/nftfw-initramfs-manage")
+        self.assertIn("fail_enable_with_rollback", manager)
+        self.assertIn("marker publication failed", manager)
+        self.assertIn("ownership record publication failed", manager)
+
+
+class AmendmentUContracts(unittest.TestCase):
+    def test_out_of_process_commit_inspector_initializes_defaults(self) -> None:
+        system = read("internal/setup/system.go")
+        body = system.split("func (s *System) GenerationCommitted", 1)[1].split(
+            "// PublishFinalDependencies", 1
+        )[0]
+        self.assertLess(body.index("s.defaults()"), body.index("s.status(ctx)"))
+        self.assertIn('errors.New("SETUP_COMMIT_STATE_UNKNOWN")', body)
+
+        managed = read("cmd/nftfw/managed.go")
+        rollback = managed.split("func setupRollbackCommand", 1)[1].split(
+            "func setupJournalNeedsRecovery", 1
+        )[0]
+        self.assertIn("system := setupRecoverySystem()", rollback)
+        self.assertIn("system.GenerationCommitted", rollback)
+        self.assertIn("system.Rollback", rollback)
+        self.assertIn("system.RecoverCommitted", rollback)
+
+    def test_commit_inspection_and_process_death_regressions_are_present(self) -> None:
+        system_tests = read("internal/setup/system_test.go")
+        for expected in (
+            "TestGenerationCommittedInitializesDefaultsAndPreservesInjections",
+            "TestGenerationCommittedFailsClosedOnUnavailableOrMalformedStatus",
+        ):
+            self.assertIn(expected, system_tests)
+
+        command_tests = read("cmd/nftfw/managed_test.go")
+        for expected in (
+            "TestOutOfProcessSetupRollbackClassifiesEveryPostApplyPrecommitPhase",
+            "TestOutOfProcessSetupRollbackRecoversCommitJournalGapForward",
+            "managedsetup.PhaseApply",
+            "managedsetup.PhaseTunnel",
+            "managedsetup.PhaseValidate",
+            "managedsetup.PhaseCommit",
+        ):
+            self.assertIn(expected, command_tests)
+
+
+class AmendmentVContracts(unittest.TestCase):
+    def test_rollback_uses_only_canonical_managed_routing_identity(self) -> None:
+        source = read("internal/setup/system.go")
+        route = source.split("func managedRollbackRoute", 1)[1].split(
+            "func phaseMayHaveTunnel", 1
+        )[0]
+        for expected in (
+            "summary.VPNInterface != intent.VPNInterface",
+            "Interface: intent.VPNInterface",
+            "Fwmark: intent.VPNFwmark",
+            "Table: routing.DefaultTable",
+            'errors.New("SETUP_ROLLBACK_PLAN_INVALID")',
+        ):
+            self.assertIn(expected, route)
+
+    def test_recovery_transitions_are_durable_and_keep_origin_phase(self) -> None:
+        engine = read("internal/setup/engine.go")
+        failure = engine.split("func (e Engine) fail", 1)[1].split(
+            "func journalNeedsRecovery", 1
+        )[0]
+        self.assertNotIn("journal.Phase, journal.Status = PhaseRollback", failure)
+        self.assertIn('journal.Status = "rolling_back"', failure)
+        self.assertIn('journal.Status = "recovering_committed"', failure)
+        self.assertIn('errors.New("SETUP_RECOVERY_TRANSITION_WRITE_FAILED")', failure)
+        self.assertIn('errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")', failure)
+        self.assertLess(
+            failure.index('journal.Status = "rolling_back"'),
+            failure.index("e.Executor.Rollback"),
+        )
+        self.assertLess(
+            failure.index('journal.Status = "recovering_committed"'),
+            failure.index("e.Executor.RecoverCommitted"),
+        )
+        interface = engine.split("type Executor interface", 1)[1].split(
+            "type JournalStore interface", 1
+        )[0]
+        self.assertIn("GenerationCommitted(context.Context, uint64)", interface)
+
+        command = read("cmd/nftfw/managed.go")
+        rollback = command.split("func setupRollbackCommand", 1)[1].split(
+            "func setupJournalNeedsRecovery", 1
+        )[0]
+        for expected in (
+            'journal.Status = "rolling_back"',
+            'journal.Status = "recovering_committed"',
+            'journal.Status = "rollback_failed"',
+            'journal.Status = "committed_recovery_failed"',
+            "setupRecoveryErrorCode",
+            "context.WithTimeout",
+        ):
+            self.assertIn(expected, rollback)
+
+    def test_recovery_transaction_regression_matrix_is_present(self) -> None:
+        engine_tests = read("internal/setup/engine_test.go")
+        for expected in (
+            "TestEveryMutationPhaseFailureRollsBack",
+            "TestRecoveryTransitionWriteFailurePrecedesMutation",
+            "TestRecoveryResultWriteFailureRemainsSafelyRetryable",
+            "TestRecoveryTransitionsResumeAfterSecondProcessDeath",
+        ):
+            self.assertIn(expected, engine_tests)
+        system_tests = read("internal/setup/system_test.go")
+        for expected in (
+            "TestManagedRollbackUsesCanonicalRoutingIdentityAndOriginPhase",
+            "TestManagedRollbackRouteRejectsNoncanonicalRecoveryIdentity",
+        ):
+            self.assertIn(expected, system_tests)
+        command_tests = read("cmd/nftfw/managed_test.go")
+        for expected in (
+            "TestOutOfProcessRecoveryPublishesTransitionsBeforeMutation",
+            "TestOutOfProcessRecoveryTransitionWriteFailureDoesNotMutate",
+            "TestOutOfProcessRecoveryFailureIsRedactedAndRetryable",
+            "TestOutOfProcessCommittedRecoveryFailureIsRetryable",
+            "TestSetupRecoveryJournalTransitionValidation",
+        ):
+            self.assertIn(expected, command_tests)
+
+
+class AmendmentWContracts(unittest.TestCase):
+    def test_terminal_retry_classification_is_strict_and_read_only(self) -> None:
+        source = read("internal/setup/retry.go")
+        prepare = read("internal/setup/system.go").split(
+            "func (s *System) Prepare", 1
+        )[1].split("func (s *System) Backup", 1)[0]
+        for expected in (
+            "terminalRolledBackJournal(current)",
+            "verifyRestoredBackup(ctx, runner, journal.BackupDir)",
+            "state.OpenReadOnly(ctx, database)",
+            "state.LoadVerifiedGenerationSnapshot(paths.StateDir, id)",
+            "provenance.OpenReadOnly(ctx, ledgerPath)",
+            "wireguard.ValidateRetainedCache(cache)",
+            'generation.Status != "rolled_back"',
+            'filepath.Join(paths.StateDir, "enforcement-enabled")',
+            "id != uint64(index+1)",
+            "current.Generation != generationIDs[len(generationIDs)-1]",
+            "verifyRetiredGenerationInventory(paths.StateDir, generationIDs)",
+            "generation.ScriptPath != expectedScript",
+            "backupPaths[journal.BackupDir]",
+        ):
+            self.assertIn(expected, source)
+        self.assertNotIn("os.Remove(", source)
+        self.assertNotIn("os.Rename(", source)
+        endpoint = read("internal/wireguard/endpoint.go")
+        self.assertIn('json.MarshalIndent(cache, "", "  ")', endpoint)
+        self.assertIn("bytes.Equal(raw, append(canonical, '\\n'))", endpoint)
+        self.assertIn("inspector.Inspect", prepare)
+        self.assertIn("cleanSnapshot.ValidateCleanHost()", prepare)
+        self.assertIn("inspectRetiredFirstSetup", prepare)
+        self.assertIn("plan.PriorJournalSHA256", prepare)
+
+    def test_terminal_journal_lineage_is_checksum_bound_and_durable(self) -> None:
+        source = read("internal/setup/journal.go")
+        engine = read("internal/setup/engine.go")
+        for expected in (
+            "func (f FileJournal) Begin",
+            "priorSHA256",
+            "readJournalFile(f.Path)",
+            "archiveTerminalJournal",
+            "unix.Renameat2",
+            "unix.RENAME_NOREPLACE",
+            'os.CreateTemp(parent, ".journal-history-*.tmp")',
+            "syncRegularSetupFile(destination)",
+            "syncSetupDirectory(history)",
+            "syncSetupDirectory(parent)",
+            "secureSetupDirectory(parent)",
+            "SETUP_JOURNAL_HISTORY_COLLISION",
+        ):
+            self.assertIn(expected, source)
+        self.assertIn("Begin(Journal, string) error", engine)
+        self.assertIn("e.Journal.Begin(journal, plan.PriorJournalSHA256)", engine)
+
+    def test_retry_lineage_security_matrix_and_operator_docs_are_present(self) -> None:
+        retry_tests = read("internal/setup/retry_test.go")
+        journal_tests = read("internal/setup/journal_lineage_test.go")
+        backup_tests = read("internal/setup/backup_test.go")
+        for expected in (
+            "TestRetiredFirstSetupRetryPreservesMonotonicState",
+            "TestRetiredFirstSetupRepeatedTerminalLineage",
+            "TestRetiredFirstSetupPredicatesFailClosed",
+            "TestPreMutationTerminalWithoutRetainedGenerationCanRetry",
+            '"current-journal-not-latest"',
+            '"duplicate-backup-lineage"',
+            '"generation-id-gap"',
+            '"generation-inventory-extra"',
+        ):
+            self.assertIn(expected, retry_tests)
+        for expected in (
+            "TestFileJournalBeginArchivesExactTerminalLineage",
+            "TestFileJournalBeginRetriesExistingExactArchive",
+            "TestFileJournalBeginIgnoresPreRenameCrashResidueOutsideHistory",
+            "TestFileJournalBeginRefusesChangedOrAmbiguousLineage",
+            "TestFileJournalBeginRefusesHistoryCollisionAndUnsafeMode",
+        ):
+            self.assertIn(expected, journal_tests)
+        self.assertIn(
+            "TestVerifyRestoredBackupFailsClosedOnEveryEvidenceClass", backup_tests
+        )
+        for relative in (
+            "tests/packaging/managed_retry_controller.sh",
+            "tests/packaging/managed_retry_disposable.sh",
+        ):
+            self.assertTrue((ROOT / relative).is_file(), f"missing {relative}")
+        for relative in (
+            "README.md",
+            "QUICKSTART.md",
+            "docs/ARCHITECTURE.md",
+            "docs/RECOVERY.md",
+            "docs/TROUBLESHOOTING.md",
+            "docs/TESTING.md",
+        ):
+            self.assertIn(
+                "terminal retry",
+                read(relative).lower(),
+                f"{relative} does not document terminal retry behavior",
+            )
 
 
 class ReleaseCandidateMetadataContracts(unittest.TestCase):
@@ -1539,6 +2086,182 @@ class ReleaseCandidateMetadataContracts(unittest.TestCase):
                 "untagged output must carry `RELEASE CANDIDATE - NOT DEPLOYABLE`; "
                 "checksums alone do not make it a final release"
             )
+
+
+class AmendmentXContracts(unittest.TestCase):
+    def test_grub_policy_is_fixed_strict_and_transaction_owned(self) -> None:
+        boot = read("internal/setup/boot.go")
+        system = read("internal/setup/system.go")
+        for expected in (
+            "/etc/default/grub.d/90-nftfw-ipv6-disabled.cfg",
+            "/boot/grub/grub.cfg",
+            "/usr/sbin/update-grub",
+            "grub2-common",
+            "unix.RENAME_NOREPLACE",
+            "SETUP_BOOT_MOUNT_UNSUPPORTED",
+            "SETUP_BOOT_MANAGER_AMBIGUOUS",
+            "verifyGeneratedGRUB",
+            "verifyRunningBoot",
+        ):
+            self.assertIn(expected, boot + system)
+        self.assertIn("ipv6.disable=1", boot)
+        self.assertIn("context.WithTimeout", boot)
+        self.assertNotIn('"systemctl", "reboot"', boot + system)
+
+    def test_efi_identity_and_prepolicy_boot_hold_fail_closed(self) -> None:
+        boot = read("internal/setup/boot.go")
+        system = read("internal/setup/system.go")
+        command = read("cmd/nftfw/managed.go")
+        service = parse_unit("packaging/systemd/nftfw-setup-boot-hold.service")
+        generator = read("packaging/systemd/nftfw-setup-boot-hold-generator")
+        for expected in (
+            "/sys/firmware/efi",
+            "/usr/bin/efibootmgr",
+            "EFI firmware networking is enabled",
+            "BootCurrent: ",
+            "BootOrder: ",
+            "BootNext: ",
+            "setup-boot-hold-v1",
+            "setup-boot-hold-ready",
+            "setup-boot-release",
+            "WaitBootHold",
+            "releaseBootHold",
+        ):
+            self.assertIn(expected, boot + system)
+        self.assertIn('args[0] == "boot-hold"', command)
+        self.assertEqual(words(service, "Unit", "Before"), {"network-pre.target"})
+        self.assertEqual(values(service, "Service", "Type"), ["oneshot"])
+        self.assertEqual(values(service, "Service", "TimeoutStartSec"), ["infinity"])
+        self.assertEqual(
+            values(service, "Service", "ExecStart"),
+            ["/usr/lib/nftfw/nftfw setup boot-hold"],
+        )
+        self.assertEqual(
+            words(service, "Service", "RestrictAddressFamilies"),
+            {"AF_UNIX", "AF_NETLINK"},
+        )
+        self.assertEqual(
+            words(service, "Service", "CapabilityBoundingSet"),
+            {"CAP_CHOWN", "CAP_NET_ADMIN"},
+        )
+        self.assertEqual(
+            words(service, "Service", "AmbientCapabilities"),
+            {"CAP_CHOWN", "CAP_NET_ADMIN"},
+        )
+        self.assertEqual(values(service, "Service", "ProtectSystem"), ["strict"])
+        self.assertEqual(values(service, "Service", "PrivateTmp"), ["yes"])
+        self.assertIn("/run/systemd/generator.early", generator)
+        self.assertIn("/run/systemd/generator.late", generator)
+        self.assertIn("network-pre.target.requires", generator)
+        self.assertIn("network.target.d", generator)
+        self.assertIn("Requires=network-pre.target", generator)
+        self.assertIn("After=network-pre.target", generator)
+        self.assertIn("nftfw-setup-docker-hold.service", generator)
+        self.assertIn("for consumer in docker.service docker.socket", generator)
+        self.assertIn("dropin_dir=$normal/$consumer.d", generator)
+        self.assertIn('[ "$consumer" = docker.service ]', generator)
+        self.assertIn("Ordering docker.socket after an indefinite oneshot", generator)
+        docker_hold = parse_unit("packaging/systemd/nftfw-setup-docker-hold.service")
+        self.assertEqual(words(docker_hold, "Unit", "Before"), {"docker.service"})
+        self.assertIn("[ ! -e \"$marker\" ] && [ ! -L \"$marker\" ]", generator)
+        self.assertNotIn("systemctl", generator)
+
+    def test_boot_hold_lifecycle_and_direct_fixture_are_complete(self) -> None:
+        builder = read("scripts/build-deb.sh")
+        installer = read("scripts/install.sh")
+        preinst = read("packaging/deb/preinst")
+        prerm = read("packaging/deb/prerm")
+        uninstall = read("scripts/uninstall.sh")
+        artifact = "nftfw-setup-boot-hold-generator"
+        for source in (builder, installer, preinst, uninstall):
+            self.assertIn(artifact, source)
+        self.assertIn("nftfw-setup-boot-hold.service", prerm)
+        for shadow_root in (
+            "/etc/systemd/system-generators",
+            "/run/systemd/system-generators",
+            "/usr/local/lib/systemd/system-generators",
+        ):
+            self.assertIn(shadow_root, preinst)
+        self.assertIn("Refusing to overwrite a foreign systemd generator", installer)
+        fixture = read("tests/packaging/setup_boot_hold_generator.sh")
+        for expected in (
+            "absent boot-hold marker emitted",
+            "foreign dependency link was accepted",
+            "unsafe marker did not fail closed",
+            "unsafe generator output path was accepted",
+            "symlinked generator dependency directory was accepted",
+            "symlinked network target drop-in directory was accepted",
+            "foreign network hold fragment was accepted",
+            "symlinked network hold fragment was accepted",
+        ):
+            self.assertIn(expected, fixture)
+
+    def test_setup_has_durable_reboot_resume_and_rollback_states(self) -> None:
+        engine = read("internal/setup/engine.go")
+        command = read("cmd/nftfw/managed.go")
+        self.assertLess(engine.index("PhaseBootPrep"), engine.index("PhaseGuard"))
+        for expected in (
+            '"reboot_required"',
+            '"resume_ready"',
+            '"rollback_reboot_required"',
+            "ErrRebootRequired",
+            "ErrRollbackRebootRequired",
+        ):
+            self.assertIn(expected, engine + command)
+        status = command.split("if len(args) > 0 && args[0] == \"status\"", 1)[1].split(
+            'if len(args) > 0 && args[0] == "rollback"', 1
+        )[0]
+        self.assertNotIn('"backup_dir"', status)
+        self.assertNotIn('"cmdline"', status)
+
+    def test_native_guard_requires_kernel_disable_without_loopback_reenable(self) -> None:
+        loader = read("packaging/initramfs/nftfw-ipv6-early")
+        self.assertIn("/proc/cmdline", loader)
+        self.assertIn("/sys/module/ipv6/parameters/disable", loader)
+        self.assertIn("/proc/net/if_inet6", loader)
+        self.assertNotIn("conf/lo/disable_ipv6", loader)
+        self.assertIn("nft --check --file", loader)
+        self.assertIn("ready_message='NFTFW initramfs guard ready'", loader)
+
+    def test_package_and_exact_downgrade_restore_boot_ownership(self) -> None:
+        for relative, argument in (
+            ("packaging/deb/prerm", "--package-remove"),
+            ("scripts/uninstall.sh", "--package-remove"),
+            ("scripts/package-rollback.sh", "--package-downgrade"),
+        ):
+            source = read(relative)
+            self.assertIn("90-nftfw-ipv6-disabled.cfg", source)
+            self.assertIn("setup boot-handoff", source)
+            self.assertIn(argument, source)
+        command = read("cmd/nftfw/managed.go")
+        preinst = read("packaging/deb/preinst")
+        self.assertIn("package-upgrade-preflight", command)
+        self.assertIn("setup package-upgrade-preflight", preinst)
+        self.assertIn("incomplete or ambiguous managed boot transaction", preinst)
+
+    def test_direct_boot_security_matrix_is_present(self) -> None:
+        tests = read("internal/setup/boot_test.go")
+        for expected in (
+            "TestManagedGRUBIdentityAndArgumentMatrix",
+            "TestManagedGRUBRefusesUnsafeIdentity",
+            "TestManagedBootTwoPassTransaction",
+            "TestManagedBootUpdateFailureRestoresExactly",
+            "TestManagedBootHoldResumeReleaseHandshake",
+            "TestManagedBootHoldRuntimeStateRefusalMatrix",
+            "TestManagedBootHoldInvalidStateFailsClosed",
+            "TestManagedGRUBEFIIdentityMatrix",
+            "duplicate",
+            "quoted-conflict",
+            "symlink-config",
+            "read-only-mount",
+        ):
+            self.assertIn(expected, tests)
+        conflict = read("tests/packaging/managed_boot_grub_conflict.py")
+        self.assertIn("ipv6.disable=0 ipv6.disable=1", conflict)
+        self.assertIn("os.O_EXCL | os.O_NOFOLLOW", conflict)
+        pcap = read("tests/packaging/managed_boot_pcap.py")
+        self.assertIn("--expect-zero-guest", pcap)
+        self.assertIn("failed boot identity emitted a guest frame", pcap)
 
 
 if __name__ == "__main__":

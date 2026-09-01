@@ -25,26 +25,33 @@ block_boot() {
     done
 }
 
-write_sysctl() {
-    path=$1
-    value=$2
-    test -f "$path" || return 1
-    printf '%s\n' "$value" >"$path"
-    test "$(cat "$path")" = "$value"
-}
-
 test -r "$marker" -a -r "$rules" -a -r "$digest" || block_boot
 test "$(cat "$marker")" = 'nftfw.initramfs-managed-disabled.v1' || block_boot
 
-# This script is a prerequisite of initramfs-tools' udev script. Setting the
-# per-netns default before udev creates a non-loopback device prevents kernel
-# MLD/DAD emission; unlike ipv6.disable=1, every setting remains reversible.
-write_sysctl /proc/sys/net/ipv6/conf/default/disable_ipv6 1 || block_boot
-write_sysctl /proc/sys/net/ipv6/conf/default/autoconf 0 || block_boot
-write_sysctl /proc/sys/net/ipv6/conf/all/disable_ipv6 1 || block_boot
-write_sysctl /proc/sys/net/ipv6/conf/all/autoconf 0 || block_boot
-write_sysctl /proc/sys/net/ipv6/conf/lo/disable_ipv6 0 || block_boot
-write_sysctl /proc/sys/net/ipv6/conf/lo/autoconf 0 || block_boot
+# Built-in and early-probed NICs can precede init-top. Managed disabled mode
+# therefore requires the transaction-owned pre-driver kernel argument. Refuse
+# missing, quoted, duplicated, or contradictory identities, and never attempt
+# to re-enable loopback while the kernel-wide disable is active.
+test -r /proc/cmdline -a -r /sys/module/ipv6/parameters/disable || block_boot
+set -f
+managed_ipv6_disable=0
+cmdline=$(cat /proc/cmdline) || block_boot
+# Intentional kernel-command-line word splitting with pathname expansion off.
+# shellcheck disable=SC2086
+set -- $cmdline
+for token do
+    case "$token" in
+        ipv6.disable=1) managed_ipv6_disable=$((managed_ipv6_disable + 1)) ;;
+        ipv6.disable|ipv6.disable=*|*ipv6.disable=1*) block_boot ;;
+    esac
+done
+set +f
+test "$managed_ipv6_disable" -eq 1 || block_boot
+case "$(cat /sys/module/ipv6/parameters/disable)" in
+    Y|1) ;;
+    *) block_boot ;;
+esac
+test ! -s /proc/net/if_inet6 || block_boot
 
 expected=$(awk 'NR == 1 { print $1 }' "$digest")
 actual=$(sha256sum "$rules" | awk '{ print $1 }')
@@ -57,3 +64,14 @@ nft list table inet nftfw_initramfs_guard >/dev/null 2>&1 || block_boot
 install -d -m 0700 /run/nftfw-initramfs
 printf '%s\n' "$actual" >/run/nftfw-initramfs/guard-ready.sha256
 chmod 0600 /run/nftfw-initramfs/guard-ready.sha256
+# Fixed, non-sensitive serial evidence lets the disposable boot gate bind the
+# first physical packet to the instant the pre-driver IPv6 proof and temporary
+# nftables guard have both completed. Never include paths, hashes, addresses,
+# kernel arguments, or administrator data in this marker.
+ready_message='NFTFW initramfs guard ready'
+printf '%s\n' "$ready_message" >/dev/kmsg 2>/dev/null || true
+printf '%s\n' "$ready_message" >/dev/console 2>/dev/null || true
+# Headless validation guests may keep /dev/console on the virtual display.
+# Mirror the same fixed marker to an optional first serial console; absence or
+# write failure is non-fatal and cannot change the enforcement boundary.
+printf '%s\n' "$ready_message" >/dev/ttyS0 2>/dev/null || true

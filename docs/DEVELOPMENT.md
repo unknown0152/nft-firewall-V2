@@ -25,8 +25,10 @@ make static
 make vuln
 make security
 shellcheck scripts/*.sh packaging/initramfs/nftfw-ipv6-early \
+  packaging/initramfs/nftfw-udev-gate \
   packaging/initramfs/nftfw-early-guard-hook \
   packaging/initramfs/nftfw-initramfs-manage \
+  packaging/systemd/nftfw-setup-boot-hold-generator \
   tests/*.sh tests/acceptance/*.sh tests/chaos/*.sh tests/namespaces/*.sh \
   tests/packaging/*.sh packaging/deb/*inst packaging/deb/prerm
 ```
@@ -192,11 +194,16 @@ sudo ./tests/initramfs-guard-namespace.sh
 sudo ./tests/package-rollback-bundle.sh
 ```
 
-The first verifies early IPv6 inheritance, exact guard application, and
-fail-closed archive inspection. The second verifies the protected rollback
+The first verifies that the native initramfs loader accepts only an exact
+kernel-level IPv6-disable proof, applies the checksum-bound nftables guard, and
+fails closed during archive inspection. The second verifies the protected rollback
 bundle, exact 2.0.3 payload-equivalent bridge, exact `iHR` transition, and
 argument/state/identity/metadata/tamper/path refusals. The disposable package
 test additionally proves the parent canonical lock remains externally held
 while dpkg's private mount namespace satisfies the legacy pre-install backup.
-Full boot packet capture and the complete renewed E–N privileged matrix remain
-E-R2 guest gates.
+Full boot packet capture and the complete Amendment E through X privileged
+matrix must be repeated as E-R2 guest gates. The source-stage Amendment X
+preflight has already passed its two-boot zero-pre-readiness capture,
+contradictory-identity zero-guest capture, boot rollback/handoff cases, and
+exact-package rollback guest transaction; those results do not substitute for
+the later complete E-R2 run.

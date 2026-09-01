@@ -49,11 +49,38 @@ Keep the local console or a second LAN session available until setup reports
 when its daemon ownership settings changed. `--yes` accepts both confirmations
 for controlled automation.
 
-After policy commit, setup verifies early enforcement, regenerates every
-installed initramfs with the managed pre-udev IPv6/deny guard, verifies the
-archive ordering and checksums, and then publishes the final consumer
-dependencies. A failure remains under the independent setup recovery timer;
-do not reboot until setup reports completion.
+The first successful invocation stops at:
+
+```text
+Boot preparation: VERIFIED
+Status: reboot_required
+```
+
+At that point NFTFW has changed only its exact backed-up GRUB/initramfs boot
+preparation and journal. It has not changed Docker ownership or forwarding,
+started the VPN, applied the firewall, or exposed a service. Reboot explicitly:
+
+```bash
+sudo reboot
+```
+
+After the server returns, check the redacted state and rerun the same command:
+
+```bash
+sudo nftfw setup status
+sudo nftfw setup --vpn /path/to/working-vpn.conf
+```
+
+Status may report `resume_ready` after the new kernel identity is verified.
+The second invocation verifies exactly one `ipv6.disable=1`, no IPv6 address
+state, the unchanged GRUB/initramfs transaction, and the same prepared profile
+identity before it changes Docker, forwarding, firewall, routing, or VPN
+state. LAN management returns under a narrow temporary resume guard; ordinary
+physical Internet egress remains denied, DNS is not needed because the
+prepared endpoint set is cached privately, and Docker is intentionally held
+inactive until NFTFW's ownership files and restart confirmation are complete.
+Keep console/LAN recovery until the second invocation reports
+`Status: PROTECTED`. NFTFW never performs the reboot itself.
 
 ## 4. Verify
 
@@ -111,6 +138,13 @@ Profile, discovery, Docker, or route-preflight refusals occur before a setup
 journal or protected mutation exists and require no rollback. After a journal
 exists, use only the status and rollback commands above; the independent timer
 also handles an interrupted transaction.
+
+When status is exactly `rolled_back`, rerun the dry-run. A terminal retry is
+accepted only after NFTFW proves the captured operator files and runtime state
+were restored, all managed services and routing are inactive, every retained
+generation is rolled back, and the endpoint/provenance evidence is intact.
+Do not delete the journal, backups, generation database, or provenance ledger;
+the retry archives the old journal and advances generation numbers normally.
 If a later `expose` or `lan` change is interrupted,
 `nftfw-managed-rollback.timer` finishes a proved commit or restores the exact
 prior files and pending generation.

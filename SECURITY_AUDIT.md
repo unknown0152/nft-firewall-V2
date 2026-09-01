@@ -1,13 +1,18 @@
 # NFT Firewall V2 Security Audit
 
 Audit date: 2026-08-16, 2026-08-17, 2026-08-23, 2026-08-24,
-2026-08-25, 2026-08-26, 2026-08-29, and 2026-08-30 UTC. Scope: production Go, configuration/compiler,
+2026-08-25, 2026-08-26, 2026-08-29, 2026-08-30, 2026-08-31, and
+2026-09-01 UTC. Scope: production Go, configuration/compiler,
 nftables ownership, Unix APIs, persistence/rollback, systemd, integrations,
 web, installers, tests, dependencies, Git history, and release contents.
 
-Current source disposition: **2.1.0 STAGE_R_CANDIDATE_ONLY**.
-The amended 2.1.0 source-only Stage E-R matrix passed; independent candidate
-comparison remains a post-freeze external gate. Successive privileged R2 runs
+Current source disposition: **2.1.0 AMENDMENT X SOURCE VALIDATED; CANDIDATES
+PENDING**.
+The Amendment W retry and native-lifecycle rows pass, but the mandatory W11
+boot capture reopened NFV2-057 before source freeze. Amendment X now supplies
+the approved pre-driver Debian GRUB transaction. Its direct regressions,
+disposable boot/capture/package preflights, and complete source gates now pass.
+Successive privileged R2 runs
 hard-stopped safely on NFV2-049, NFV2-050/NFV2-051, NFV2-052, and then
 NFV2-053/NFV2-054. The latest run completed every still-useful independent
 row and found NFV2-055 through NFV2-058: exact-2.0.3 absent-unit planning,
@@ -15,10 +20,18 @@ first-setup final-edge ordering, pre-readiness IPv6 MLD/DAD, and exact package
 rollback refusal. The next run passed those corrected boundaries and reached
 the real rollback, then found NFV2-059 at dpkg's `iHR` bridge transition. The
 source-only disposable regression exposed NFV2-060 in the following exact
-package step. It did not complete R2. The source corrections and direct
-regressions pass, but
-renewed E–N R2, tag validation, publication, and
-deployment have not been executed. The findings
+package step. Later recovery runs corrected transaction ordering and durable
+recovery, then exposed NFV2-061: an exact first-setup rollback retained its
+required audit/provenance evidence but could not re-enter clean setup. The
+Amendment W retry correction and direct regressions pass. W11 then captured
+two IPv6 MLD/DAD frames before the first init-top readiness marker even though
+the native manager was enabled and post-boot sysctls were disabled. Amendment
+X's kernel-wide boundary then produced zero pre-readiness packets on two
+consecutive managed boots and zero guest packets for a contradictory boot.
+Exact rollback preflight also exposed and corrected NFV2-062 and NFV2-063
+before freeze. Candidate
+builds, renewed E-R2, tag validation, publication, and deployment have not
+been executed. The findings
 below through NFV2-030 record the tagged 2.0.1 audit history; NFV2-031 through
 NFV2-041 record the accepted 2.0.2/2.0.3 release work; NFV2-042 onward records
 2.1.0 source work.
@@ -102,10 +115,13 @@ and post-tag gates.
 | NFV2-054 | The temporary setup guard declared an ordinary IPv4 address set but populated it with `/32` prefixes, which Debian nftables rejects without interval semantics | HIGH | Emit interval semantics for the endpoint set while retaining strict canonical IPv4 `/32` validation, deterministic ordering, exact table ownership, and pre-apply `nft --check` | CLOSED; unit/source-contract and gated disposable real-parser/apply/exact-delete proof PASS; complete renewed privileged R2 NOT EXECUTED |
 | NFV2-055 | Exact-2.0.3 adoption planning rejected three 2.1-only units that systemd correctly reported as absent | HIGH | Read one strict six-property snapshot per unit and accept only the enumerated exact-2.0.3 `not-found`/inactive/empty-state/empty-fragment tuple; reject aliases, shadows, contradictions, malformed output, and newer-version absence | CLOSED; unit/source-contract proof PASS; complete renewed privileged R2 NOT EXECUTED |
 | NFV2-056 | Managed first setup installed final `Requisite=nftfw-early` edges before starting the daemon, making the runtime phase unstartable | HIGH | Defer final dependency publication to a post-commit handoff: start and validate runtime under the temporary guard, commit, establish early/readiness and initramfs protection, then atomically publish final edges and activate boot consumers | CLOSED; Engine/System ordering, failure, recovery-forward, and rollback source proof PASS; complete renewed privileged R2 NOT EXECUTED |
-| NFV2-057 | The prior initramfs design allowed guest-originated IPv6 MLD and DAD frames before readiness | HIGH | Marker-activate a checksum-bound init-top loader as an explicit udev prerequisite, set reversible IPv6 defaults before NIC creation, retain loopback IPv6, apply an exact temporary nftables deny guard, and remove it only after committed enforcement verification under the global mutation lock | CLOSED at source boundary; unit, strict-handoff, disposable namespace, packaging, and removal proof PASS; zero-packet two-boot capture requires complete renewed privileged R2 |
-| NFV2-058 | Exact 2.0.3 package rollback was refused by its historical downgrade guard after dpkg recorded 2.1.0 | HIGH | Prepare and verify a protected bundle before upgrade; use a lower-version fail-closed Debian bridge with exact-2.0.3 data payload, then install the unmodified exact 2.0.3 package; validate package state, schema, hashes, payload, resumable states, and initramfs cleanup without editing dpkg status | CLOSED at source boundary; bundle/tamper/path/payload source proof PASS; full disposable dpkg execution requires complete renewed privileged R2 |
-| NFV2-059 | The generated rollback bridge required configured `ii  2.1.0`, but Debian 13 invokes its `preinst` only after entering the `iHR 2.1.0` transition | HIGH | Accept only the exact observed three-argument downgrade call and `iHR` state; bind bridge version, architecture, package/binary hashes, protected metadata, optional exact schema history, and manifest transition identity; reject configured and every neighboring state | CLOSED at source boundary; direct generated-script acceptance/refusal and protected bundle regression PASS; complete renewed E–N R2 NOT EXECUTED |
-| NFV2-060 | The rollback parent held the canonical mutation lock across dpkg while exact 2.0.3's historical pre-install backup tried to acquire the same pathname, causing a self-deadlock | HIGH | Keep the parent-held canonical lock and run only the exact-package dpkg descendant tree in a private mount namespace whose lock pathname is bound to a fresh protected non-alias inode; fail closed on namespace, binding, metadata, alias, or cleanup failure | CLOSED at source boundary; source contracts plus disposable canonical-lock contention, cleanup, complete/resume/idempotent transaction, and restoration proof PASS; complete renewed E–N R2 NOT EXECUTED |
+| NFV2-057 | The initramfs design allows guest-originated IPv6 MLD and DAD frames before readiness when the NIC is built in or probed before init-top | HIGH | For managed disabled mode, accept only one exact local Debian GRUB family, own one fixed root-only `ipv6.disable=1` fragment, verify all generated Linux entries, stop before ordinary setup mutation, and resume only after an explicit reboot proves the prepared and running identities. Retain the native nft guard as defense in depth and restore exact boot ownership on every rollback/package path | CLOSED at source boundary; direct parser/identity/transaction/rollback tests, two consecutive zero-pre-readiness managed boot captures, post-readiness traffic, contradictory-identity zero-guest capture, and complete source gates PASS; complete renewed E-R2 repeat NOT EXECUTED |
+| NFV2-058 | Exact 2.0.3 package rollback was refused by its historical downgrade guard after dpkg recorded 2.1.0 | HIGH | Prepare and verify a protected bundle before upgrade; use a lower-version fail-closed Debian bridge with exact-2.0.3 data payload, then install the unmodified exact 2.0.3 package; validate package state, schema, hashes, payload, resumable states, and initramfs cleanup without editing dpkg status | CLOSED at source boundary; bundle/tamper/path/payload proof plus full disposable exact-package transaction PASS; complete renewed E-R2 repeat NOT EXECUTED |
+| NFV2-059 | The generated rollback bridge required configured `ii  2.1.0`, but Debian 13 invokes its `preinst` only after entering the `iHR 2.1.0` transition | HIGH | Accept only the exact observed three-argument downgrade call and `iHR` state; bind bridge version, architecture, package/binary hashes, protected metadata, optional exact schema history, and manifest transition identity; reject configured and every neighboring state | CLOSED at source boundary; direct generated-script acceptance/refusal and full disposable transaction PASS; complete renewed E-R2 repeat NOT EXECUTED |
+| NFV2-060 | The rollback parent held the canonical mutation lock across dpkg while exact 2.0.3's historical pre-install backup tried to acquire the same pathname, causing a self-deadlock | HIGH | Keep the parent-held canonical lock and run only the exact-package dpkg descendant tree in a private mount namespace whose lock pathname is bound to a fresh protected non-alias inode; fail closed on namespace, binding, metadata, alias, or cleanup failure | CLOSED at source boundary; canonical-lock contention, cleanup, complete/resume/idempotent transaction, and restoration proof PASS; complete renewed E-R2 repeat NOT EXECUTED |
+| NFV2-061 | Exact first-setup rollback retained the generation database, immutable snapshots, endpoint cache, provenance ledger, backup, and terminal journal as required, but clean-host discovery then permanently refused a retry | HIGH | Add one strict read-only terminal retry classifier; verify exact restored files/runtime state and every retained artifact; require only rolled-back first-setup generations and stable provenance; checksum-bind and durably archive the prior terminal journal before a new mutation; keep every ambiguity on the adoption refusal path | CLOSED at source boundary; terminal predicate, backup, endpoint, provenance, monotonic generation, repeated-failure, journal-lineage, coherent Docker rollback, and protected disposable generation-1/2 rollback plus generation-3 success proof PASS; complete renewed E–W R2 NOT EXECUTED |
+| NFV2-062 | Exact downgrade could restore boot ownership before discovering that exact 2.0.3 rejects a v2.1-only configuration | HIGH | Extract and authenticate the bundle-bound exact old binary; run its parser with output suppressed before boot handoff and again immediately before dpkg; keep incompatible configuration on a fixed redacted refusal path | CLOSED at source boundary; ordering contracts, private-value non-disclosure, unchanged-package refusal, and compatible full disposable rollback PASS; complete renewed E-R2 repeat NOT EXECUTED |
+| NFV2-063 | The generated bridge accepted only the v2.1 systemd `root:nftfw-web` database group, refusing a genuine legacy root-CLI `root:root` schema-6 database | MEDIUM | Accept only the two real ownership histories while retaining UID 0, mode 0600, one link, protected parents, exact runtime GID, and exact schema history; reject every other group | CLOSED at source boundary; both positive histories and malformed/root-runtime/unrecognized-group/symlink/hard-link/mode/owner refusals PASS; genuine legacy-to-new-to-exact-old guest rollback PASS |
 
 ## Adversarial review areas
 
@@ -123,7 +139,7 @@ and post-tag gates.
 | Rollback | Persistent deadline, exact guard validation, checksummed artifacts, independent timer, crash/ambiguity/timeout regressions, and live execution passed |
 | Web XSS/CSRF/file access | No mutable endpoint, no templated user HTML, DOM uses `textContent`, fixed routes/assets, strict CSP/headers |
 | HTTP resource limits | Loopback default, read/header/write/idle timeouts, 16 KiB headers, status-only upstream response limit |
-| Secret logging | Status omits keys/peer IDs; controller observation is aggregate; test config excluded; current-tree scan passes while exact frozen history and extracted archives remain post-freeze gates |
+| Secret logging | Status omits keys/peer IDs; controller observation is aggregate; test config excluded; secret-rule and redaction contracts pass while exact frozen-history and extracted-archive scans remain post-freeze gates |
 | Capabilities/systemd | Static units bind the root daemon to `CAP_NET_ADMIN`; web has no capabilities; staged, package, runtime, and reboot verification passed |
 | Managed routing | Numeric all-table JSON makes an absent reserved table clean without accepting command failure, malformed identity, or populated ownership |
 | Managed Docker | Clean-host setup refuses running or retained workloads; Docker keeps all five packet-mutation settings false; NFTFW alone owns IPv4 forwarding, container policy/NAT, dynamic bridge binding, and the narrow local socket handoff |
@@ -131,8 +147,8 @@ and post-tag gates.
 | Adoption planner | Dry-run-only component has no writer/mutation backend; double observation, exact state/provenance verification, bounded fixed output, and untrusted-error redaction are source-tested |
 | Managed setup boundary | Profile/discovery/plan complete before journal creation; initial journal contains the prepared summary; pre-backup interruption changes no protected state; guard-or-later recovery requires a valid prepared summary, durable backup, and exact phase record before touching services |
 | Temporary setup guard | Every prefix-bearing generated set uses nftables interval semantics; bootstrap endpoints remain canonical IPv4 `/32`; the guard is checked before apply and owns/deletes only `inet nftfw_setup_guard` |
-| Initramfs boundary | The protected marker activates a checksum-bound pre-udev loader and exact temporary table; non-loopback IPv6 defaults are reversible, loopback remains available, unreadable archives fail verification, and only the strict table shape can be removed after committed enforcement verification |
-| Exact package rollback | Both release packages, helper, bridge, architecture, schema, canonical payload digest, protected metadata, exact `iHR` transition, and resumable outer-controller states are bound in a protected manifest; the parent retains the canonical lock while only dpkg receives a protected private lock view; neighboring states, unsafe paths, tampering, unlocked handoff, direct dpkg-status edits, and manual payload replacement are refused |
+| Managed disabled boot boundary | A strict Debian GRUB transaction adds exactly one kernel-wide disable token, records `reboot_required`, and resumes only after changed-boot and running-kernel proof. The native loader verifies that contract and never re-enables loopback. A pre-network transaction atomically replaces its deny table with one checksum-bound DHCP/LAN/cached-endpoint guard, holds Docker service/socket activation until ownership and forwarding are durable, and makes exact rollback release Docker only after restoring its prior files; exact rollback records when another reboot is required |
+| Exact package rollback | Both release packages, helper, bridge, architecture, schema, canonical payload digest, protected metadata, exact `iHR` transition, and resumable outer-controller states are bound in a protected manifest; the exact old parser preflights configuration before mutation; the database permits only its two strict ownership histories; the parent retains the canonical lock while only dpkg receives a protected private lock view; neighboring states, unsafe paths, tampering, unlocked handoff, direct dpkg-status edits, and manual payload replacement are refused |
 
 ## Accepted residual risks
 
@@ -147,9 +163,10 @@ and post-tag gates.
    repeatedly fight reconciliation. V2 detects/repairs its own objects only.
 5. The local dashboard has no application authentication. Its loopback bind,
    service sandbox, and status-only socket are required controls.
-6. The accepted 2.0.3 reference-host evidence does not validate 2.1.0 managed
-   setup. Different kernels, interfaces, firewall managers, VPN providers,
-   Docker networks, and management paths remain host-specific until R2.
+6. The source-stage Debian guest evidence does not validate an arbitrary 2.1.0
+   deployment host. Different kernels, interfaces, firewall managers, VPN
+   providers, Docker networks, and management paths remain host-specific until
+   the complete R2 and per-host deployment preflight.
 7. Release checksums and provenance are not cryptographically signed. A
    release operator must add a signature using an independently controlled
    identity; the build does not fabricate one.
@@ -160,11 +177,14 @@ unresolved high/critical implementation findings.
 ## Final scan evidence
 
 The amended 2.1.0 source passed Go 1.27.0 unit/race/vet/module/fmt, staticcheck
-v0.8.1, govulncheck v1.7.0, gosec v2.29.0, twelve bounded fuzz targets,
+v0.8.1, govulncheck v1.7.0, gosec v2.29.0, thirteen bounded fuzz targets,
 complete shell analysis, Stage R source/guard/comparator contracts, staged
-systemd/package verification, the full suite under `umask 0077`, both
-Amendment M disposable root source regressions, and the coverage/benchmark
-gates. Candidate
+systemd/package verification, the full suite under `umask 0077`, the retained
+Amendment M disposable root source regressions, the protected Amendment W
+two-failure/eventual-success transaction, Amendment X zero-pre-readiness boot,
+contradictory-boot, boot-handoff, and exact-package rollback preflights, and
+the coverage/benchmark gates.
+Candidate
 source/history/extracted-tree scans and two-parent comparison are generated
 only after the clean source freeze. Privileged R2, tagged package/archive
 inspection, post-tag validation, publication, and deployment are not current

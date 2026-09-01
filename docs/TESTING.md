@@ -1,10 +1,12 @@
 # Testing
 
-Current disposition: **2.1.0 STAGE E-R SOURCE VALIDATED**. Source-only results
-are consolidated in `TEST_RESULTS.md`. Except for the narrowly scoped
-setup-guard parser regression described below, the privileged commands below
-have not been executed for this corrected source and require a separately
-approved disposable lab with independent recovery.
+Current disposition: **2.1.0 AMENDMENT X STAGE E-R SOURCE GATES PASS**.
+Source-only results are consolidated in `TEST_RESULTS.md`. The narrowly
+approved source-stage disposable GRUB/boot, native-initramfs, setup-guard, and
+exact-package rollback preflights have run. The complete namespace, Docker,
+provider, and E-R2 matrix below has not run for this frozen-candidate cycle and
+still requires the separately approved disposable lab with independent
+recovery.
 
 Test outcomes use only `PASS`, `FAIL`, `BLOCKED`, `NOT APPLICABLE`, or
 `NOT EXECUTED`. A namespace simulation and an external provider tunnel are
@@ -36,15 +38,24 @@ sudo ./tests/initramfs-guard-namespace.sh
 sudo ./tests/package-rollback-bundle.sh
 ```
 
-The first creates private mount/network namespaces, applies the exact
-initramfs guard, and proves a later-created interface inherits IPv6 disabled
-while loopback remains enabled. The second builds disposable minimal Debian
+The first creates private mount/network namespaces, supplies a synthetic exact
+kernel-disable proof, applies the exact initramfs guard, and proves the loader
+does not try to rewrite loopback or per-interface IPv6 sysctls while the
+kernel-wide contract is active. The second builds disposable minimal Debian
 packages, proves the rollback bridge payload is identical to exact 2.0.3,
 executes the generated `preinst` inside a minimal chroot, and accepts only the
 real three-argument Debian 13 call with `iHR 2.1.0`. It rejects configured and
 neighboring package states, malformed arguments, identity/schema/architecture
 drift, unsafe metadata, symlinks, hard links, and manifest/package tampering
 without invoking dpkg installation on the host.
+
+The native source-order and boot-hold generator fixtures are also direct,
+temporary-tree tests:
+
+```bash
+sudo ./tests/packaging/initramfs_native_sources.sh
+./tests/packaging/setup_boot_hold_generator.sh
+```
 
 The full package-manager regression is deliberately unusable on an operator
 host. In a disposable Debian 13 guest already carrying the exact 2.0.3
@@ -74,6 +85,12 @@ claims, provenance, and committed policy remain byte/logically covered. The root
 mode-`0600` marker and disposable guest are mandatory; this script must never
 run on an operator host.
 
+Before the complete transaction, the fixture injects a private v2.1-only
+configuration value and requires a content-free refusal while 2.1.0 remains
+configured. It then restores the compatible file and proves both real
+mode-0600 database ownership histories (`root:root` and
+`root:nftfw-web`) without accepting any other group.
+
 The systemd preflight uses temporary unit copies and staged executables, so it
 can validate a fresh-host source installation before final paths exist and
 without installing or starting anything.
@@ -94,6 +111,33 @@ pre-mutation journal is terminalized without invoking system rollback, while
 backup-complete guard through commit failures retain exact rollback and
 post-commit failures retain forward recovery. The disposable R2 matrix repeats
 the real process-death, timeout, idempotent-rerun, Docker, and reboot cases.
+
+Amendment W adds the terminal retry matrix. Unit and protected disposable
+tests require exact restored backup verification, strict current/history
+journal parsing, atomic checksum-bound archive publication, fail-closed
+collision/symlink/mode/change handling, retained endpoint and provenance
+validation, stable provenance reuse, monotonic generation allocation, two
+consecutive failed retries, and eventual success. The Docker process-death
+fixture starts from coherent live/on-disk firewall ownership values and uses
+only a prior `userland-proxy=true` value to require the setup restart. Exact
+operator/runtime restoration and monotonic retained-state advancement are
+asserted separately. The protected W6 source-stage run passed both failed
+generations, eventual generation-3 success, host/container VPN egress,
+idempotence, tunnel-loss/Docker-restart zero-leak recovery, and two managed
+boots, then returned both overlays clean with zero QEMU process or listener.
+W7 passed the real native initramfs lifecycle. W11 then hard-stopped because
+the first normal capture contained two IPv6 MLD/DAD frames before readiness;
+Amendment X replaces that boundary with a strict Debian GRUB transaction.
+Direct tests cover BIOS/EFI identity, competing managers, mount/mode/link/race
+refusals, generated-entry parsing, duplicate/quoted/conflicting arguments,
+bounded update failure, exact pre-reboot rollback, same-boot reentry, explicit
+reboot/resume, post-reboot rollback disposition, package handoff, and output
+redaction. The disposable X matrix now passes failed update, both
+process-death sides, rollback finalization, package removal, two consecutive
+managed boots with zero packets before readiness, expected traffic after
+readiness, and a contradictory boot identity with zero guest packets. The
+complete source gate rerun also passes; candidate construction follows only
+from the new clean frozen commit.
 
 The setup-guard unit regression covers one and multiple endpoint `/32`
 elements, exact interval flags, deterministic order, malformed/broader-prefix
@@ -133,10 +177,10 @@ may rebind with exact `docker:<network>` provenance; mixed configurations keep
 both identity models isolated; and every tuple/observation mismatch is
 non-mutating.
 
-Twelve fuzz targets cover config decoding, API decoding, policy explanation, runtime
+Thirteen fuzz targets cover config decoding, API decoding, policy explanation, runtime
 prefix compilation, nft transaction validation/fingerprinting, claim
 validation, strict Docker daemon JSON, managed route-table JSON, adoption error
-redaction, and feed parsing. The adoption target proves untrusted provider/path/error strings
+redaction, managed GRUB token parsing, and feed parsing. The adoption target proves untrusted provider/path/error strings
 reduce to one bounded operator code without echoing input. Example bounded run:
 
 ```bash
@@ -232,13 +276,26 @@ flow, captures physical IPv4/IPv6 egress, commits/rolls back, kills the test
 daemon, and waits for independent timeout rollback. Cleanup is scoped to
 owned test objects and verifies the unrelated proof table survives.
 
-Renewed E-R2 additionally boots two fresh QEMU guests with capture active
-before execution. It requires zero guest-originated IPv4 and IPv6 frames when
-the initramfs readiness marker is first observed, classifies any frame rather
-than moving the marker, completes two consecutive boots, and proves final
-`::1`. The upgrade guest prepares the release rollback bundle before 2.1.0,
-then exercises both interruption-resume states and ends with the unmodified
-exact 2.0.3 package configured and all state/unit/network snapshots preserved.
+Renewed E-R2 must repeat the source-stage boot preflight in fresh Debian 13
+QEMU guests with capture active before execution. It covers failed
+`update-grub`, pre-reboot process
+death, explicit reboot/resume, post-reboot process death,
+`rollback_reboot_required`, uninstall/downgrade handoff, and two consecutive
+managed boots. Every failure or contradictory boot identity must remain at
+zero physical packets. Normal boot must remain at zero before readiness and
+emit expected traffic only afterward; kernel-wide disabled mode has no IPv6
+loopback address. The upgrade guest prepares the release rollback bundle
+before 2.1.0, then exercises both interruption-resume states and ends with the
+unmodified exact 2.0.3 package configured and all approved state/unit/network
+snapshots preserved.
+
+The resumed-boot matrix also proves the atomic initramfs-to-resume guard swap,
+process death immediately after that swap, strict one-table identity, private
+endpoint-cache reuse with DNS unavailable, LAN-only management recovery, and
+Docker service/socket inactivity. It confirms that Docker restart consent
+precedes hold release, rollback restores the exact daemon/drop-in before
+release, runtime markers are cleaned, and a second boot contains no generator
+hold after setup completion.
 
 ## Endpoint and DNS failure coverage
 

@@ -66,15 +66,8 @@ func Handoff(ctx context.Context, runner Runner) (bool, error) {
 	if runner == nil {
 		return false, errors.New("initramfs guard runner is missing")
 	}
-	present, err := tablePresent(ctx, runner)
+	present, err := Verify(ctx, runner)
 	if err != nil || !present {
-		return false, err
-	}
-	out, _, err := runner.Run(ctx, "--json", "list", "table", TableFamily, TableName)
-	if err != nil {
-		return false, fmt.Errorf("inspect initramfs guard: %w", err)
-	}
-	if err := validateExact([]byte(out)); err != nil {
 		return false, err
 	}
 	_, _, deleteErr := runner.Run(ctx, "delete", "table", TableFamily, TableName)
@@ -87,6 +80,26 @@ func Handoff(ctx context.Context, runner Runner) (bool, error) {
 			deleteErr = errors.New("guard remains present")
 		}
 		return false, fmt.Errorf("remove initramfs guard: %w", deleteErr)
+	}
+	return true, nil
+}
+
+// Verify proves that the initramfs deny guard is either absent or exactly the
+// checksum-bound table shape. It never mutates nftables state.
+func Verify(ctx context.Context, runner Runner) (bool, error) {
+	if runner == nil {
+		return false, errors.New("initramfs guard runner is missing")
+	}
+	present, err := tablePresent(ctx, runner)
+	if err != nil || !present {
+		return present, err
+	}
+	out, _, err := runner.Run(ctx, "--json", "list", "table", TableFamily, TableName)
+	if err != nil {
+		return false, fmt.Errorf("inspect initramfs guard: %w", err)
+	}
+	if err := validateExact([]byte(out)); err != nil {
+		return false, err
 	}
 	return true, nil
 }

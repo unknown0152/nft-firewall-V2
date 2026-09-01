@@ -92,6 +92,18 @@ func (i Inspector) Discover(ctx context.Context) (Snapshot, error) {
 // adoption planning needs to inspect owned NFTFW state, then validate that
 // state through its dedicated read-only contract.
 func (i Inspector) Inspect(ctx context.Context) (Snapshot, error) {
+	return i.inspect(ctx, nil)
+}
+
+// InspectWithDockerState performs the ordinary read-only host inspection but
+// uses a previously checksum-bound Docker authorization snapshot. Managed
+// reboot resumption needs this path because docker.service is intentionally
+// held before its daemon/socket ownership transaction has committed.
+func (i Inspector) InspectWithDockerState(ctx context.Context, docker DockerState) (Snapshot, error) {
+	return i.inspect(ctx, &docker)
+}
+
+func (i Inspector) inspect(ctx context.Context, retainedDocker *DockerState) (Snapshot, error) {
 	if i.Runner == nil {
 		i.Runner = ExecRunner{}
 	}
@@ -135,9 +147,23 @@ func (i Inspector) Inspect(ctx context.Context) (Snapshot, error) {
 	if err != nil {
 		return Snapshot{}, err
 	}
-	dockerPresent, dockerClean, dockerNetworks, dockerErr := i.dockerState(ctx)
-	if dockerErr != nil {
-		return Snapshot{}, dockerErr
+	var dockerPresent, dockerClean bool
+	var dockerNetworks []config.DockerNetwork
+	if retainedDocker == nil {
+		var dockerErr error
+		dockerPresent, dockerClean, dockerNetworks, dockerErr = i.dockerState(ctx)
+		if dockerErr != nil {
+			return Snapshot{}, dockerErr
+		}
+	} else {
+		dockerPresent, dockerClean = retainedDocker.Present, retainedDocker.Clean
+		dockerNetworks = cloneDockerNetworks(retainedDocker.Networks)
+		for _, network := range dockerNetworks {
+			if !containsString(interfaces, network.BridgeInterface) {
+				interfaces = append(interfaces, network.BridgeInterface)
+			}
+		}
+		sort.Strings(interfaces)
 	}
 	existingState := i.existingNFTFWState()
 	snapshot := Snapshot{
@@ -151,6 +177,25 @@ func (i Inspector) Inspect(ctx context.Context) (Snapshot, error) {
 		DockerNetworks: dockerNetworks,
 	}
 	return snapshot, nil
+}
+
+func cloneDockerNetworks(networks []config.DockerNetwork) []config.DockerNetwork {
+	result := make([]config.DockerNetwork, len(networks))
+	for index, network := range networks {
+		result[index] = network
+		result[index].Subnets = append([]string(nil), network.Subnets...)
+		result[index].Gateways = append([]string(nil), network.Gateways...)
+	}
+	return result
+}
+
+func containsString(values []string, wanted string) bool {
+	for _, value := range values {
+		if value == wanted {
+			return true
+		}
+	}
+	return false
 }
 
 func (s Snapshot) ValidateCleanHost() error {

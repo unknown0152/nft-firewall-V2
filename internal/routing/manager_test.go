@@ -524,6 +524,13 @@ func TestExecRunnerSuccessInputAndFailure(t *testing.T) {
 	if _, err := (ExecRunner{}).Run(context.Background(), nil, "sh", "-c", "exit 1"); err == nil {
 		t.Fatal("exec runner command failure was ignored")
 	}
+	if _, err := (ExecRunner{}).RunWithTimeout(context.Background(), nil, 0, "true"); err == nil {
+		t.Fatal("invalid explicit command timeout was accepted")
+	}
+	if _, err := (ExecRunner{}).RunWithTimeout(context.Background(), nil, time.Millisecond,
+		"sh", "-c", "while :; do :; done"); err == nil {
+		t.Fatal("explicit command timeout was not enforced")
+	}
 }
 
 func TestPreflightCleanFailureBoundaries(t *testing.T) {

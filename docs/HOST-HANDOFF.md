@@ -112,6 +112,15 @@ also a separate explicit opt-in described in `CONFIGURATION.md`.
 The mode in NFTFW policy and the host's addressing/routing configuration must
 agree. Test both fresh and already-established IPv6 flows during tunnel loss.
 
+The 2.1.0 one-file setup has a narrower first-install contract for
+`ipv6_mode = "disabled"`. On a supported clean Debian GRUB host it owns one
+fixed GRUB fragment, prepares `ipv6.disable=1`, and exits with
+`reboot_required` before changing runtime routing, forwarding, Docker, VPN, or
+firewall state. The operator performs the reboot; rerunning the identical
+setup resumes only after the new boot proves the prepared kernel argument,
+kernel disable state, empty IPv6 address state, and changed boot identity. Do
+not substitute a runtime-only IPv6 sysctl for that required transaction.
+
 ## 7. Install without activation
 
 Install a verified release package. A fresh install and supported upgrade do
@@ -201,6 +210,11 @@ sudo nftfw health
 Do not reboot until the committed snapshot, enforcement pointer, early restore,
 readiness verifier, rollback timer, VPN recovery, and rollback bundle have
 been checked.
+
+This instruction applies to the later advanced-mode activation reboot. It is
+separate from the one-file setup's mandatory pre-policy `reboot_required`
+boundary described above, which deliberately occurs before a generation can
+be committed.
 
 After the controlled reboot:
 

@@ -57,11 +57,25 @@
 - Defer final early-service `Requisite=` drop-ins until runtime policy is
   committed and early enforcement is independently ready; add a distinct,
   recover-forward setup handoff phase.
-- Add a managed-only checksum-verified initramfs deny guard. Its explicit
-  pre-udev prerequisite disables IPv6 defaults before interface creation,
-  blocks all early packets until committed enforcement is verified, preserves
-  final loopback IPv6 after handoff, and fails closed on regeneration or
-  archive verification errors.
+- Add a managed-only, two-pass Debian GRUB ownership transaction for disabled
+  IPv6. It publishes one root-only `ipv6.disable=1` fragment, verifies every
+  generated Linux entry, stops at `reboot_required`, and resumes only after an
+  explicit reboot proves the changed boot ID, exact kernel argument, disabled
+  kernel parameter, empty IPv6 address state, and unchanged prepared identity.
+  The native checksum-bound initramfs nft guard remains defense in depth and
+  never tries to re-enable loopback under kernel-wide disablement.
+- Restore the captured GRUB, generated boot configuration, and native guard
+  state exactly on pre/post-reboot rollback, package removal, source uninstall,
+  and exact-2.0.3 downgrade. Report `rollback_reboot_required` whenever the
+  running kernel still reflects the removed next-boot policy; never reboot
+  automatically.
+- On the resumed boot, atomically replace the initramfs deny table with a
+  checksum-bound DHCP/LAN/cached-endpoint guard before releasing
+  `network-pre.target`. Reuse the protected endpoint set without DNS and hold
+  both Docker service and socket activation until managed daemon ownership,
+  IPv4 forwarding, and restart consent are durable. Rollback restores Docker
+  before releasing that hold, and every successful/handoff path removes the
+  transient runtime state.
 - Add `nftfw-package-rollback`, which prepares a protected checksummed bundle
   and an exact-payload lower-version package-manager bridge before upgrade so
   the unmodified exact 2.0.3 package can be restored without dpkg-state edits,
@@ -73,6 +87,18 @@
 - Retain the canonical global mutation lock across exact-package rollback
   while giving only dpkg descendants a private mount-namespace lock inode for
   the historical 2.0.3 pre-install backup; reject aliasing or unsafe metadata.
+- Before boot handoff or package mutation, use the bound exact 2.0.3 binary to
+  validate the current configuration twice with redacted output. Accept the
+  schema-6 database only as a root-owned, single-link, mode-0600 file with the
+  exact legacy-root or `nftfw-web` group identity.
+- Permit a failed first setup to be retried without deleting audit evidence:
+  require exact restored operator/runtime state, only rolled-back first-setup
+  generations, a valid endpoint cache, and stable monotonic provenance before
+  admitting the narrow terminal-retry path.
+- Archive each exact terminal setup journal under checksum-bound, root-only,
+  atomically published and directory-synced lineage before the next setup can
+  mutate; refuse collisions, unsafe paths, changed evidence, and incomplete
+  archival while remaining retry-safe across publication process death.
 - Add setup, importer, routing, discovery, intent, rollback, benchmark,
   packaging, and reproducible-candidate validation.
 

@@ -9,6 +9,8 @@ import (
 	"reflect"
 	"strings"
 	"testing"
+
+	"github.com/unknown0152/nft-firewall-v2/internal/config"
 )
 
 type fakeRunner struct {
@@ -115,6 +117,30 @@ func TestInspectorDiscoverCleanHost(t *testing.T) {
 		!reflect.DeepEqual(snapshot.ManagementTCP, []int{22}) ||
 		snapshot.IPv6DefaultRoute || snapshot.DockerPresent || !snapshot.DockerClean {
 		t.Fatalf("unexpected discovery snapshot: %#v", snapshot)
+	}
+}
+
+func TestInspectorUsesRetainedDockerStateWithoutDaemonAccess(t *testing.T) {
+	runner := cleanDiscoveryRunner()
+	networks := []config.DockerNetwork{{
+		Name: "bridge", Driver: "bridge", BridgeInterface: "docker0",
+		DynamicBridge: true, Subnets: []string{"172.17.0.0/16"},
+		Gateways: []string{"172.17.0.1"},
+	}}
+	snapshot, err := (Inspector{Runner: runner, Root: discoveryRoot(t)}).InspectWithDockerState(
+		context.Background(), DockerState{Present: true, Clean: true, Networks: networks},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !snapshot.DockerPresent || !snapshot.DockerClean ||
+		!reflect.DeepEqual(snapshot.DockerNetworks, networks) ||
+		!reflect.DeepEqual(snapshot.NonLoopbackInterfaces, []string{"docker0", "enp1s0", "wlan0"}) {
+		t.Fatalf("retained Docker state was not projected exactly: %#v", snapshot)
+	}
+	snapshot.DockerNetworks[0].Subnets[0] = "192.0.2.0/24"
+	if networks[0].Subnets[0] != "172.17.0.0/16" {
+		t.Fatal("retained Docker snapshot was aliased")
 	}
 }
 

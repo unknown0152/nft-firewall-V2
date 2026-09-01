@@ -45,7 +45,8 @@ for unit in "$root_dir"/packaging/systemd/*.service "$root_dir"/packaging/system
         "$unit" > "$validation_dir/units/$name"
 done
 
-if grep -R -F '/usr/lib/nftfw/' "$validation_dir/units" >/dev/null; then
+if grep -R -E '^Exec(Start|StartPre|StartPost|Stop|StopPost|Reload)=/usr/lib/nftfw/' \
+    "$validation_dir/units" >/dev/null; then
     echo "A staged unit still references an unstaged NFT Firewall executable" >&2
     exit 1
 fi

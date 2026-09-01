@@ -161,11 +161,15 @@ phase-recorded transaction:
 ```text
 profile/discovery/plan (no journal, no mutation)
   -> durable journal containing the prepared summary
-  -> checksum backup -> temporary guard -> install/check candidate
-  -> confirmed Docker ownership restart when required
+  -> checksum backup -> native initramfs + fixed GRUB fragment
+  -> verify generated entries -> reboot_required -> explicit operator reboot
+  -> initramfs deny guard -> checksum-bound LAN/endpoint resume guard
+  -> Docker service/socket hold + same-profile identity verification
+  -> temporary guard -> install/check candidate
+  -> durable Docker/forwarding ownership -> confirmation -> release/restart
   -> daemon start without final Requisite -> safe apply -> tunnel
   -> validation -> commit -> early restore/readiness
-  -> verified initramfs guard -> publish final Requisite -> boot
+  -> verify initramfs guard -> publish final Requisite -> boot
 ```
 
 The explicit `handoff` phase is after the commit linearization point. It first
@@ -176,24 +180,56 @@ initramfs, and finally writes the daemon/rollback `Requisite=` drop-ins. A
 handoff interruption recovers forward from the committed generation; it never
 rolls committed state back to make the dependency graph easier to satisfy.
 
+The initial boot-policy preflight accepts only one locally installed Debian
+GRUB family and a protected, writable local boot filesystem. Setup backs up
+the absent fixed fragment plus generated configuration, publishes exactly one
+root-only fragment using no-replace rename and file/parent fsync, runs the
+package-owned `update-grub` under a deadline, and proves every generated Linux
+entry contains exactly one `ipv6.disable=1`. Systemd-boot, UKI, extlinux,
+alternate/multiple GRUB families, foreign fragments or arguments, unsafe
+links/modes/ownership, remote/read-only storage, and changing identities are
+refused before runtime ownership.
+
 The initramfs hook patches only the staged Debian 13 initramfs-tools udev
-prerequisite declaration. Its loader runs before udev, sets reversible
-per-netns IPv6 default/all disablement while immediately restoring loopback,
+prerequisite declaration. Its loader verifies the exact kernel command line
+and module-disable proof before udev, confirms no IPv6 address state,
 checksums and applies the all-interface deny guard, then records readiness in
-the initramfs `/run`. This prevents kernel MLD/DAD from preceding the guard.
+the initramfs `/run`. It never tries to re-enable loopback while kernel-wide
+disablement is active. The kernel argument prevents built-in or early-probed
+NIC MLD/DAD; the nft guard remains a second independent boundary.
+After root switch, the generated `network-pre.target` dependency validates the
+pending journal and boot identity, then atomically replaces that deny table
+with the protected resume guard. The guard exposes no public service and
+admits only DHCP, reviewed LAN management replies/flows, and marked UDP to the
+checksum-bound cached provider endpoint. Separate generated dependencies hold
+both `docker.service` and `docker.socket` until managed daemon ownership and
+kernel forwarding are durable. Process death on either side of the nftables
+swap is restart-safe; neither/both-table contradictions are refused.
 After root switch, `nftfw-enforcement-ready` verifies committed enforcement
 and its post-start handoff removes only the exact marker/comment/chain shape
 of `inet nftfw_initramfs_guard` under the global mutation lock. A colliding or
 extended table is left untouched and blocks readiness.
 
-Clean-host discovery deliberately treats any pre-existing setup journal as
-NFTFW state requiring recovery. The engine therefore completes preparation
-before publishing its own journal. A preparation or initial journal-write
-failure returns without rollback because no mutation-capable phase ran. An
-interrupted `inspect` or incomplete `backup` journal with no durable backup is
-terminalized without stopping services; every guard-or-later phase requires a
-valid prepared summary and recorded backup before it uses exact rollback or
-proved committed recovery.
+Clean-host discovery treats pre-existing NFTFW state as requiring recovery or
+adoption, with one narrow terminal retry exception. The engine still completes
+ordinary preparation before publishing its own journal. A preparation or
+initial journal-write failure returns without rollback because no
+mutation-capable phase ran. An interrupted `inspect` or incomplete `backup`
+journal with no durable backup is terminalized without stopping services;
+every guard-or-later phase requires a valid prepared summary and recorded
+backup before it uses exact rollback or proved committed recovery.
+
+The retry classifier opens retained state strictly read-only. It requires an
+exact canonical `rolled_back`/`failed` uncommitted journal, a verified restored
+backup for every protected transaction, no enforcement pointer or owned table,
+clean reserved route/rule/interface identities, inactive managed units, only
+rolled-back first-generation history, verified immutable scripts/snapshots,
+a valid endpoint cache, and one exact active monotonic provenance inventory.
+No artifact is deleted or renumbered. Before a retry crosses its mutation
+boundary, `Begin` checksum-verifies the current terminal journal, atomically
+archives its exact bytes under `setup/history`, fsyncs the file and directory,
+and only then publishes the new initial journal. That lineage also makes a
+second failure or process death during terminal retry unambiguous.
 
 Discovery queries only the local Docker socket and stores no generated Docker
 network ID as durable authorization. Managed intent contains the network name,
@@ -235,6 +271,14 @@ Setup backup payloads are checksummed. Rollback restores exact files, sysctls,
 unit state, Docker state, and the prior firewall generation before removing
 the guard. An unchanged compliant daemon configuration is an idempotent
 no-restart path.
+
+Exact package rollback is a separate protected transaction. Its parent keeps
+the canonical mutation lock while exact 2.0.3 maintainer scripts see a fresh
+lock inode only inside the dpkg mount namespace. Before boot handoff and again
+before dpkg, the manifest-bound exact old binary validates the current
+configuration with redacted output. The temporary bridge accepts a schema-6
+database only as a UID-0, mode-0600, single-link file owned by either the
+legacy root group or the exact v2.1 dashboard-service group.
 
 ## Existing-host adoption planner
 

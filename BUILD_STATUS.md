@@ -1,24 +1,27 @@
 # NFT Firewall V2 2.1.0 Build Status
 
-Source disposition: **STAGE E-R SOURCE VALIDATED**
+Source disposition: **AMENDMENT X SOURCE VALIDATED; CANDIDATES PENDING**
 
-Validation date: 2026-08-30
+Validation date: 2026-09-01
 
 Target version: `2.1.0`
 
 Reopened source baseline:
-`02a7ea711a72725a27b25decb9b36a277b37d7b8`
+`e59cacbf81cd1851cc52530074209c84eb1ac3d9`
 
-The frozen source commit, independent candidate parents, and comparison digest
-are created after this source report and are therefore recorded only in the
-external candidate evidence. This file must not claim evidence created after
-its own commit.
+No Amendment W source freeze, candidate parent, or comparison exists because
+the mandatory boot capture hard-stopped first. Amendment X is the approved
+source correction. Its direct, disposable, capture, exact-rollback, and
+complete source gates now pass; the new clean commit and two quarantined
+candidate parents are the remaining Stage E-R outputs.
 
 | Phase | Status | Evidence boundary |
 | --- | --- | --- |
 | Go 1.27 migration and release identity | PASS | Exact `go1.27.0` source/toolchain contract |
 | Managed one-file setup/import/routing | PASS | Unit, race, source-contract, and failure-path tests |
 | Managed setup transaction boundary | PASS | Real Engine/System proof completes read-only preparation before the initial prepared-summary journal; pre-mutation failures do not invoke rollback or system mutation; guard-or-later rollback remains backup-bound |
+| Terminal first-setup retry | PASS | One strict read-only classifier verifies exact rollback, terminal journal lineage, rolled-back generation history, endpoint cache, and monotonic provenance; ambiguous state retains the adoption refusal |
+| Durable setup-journal lineage | PASS | Exact prior terminal bytes are checksum-bound, atomically archived under a root-only history directory, file/directory synced, collision-refused, and retry-safe across both archive/publication crash windows |
 | Setup-guard nftables validity | PASS | Endpoint and LAN prefix sets use interval semantics; endpoint inputs remain exact IPv4 `/32`; deterministic unit/source contracts and a separately gated real-parser disposable regression |
 | Clean-host route-table preflight | PASS | Numeric all-table JSON accepts absent table 51820 and refuses populated, malformed, oversized, timeout, permission, or command-failed observations |
 | Managed Docker forwarding/adoption | PASS | Eligible empty local topology only; running/retained/changing workload refusal; post-plan revalidation; semantic ownership, VPN-only policy, rebind, status, handoff, and exact rollback tests |
@@ -26,20 +29,24 @@ its own commit.
 | Existing-host adoption planner | PASS | Explicit dry-run grammar, exact schema-6/provenance readers, double observation, redaction, and no-mutation fixture |
 | Exact-2.0.3 unit compatibility | PASS | One strict six-property systemd snapshot per unit; only three enumerated 2.1-only units accept the canonical exact-2.0.3 absent tuple; aliases, shadows, contradictions, malformed output, and newer-version absence refuse |
 | First-setup committed handoff | PASS | Runtime starts under the temporary guard before commit; early/readiness and verified initramfs protection precede durable final dependency publication and boot activation; every post-commit failure recovers forward |
-| Zero-packet initramfs source boundary | PASS | Inert marker-gated pre-udev loader, reversible non-loopback IPv6 defaults, retained loopback, checksum-bound exact nft guard, strict locked handoff, archive verification, transactional removal, and disposable namespace proof; boot capture remains R2 |
-| Exact 2.0.3 package rollback source | PASS | Protected bundle, strict `iHR` bridge, exact three-mode dpkg transaction, parent-held canonical lock with private dpkg lock view, external contention, no lock residue, and package/payload/schema/policy/provenance/Docker/unit/initramfs restoration pass in a disposable guest; complete renewed E–N execution remains R2 |
+| Pre-driver disabled-IPv6 boot boundary | PASS | Strict Debian GRUB ownership, explicit reboot/resume/rollback, running-kernel proof, native guard compatibility, both process-death sides, package handoff, two consecutive zero-pre-readiness managed boots, post-readiness traffic, and contradictory-identity zero-guest capture pass in disposable guests |
+| Exact 2.0.3 package rollback source | PASS | Protected bundle, exact-old configuration preflight before mutation, strict `iHR` bridge, both legitimate mode-0600 database group histories, exact three-mode dpkg transaction, parent-held canonical lock with private dpkg lock view, external contention, no residue, and package/policy/provenance/Docker/unit/initramfs restoration pass in a disposable guest; complete renewed E-R2 remains separate |
 | Privileged-umask security fixtures | PASS | Explicit unsafe modes plus isolated `umask 0077` acceptance/refusal regression and full-suite rerun |
 | Managed policy mutation/recovery | PASS | Protected reload, exact generation query, checksummed file journal, and independent watchdog tests |
 | Configuration/compiler/provenance | PASS | Unit, fuzz, vet, staticcheck, gosec, and source contracts |
-| Coverage | PASS | Overall 76.7%; setup 90.6%; bootguard 91.8%; import 90.6%; intent 92.6%; routing 90.5%; adoption 91.0% |
+| Coverage | PASS | 78.7% overall and 90.0% `internal/setup`; all other documented core-package floors remain satisfied |
 | Dependencies | PASS | `go mod verify`, tidy diff, and govulncheck with no reachable vulnerabilities |
 | Package/systemd source | PASS | Nonactivating lifecycle contracts, staged unit verification, and sandbox review |
 | Shell and secret handling | PASS | ShellCheck and deterministic source/history scan contracts |
-| Benchmarks | PASS | Fresh ten-sample run remains inside Amendment E budgets; Amendment N changes shell recovery only and exact `02a7ea7` Go sources are unchanged |
-| Quarantined candidate builds | NOT EXECUTED | Earlier Amendment N candidates were invalidated by NFV2-060; build twice from the later frozen clean commit |
+| Benchmarks | PASS | Ten-sample GRUB verifier: 2.095-2.401 microseconds/op; terminal classifier: 1.340-1.412 ms/op, 230852-231690 B/op, 1040-1041 allocs/op; Amendment E budgets remain satisfied |
+| Protected Amendment W disposable retry | PASS | W6 proves a coherent Docker baseline; two validate-phase process deaths; exact rollback; nonmutating retry; durable lineage; generations 1/2 rolled back and 3 committed; stable provenance; host/container VPN egress; idempotence; tunnel-loss/Docker-restart zero leak; recovery; two managed boots; zero residual QEMU process/listener |
+| Disposable native initramfs lifecycle | PASS | W7 proves inert package install, foreign-source refusal, enable/verify idempotence, native source order, tamper refusal, exact disable restoration, purge cleanup, and a clean overlay |
+| Amendment X disposable boot/package preflight | PASS | Failed update, pre/post-reboot death, rollback finalization, package removal plus restored next boot, exact 2.0.3 downgrade, and clean stopped overlays all pass |
+| Quarantined candidate builds | NOT EXECUTED | Prohibited until every Amendment X gate passes |
 | Candidate comparison | NOT EXECUTED | Requires both replacement protected-parent candidates |
-| Privileged R2 | FAIL, HARD STOPPED | The latest approved run passed the corrected Amendment M boundaries, then found the impossible configured-state assertion at Debian's real `iHR` rollback transition. This source corrects it; the complete E–N matrix is NOT EXECUTED and requires new identity-bound approval |
+| Privileged R2 | NOT AUTHORIZED | Amendment X authorizes source-stage disposable validation only; a new frozen commit/comparison-bound E-R2 approval is required later |
 | Release tag/publication/deployment | NOT AUTHORIZED | Explicitly outside Stage E-R |
 
-No package was installed and no live firewall, VPN, route, resolver, systemd,
-Docker, Cosmos, or host service state was changed by this source validation.
+No package was installed on the live host, and no live firewall, VPN, route,
+resolver, systemd, Docker, Cosmos, boot, or host service state was changed by
+this source validation.

@@ -18,6 +18,8 @@ type fakeExecutor struct {
 	prepareErr          error
 	generationCommitted bool
 	commitInspectErr    error
+	rollbackJournals    []Journal
+	recoveryJournals    []Journal
 }
 
 func (f *fakeExecutor) call(name string) error {
@@ -56,10 +58,15 @@ func (f *fakeExecutor) Commit(context.Context, Plan, uint64) error   { return f.
 func (f *fakeExecutor) PublishFinalDependencies(context.Context, Plan) error {
 	return f.call("handoff")
 }
-func (f *fakeExecutor) EnableBoot(context.Context, Plan) error        { return f.call("boot") }
-func (f *fakeExecutor) Finalize(context.Context, Plan) error          { return f.call("finalize") }
-func (f *fakeExecutor) Rollback(context.Context, Plan, Journal) error { return f.call("rollback") }
-func (f *fakeExecutor) RecoverCommitted(context.Context, Plan, Journal) error {
+func (f *fakeExecutor) EnableBoot(context.Context, Plan) error { return f.call("boot") }
+func (f *fakeExecutor) Finalize(context.Context, Plan) error   { return f.call("finalize") }
+
+func (f *fakeExecutor) Rollback(_ context.Context, _ Plan, journal Journal) error {
+	f.rollbackJournals = append(f.rollbackJournals, journal)
+	return f.call("rollback")
+}
+func (f *fakeExecutor) RecoverCommitted(_ context.Context, _ Plan, journal Journal) error {
+	f.recoveryJournals = append(f.recoveryJournals, journal)
 	return f.call("recover-committed")
 }
 func (f *fakeExecutor) GenerationCommitted(context.Context, uint64) (bool, error) {
@@ -76,6 +83,14 @@ type recordingJournal struct {
 }
 
 func (r *recordingJournal) Write(journal Journal) error {
+	return r.recordWrite(journal, func() error { return r.store.Write(journal) })
+}
+
+func (r *recordingJournal) Begin(journal Journal, prior string) error {
+	return r.recordWrite(journal, func() error { return r.store.Begin(journal, prior) })
+}
+
+func (r *recordingJournal) recordWrite(journal Journal, write func() error) error {
 	r.writes++
 	r.last = journal
 	if r.events != nil {
@@ -84,7 +99,7 @@ func (r *recordingJournal) Write(journal Journal) error {
 	if r.failWrites == r.writes {
 		return errors.New("injected journal failure")
 	}
-	return r.store.Write(journal)
+	return write()
 }
 
 func (r *recordingJournal) Read() (Journal, error) {
@@ -95,7 +110,7 @@ func TestRunCompletesInExactOrder(t *testing.T) {
 	events := []string{}
 	executor := &fakeExecutor{events: &events}
 	journal := &recordingJournal{
-		store:  FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")},
+		store:  testFileJournal(t),
 		events: &events,
 	}
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
@@ -187,7 +202,7 @@ func TestInitialJournalFailureDoesNotMutateOrRollback(t *testing.T) {
 	events := []string{}
 	executor := &fakeExecutor{events: &events}
 	journal := &recordingJournal{
-		store:      FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")},
+		store:      testFileJournal(t),
 		events:     &events,
 		failWrites: 1,
 	}
@@ -209,7 +224,7 @@ func TestInitialJournalFailureDoesNotMutateOrRollback(t *testing.T) {
 
 func TestFailureAlwaysRollsBack(t *testing.T) {
 	executor := &fakeExecutor{failAt: "tunnel"}
-	journal := FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")}
+	journal := testFileJournal(t)
 	engine := Engine{
 		Executor: executor, Journal: journal,
 		NewID: func() string { return "transaction-2" },
@@ -233,7 +248,7 @@ func TestFailureAlwaysRollsBack(t *testing.T) {
 
 func TestBackupFailureStopsBeforeProtectedMutationWithoutRollback(t *testing.T) {
 	executor := &fakeExecutor{failAt: "backup"}
-	journal := FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")}
+	journal := testFileJournal(t)
 	_, err := (Engine{
 		Executor: executor, Journal: journal,
 		NewID: func() string { return "backup-failure" },
@@ -253,8 +268,7 @@ func TestBackupFailureStopsBeforeProtectedMutationWithoutRollback(t *testing.T) 
 
 func TestExpiredJournalTriggersIndependentRollback(t *testing.T) {
 	executor := &fakeExecutor{}
-	path := filepath.Join(t.TempDir(), "journal.json")
-	store := FileJournal{Path: path}
+	store := testFileJournal(t)
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	if err := store.Write(Journal{
 		Schema: "nftfw.setup-journal.v1", Transaction: "transaction-3",
@@ -275,8 +289,7 @@ func TestExpiredJournalTriggersIndependentRollback(t *testing.T) {
 
 func TestExpiredPreMutationJournalDoesNotInvokeRollback(t *testing.T) {
 	executor := &fakeExecutor{}
-	path := filepath.Join(t.TempDir(), "journal.json")
-	store := FileJournal{Path: path}
+	store := testFileJournal(t)
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	if err := store.Write(Journal{
 		Schema: "nftfw.setup-journal.v1", Transaction: "pre-mutation",
@@ -302,7 +315,7 @@ func TestExpiredPreMutationJournalDoesNotInvokeRollback(t *testing.T) {
 
 func TestPostCommitFailureRecoversForward(t *testing.T) {
 	executor := &fakeExecutor{failAt: "boot"}
-	journal := FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")}
+	journal := testFileJournal(t)
 	engine := Engine{
 		Executor: executor, Journal: journal,
 		NewID: func() string { return "transaction-4" },
@@ -326,7 +339,7 @@ func TestPostCommitFailureRecoversForward(t *testing.T) {
 
 func TestFinalDependencyPublicationFailureRecoversForward(t *testing.T) {
 	executor := &fakeExecutor{failAt: "handoff"}
-	journal := FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")}
+	journal := testFileJournal(t)
 	_, err := (Engine{
 		Executor: executor, Journal: journal,
 		NewID: func() string { return "handoff-recovery" },
@@ -346,8 +359,7 @@ func TestFinalDependencyPublicationFailureRecoversForward(t *testing.T) {
 
 func TestExpiredJournalRecoversForwardAcrossCommitJournalGap(t *testing.T) {
 	executor := &fakeExecutor{generationCommitted: true}
-	path := filepath.Join(t.TempDir(), "journal.json")
-	store := FileJournal{Path: path}
+	store := testFileJournal(t)
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	if err := store.Write(Journal{
 		Schema: "nftfw.setup-journal.v1", Transaction: "transaction-5",
@@ -376,8 +388,7 @@ func TestExpiredJournalRecoversForwardAcrossCommitJournalGap(t *testing.T) {
 
 func TestUnknownCommitStateFailsWithoutDestructiveRollback(t *testing.T) {
 	executor := &fakeExecutor{commitInspectErr: errors.New("unavailable")}
-	path := filepath.Join(t.TempDir(), "journal.json")
-	store := FileJournal{Path: path}
+	store := testFileJournal(t)
 	now := time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 	if err := store.Write(Journal{
 		Schema: "nftfw.setup-journal.v1", Transaction: "transaction-6",
@@ -412,25 +423,157 @@ func TestDryRunAndEngineInputValidation(t *testing.T) {
 	if _, err := (Engine{Executor: executor}).Run(context.Background(), "/vpn.conf"); err == nil {
 		t.Fatal("run without journal accepted")
 	}
-	if _, err := (Engine{Journal: FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")}}).
+	if _, err := (Engine{Journal: testFileJournal(t)}).
 		Run(context.Background(), "/vpn.conf"); err == nil {
 		t.Fatal("run without executor accepted")
 	}
 }
 
 func TestEveryMutationPhaseFailureRollsBack(t *testing.T) {
-	for _, phase := range []string{
-		"guard", "install", "docker", "runtime", "apply", "tunnel", "validate", "commit",
+	for _, test := range []struct {
+		name  string
+		phase Phase
+	}{
+		{name: "guard", phase: PhaseGuard},
+		{name: "install", phase: PhaseInstall},
+		{name: "docker", phase: PhaseDocker},
+		{name: "runtime", phase: PhaseRuntime},
+		{name: "apply", phase: PhaseApply},
+		{name: "tunnel", phase: PhaseTunnel},
+		{name: "validate", phase: PhaseValidate},
+		{name: "commit", phase: PhaseCommit},
 	} {
-		t.Run(phase, func(t *testing.T) {
-			executor := &fakeExecutor{failAt: phase}
-			store := FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")}
-			engine := Engine{Executor: executor, Journal: store, NewID: func() string { return phase }}
+		t.Run(test.name, func(t *testing.T) {
+			executor := &fakeExecutor{failAt: test.name}
+			store := testFileJournal(t)
+			engine := Engine{Executor: executor, Journal: store, NewID: func() string { return test.name }}
 			if _, err := engine.Run(context.Background(), "/vpn.conf"); err == nil {
 				t.Fatal("injected phase failure was ignored")
 			}
 			if executor.calls[len(executor.calls)-1] != "rollback" {
-				t.Fatalf("phase %s did not roll back: %v", phase, executor.calls)
+				t.Fatalf("phase %s did not roll back: %v", test.name, executor.calls)
+			}
+			if len(executor.rollbackJournals) != 1 || executor.rollbackJournals[0].Phase != test.phase ||
+				executor.rollbackJournals[0].Status != "rolling_back" {
+				t.Fatalf("phase %s origin was not preserved: %#v", test.name, executor.rollbackJournals)
+			}
+		})
+	}
+}
+
+func TestRecoveryTransitionWriteFailurePrecedesMutation(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		committed  bool
+		generation uint64
+	}{
+		{name: "rollback", generation: 7},
+		{name: "committed", committed: true, generation: 7},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			base := testFileJournal(t)
+			journal := Journal{
+				Schema: "nftfw.setup-journal.v1", Transaction: test.name,
+				Phase: PhaseValidate, Status: "running", StartedAt: testTime(),
+				UpdatedAt: testTime(), Deadline: testTime().Add(time.Minute),
+				BackupDir: "/backup", Generation: test.generation,
+				Committed: test.committed, Summary: Summary{Schema: "nftfw.setup-plan.v1"},
+			}
+			if err := base.Write(journal); err != nil {
+				t.Fatal(err)
+			}
+			store := &recordingJournal{store: base, failWrites: 1}
+			executor := &fakeExecutor{}
+			if err := (Engine{Executor: executor, Journal: store}).fail(
+				context.Background(), Plan{}, journal, errors.New("SETUP_INJECTED_FAILURE"),
+			); err == nil || err.Error() != "SETUP_RECOVERY_TRANSITION_WRITE_FAILED" {
+				t.Fatalf("transition write failure=%v", err)
+			}
+			calls := strings.Join(executor.calls, ",")
+			if strings.Contains(calls, "rollback") || strings.Contains(calls, "recover-committed") {
+				t.Fatalf("recovery mutated before its transition was durable: %v", executor.calls)
+			}
+		})
+	}
+}
+
+func TestRecoveryResultWriteFailureRemainsSafelyRetryable(t *testing.T) {
+	base := testFileJournal(t)
+	journal := Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "result-write",
+		Phase: PhaseValidate, Status: "rolling_back", StartedAt: testTime(),
+		UpdatedAt: testTime(), Deadline: testTime().Add(time.Minute),
+		BackupDir: "/backup", Generation: 7, Summary: Summary{Schema: "nftfw.setup-plan.v1"},
+	}
+	if err := base.Write(journal); err != nil {
+		t.Fatal(err)
+	}
+	store := &recordingJournal{store: base, failWrites: 2}
+	executor := &fakeExecutor{commitInspectErr: errors.New("must not inspect known uncommitted state")}
+	err := (Engine{Executor: executor, Journal: store}).fail(
+		context.Background(), Plan{}, journal, errors.New("SETUP_INJECTED_FAILURE"),
+	)
+	if err == nil || err.Error() != "SETUP_RECOVERY_RESULT_WRITE_FAILED" {
+		t.Fatalf("result write failure=%v", err)
+	}
+	if strings.Join(executor.calls, ",") != "rollback" {
+		t.Fatalf("known uncommitted retry was reclassified or skipped: %v", executor.calls)
+	}
+	current, readErr := base.Read()
+	if readErr != nil || current.Status != "rolling_back" || current.Phase != PhaseValidate {
+		t.Fatalf("failed result publication lost retry evidence: %#v %v", current, readErr)
+	}
+}
+
+func TestRecoveryTransitionsResumeAfterSecondProcessDeath(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		journal   Journal
+		wantCalls string
+	}{
+		{
+			name: "rolling-back",
+			journal: Journal{Phase: PhaseValidate, Status: "rolling_back", Generation: 7,
+				BackupDir: "/backup", Summary: Summary{Schema: "nftfw.setup-plan.v1"}},
+			wantCalls: "rollback",
+		},
+		{
+			name: "rollback-failed",
+			journal: Journal{Phase: PhaseValidate, Status: "rollback_failed", Generation: 7,
+				BackupDir: "/backup", Summary: Summary{Schema: "nftfw.setup-plan.v1"}},
+			wantCalls: "rollback",
+		},
+		{
+			name: "recovering-committed",
+			journal: Journal{Phase: PhaseCommit, Status: "recovering_committed", Generation: 7,
+				Committed: true, BackupDir: "/backup", Summary: Summary{Schema: "nftfw.setup-plan.v1"}},
+			wantCalls: "recover-committed",
+		},
+		{
+			name: "committed-recovery-failed",
+			journal: Journal{Phase: PhaseCommit, Status: "committed_recovery_failed", Generation: 7,
+				Committed: true, BackupDir: "/backup", Summary: Summary{Schema: "nftfw.setup-plan.v1"}},
+			wantCalls: "recover-committed",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			test.journal.Schema = "nftfw.setup-journal.v1"
+			test.journal.Transaction = test.name
+			test.journal.StartedAt = testTime().Add(-2 * time.Minute)
+			test.journal.UpdatedAt = testTime()
+			test.journal.Deadline = testTime().Add(-time.Minute)
+			store := testFileJournal(t)
+			if err := store.Write(test.journal); err != nil {
+				t.Fatal(err)
+			}
+			executor := &fakeExecutor{commitInspectErr: errors.New("classified transition must not re-inspect")}
+			attempted, err := (Engine{Executor: executor, Journal: store, Now: testTime}).
+				RollbackExpired(context.Background(), Plan{})
+			if !attempted || err == nil {
+				t.Fatalf("transition was not resumed: attempted=%t err=%v", attempted, err)
+			}
+			if strings.Join(executor.calls, ",") != test.wantCalls {
+				t.Fatalf("resume calls=%v want=%s", executor.calls, test.wantCalls)
 			}
 		})
 	}
@@ -438,7 +581,7 @@ func TestEveryMutationPhaseFailureRollsBack(t *testing.T) {
 
 func TestRollbackAndCommittedRecoveryFailuresRemainRecorded(t *testing.T) {
 	rollbackExecutor := &fakeExecutor{failCalls: map[string]bool{"tunnel": true, "rollback": true}}
-	rollbackStore := FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")}
+	rollbackStore := testFileJournal(t)
 	if _, err := (Engine{
 		Executor: rollbackExecutor, Journal: rollbackStore,
 		NewID: func() string { return "rollback-failure" },
@@ -454,7 +597,7 @@ func TestRollbackAndCommittedRecoveryFailuresRemainRecorded(t *testing.T) {
 	}
 
 	recoveryExecutor := &fakeExecutor{failAt: "boot"}
-	recoveryStore := FileJournal{Path: filepath.Join(t.TempDir(), "journal.json")}
+	recoveryStore := testFileJournal(t)
 	recoveryExecutor.failAt = "recover-committed"
 	journal := Journal{
 		Schema: "nftfw.setup-journal.v1", Transaction: "recovery-failure",
@@ -480,13 +623,12 @@ func TestRollbackAndCommittedRecoveryFailuresRemainRecorded(t *testing.T) {
 
 func TestRollbackExpiredNoOpStates(t *testing.T) {
 	executor := &fakeExecutor{}
-	path := filepath.Join(t.TempDir(), "journal.json")
-	store := FileJournal{Path: path}
+	store := testFileJournal(t)
 	now := testTime()
 	for _, journal := range []Journal{
 		{
 			Schema: "nftfw.setup-journal.v1", Transaction: "complete",
-			Phase: PhaseComplete, Status: "complete", StartedAt: now,
+			Phase: PhaseComplete, Status: "complete", StartedAt: now.Add(-2 * time.Minute),
 			UpdatedAt: now, Deadline: now.Add(-time.Minute),
 		},
 		{

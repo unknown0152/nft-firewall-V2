@@ -70,6 +70,16 @@ again immediately before one Docker restart. A compliant unchanged
 the daemon settings, socket drop-in, kernel forwarding value, every network
 tuple, and current bridge before applying the firewall.
 
+The mandatory IPv6-disabled setup reboot is a special first-setup boundary.
+A systemd generator adds an exact transient dependency to both
+`docker.service` and `docker.socket`; neither can start on the resumed boot
+while the old Docker firewall settings still own packet mutation. NFTFW first
+validates the checksum-bound resume guard, writes the managed daemon/socket
+files, applies `net.ipv4.ip_forward=1`, and obtains the immediate restart
+confirmation. It then releases the hold and restarts Docker. A refusal or
+failure restores the backed-up Docker files before releasing the hold, so
+Docker cannot escape by starting in the transition state.
+
 Any failure or expired setup journal restores the exact prior daemon JSON,
 sysctl file and runtime values, socket drop-in, Docker active/enabled state,
 generated policy, and firewall generation.

@@ -34,7 +34,17 @@ type Runner interface {
 type ExecRunner struct{}
 
 func (ExecRunner) Run(ctx context.Context, input []byte, name string, args ...string) ([]byte, error) {
-	commandCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+	return (ExecRunner{}).RunWithTimeout(ctx, input, 10*time.Second, name, args...)
+}
+
+// RunWithTimeout retains the same bounded-output contract as Run while
+// allowing a caller with an explicitly reviewed slow command to select a
+// narrower command-specific deadline.
+func (ExecRunner) RunWithTimeout(ctx context.Context, input []byte, timeout time.Duration, name string, args ...string) ([]byte, error) {
+	if timeout <= 0 {
+		return nil, errors.New("invalid command timeout")
+	}
+	commandCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 	command := exec.CommandContext(commandCtx, name, args...)
 	if input != nil {

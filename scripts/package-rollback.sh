@@ -156,7 +156,14 @@ if [ -e "\$database" ] || [ -L "\$database" ]; then
         [ "\$((0\$directory_mode & 0022))" -eq 0 ]
     done
     [ -f "\$database" ] && [ ! -L "\$database" ]
-    [ "\$(stat -c '%u:%g:%a:%h' "\$database")" = '0:0:600:1' ]
+    state_gid=\$(id -g nftfw-web)
+    case "\$state_gid" in *[!0-9]*|'') exit 1 ;; esac
+    [ "\$state_gid" -gt 0 ]
+    database_metadata=\$(stat -c '%u:%g:%a:%h' "\$database")
+    case "\$database_metadata" in
+        '0:0:600:1'|"0:\$state_gid:600:1") ;;
+        *) exit 1 ;;
+    esac
     history=\$(sqlite3 -batch -noheader "file:\$database?mode=ro&immutable=1" \
         "SELECT group_concat(version, ',') FROM (SELECT version FROM schema_migrations ORDER BY version);")
     [ "\$history" = '1,2,3,4,5,6' ]
@@ -345,6 +352,25 @@ verify_installed_payload() {
     done <<<"$output"
 }
 
+validate_exact_old_configuration() {
+    local bundle=$1 temporary root binary expected
+    temporary=$(mktemp -d /tmp/nftfw-rollback-config.XXXXXX)
+    root=$temporary/root
+    install -d -o root -g root -m 0700 "$root"
+    if ! dpkg-deb -x "$bundle/old.deb" "$root"; then
+        rm -rf -- "$temporary"
+        fail "cannot inspect the exact 2.0.3 configuration contract"
+    fi
+    binary=$root/usr/lib/nftfw/nftfw
+    expected=$(manifest_value "$bundle/manifest" old_binary_sha256)
+    if ! regular_protected "$binary" || [[ $(sha "$binary") != "$expected" ]] ||
+        ! "$binary" config validate /etc/nftfw/nftfw.toml >/dev/null 2>&1; then
+        rm -rf -- "$temporary"
+        fail "current configuration is not exact 2.0.3-compatible; restore the protected pre-2.1.0 configuration or use package removal"
+    fi
+    rm -rf -- "$temporary"
+}
+
 install_exact_old_package() {
     local package_path=$1 private_lock canonical_identity private_identity status
     private_lock=$(mktemp /run/nftfw/.package-rollback-maintscript-lock.XXXXXX)
@@ -413,10 +439,33 @@ execute_bundle() {
     exec 9<>/run/nftfw/mutation.lock
     chmod 0600 /run/nftfw/mutation.lock
     flock -w 30 9 || fail "mutation lock is busy"
+    chown root:root /run/nftfw/mutation.lock
+    regular_protected /run/nftfw/mutation.lock || fail "canonical mutation lock is unsafe"
+    [[ $(stat -c '%u:%g:%a:%h' /run/nftfw/mutation.lock) == 0:0:600:1 ]] ||
+        fail "canonical mutation lock identity is unsafe"
 
     if [[ $version == "$new_version" ]]; then
+        # Refuse before the boot-policy handoff or dpkg can mutate anything.
+        # Exact 2.0.3 deliberately rejects 2.1-only configuration fields; a
+        # package rollback must never discover that incompatibility after the
+        # old payload has already been unpacked.
+        validate_exact_old_configuration "$bundle"
         [[ -x /usr/lib/nftfw/initramfs/nftfw-initramfs-manage ]] || fail "managed initramfs rollback helper is missing"
-        /usr/lib/nftfw/initramfs/nftfw-initramfs-manage disable
+        local setup_journal=/var/lib/nftfw/setup/journal.json
+        [[ ! -L $setup_journal ]] || fail "setup journal is an unsafe link"
+        if [[ -e /etc/default/grub.d/90-nftfw-ipv6-disabled.cfg || \
+            -L /etc/default/grub.d/90-nftfw-ipv6-disabled.cfg || \
+            ( -f $setup_journal && $(grep -Fc '"boot_policy": "debian-grub-ipv6-disabled-v1"' "$setup_journal") -ge 1 ) ]]; then
+            [[ -x /usr/lib/nftfw/nftfw ]] || fail "managed boot-policy helper is missing"
+            /usr/lib/nftfw/nftfw setup boot-handoff --package-downgrade
+        else
+            /usr/lib/nftfw/initramfs/nftfw-initramfs-manage disable
+        fi
+        # The handoff may run update-initramfs and update-grub. Revalidate the
+        # old parser contract immediately before package replacement so a
+        # concurrent privileged edit cannot turn a preflight pass into a
+        # half-configured downgrade.
+        validate_exact_old_configuration "$bundle"
         dpkg --force-downgrade --install "$bundle/bridge.deb"
         [[ $(installed_version) == "$bridge" ]] || fail "rollback bridge did not configure"
         [[ $(sha /usr/lib/nftfw/nftfw) == $(manifest_value "$manifest" old_binary_sha256) ]] || fail "rollback bridge payload is not exact 2.0.3"
@@ -429,7 +478,7 @@ execute_bundle() {
 }
 
 require_root
-for tool in awk cat chmod dpkg dpkg-deb dpkg-query find flock grep id install mktemp mount mv realpath rm sed sha256sum sort sqlite3 stat tar unshare wc; do
+for tool in awk cat chmod chown dpkg dpkg-deb dpkg-query find flock grep id install mktemp mount mv realpath rm sed sha256sum sort sqlite3 stat tar unshare wc; do
     command -v "$tool" >/dev/null || fail "missing prerequisite: $tool"
 done
 case "${1:-}" in

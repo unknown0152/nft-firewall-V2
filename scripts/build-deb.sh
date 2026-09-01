@@ -148,7 +148,9 @@ cleanup() {
 trap cleanup EXIT
 install -d "$stage/DEBIAN" "$stage/usr/lib/nftfw" "$stage/usr/lib/nftfw/initramfs" \
     "$stage/usr/sbin" "$stage/usr/lib/systemd/system" \
-    "$stage/usr/share/initramfs-tools/hooks" "$stage/usr/share/doc/nft-firewall-v2" "$stage/etc/nftfw"
+    "$stage/usr/lib/systemd/system-generators" \
+    "$stage/usr/share/initramfs-tools/hooks" "$stage/usr/share/doc/nft-firewall-v2" \
+    "$stage/etc/nftfw" "$stage/etc/default/grub.d"
 sed -e "s/@VERSION@/$version/g" -e "s/@ARCH@/$arch/g" \
     -e "s/@BUILD_DISPOSITION@/$build_disposition/g" \
     "$root_dir/packaging/deb/control" > "$stage/DEBIAN/control"
@@ -168,6 +170,8 @@ install -m 0644 "$root_dir/scripts/docker-handoff.sh" "$stage/usr/lib/nftfw/dock
 install -m 0755 "$root_dir/scripts/package-rollback.sh" "$stage/usr/lib/nftfw/package-rollback"
 install -m 0755 "$root_dir/packaging/initramfs/nftfw-ipv6-early" \
     "$stage/usr/lib/nftfw/initramfs/nftfw-ipv6-early"
+install -m 0755 "$root_dir/packaging/initramfs/nftfw-udev-gate" \
+    "$stage/usr/lib/nftfw/initramfs/nftfw-udev-gate"
 install -m 0644 "$root_dir/packaging/initramfs/nftfw-initramfs-guard.nft" \
     "$stage/usr/lib/nftfw/initramfs/nftfw-initramfs-guard.nft"
 install -m 0755 "$root_dir/packaging/initramfs/nftfw-initramfs-manage" \
@@ -183,6 +187,8 @@ systemd_units=(
     nftfw-rollback.timer
     nftfw-setup-rollback.service
     nftfw-setup-rollback.timer
+    nftfw-setup-boot-hold.service
+    nftfw-setup-docker-hold.service
     nftfw-managed-rollback.service
     nftfw-managed-rollback.timer
     nftfw-vpn.service
@@ -192,6 +198,8 @@ systemd_units=(
 for unit in "${systemd_units[@]}"; do
     install -m 0644 "$root_dir/packaging/systemd/$unit" "$stage/usr/lib/systemd/system/$unit"
 done
+install -m 0755 "$root_dir/packaging/systemd/nftfw-setup-boot-hold-generator" \
+    "$stage/usr/lib/systemd/system-generators/nftfw-setup-boot-hold-generator"
 install -d "$stage/usr/share/doc/nft-firewall-v2/examples"
 for example in nftfwd-docker-access.conf.example nftfwd-final-early.conf.example \
     nftfw-rollback-final-early.conf.example nftfw-consumer-final-ready.conf.example; do

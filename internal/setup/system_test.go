@@ -1,9 +1,11 @@
 package setup
 
 import (
+	"bytes"
 	"context"
 	"encoding/base64"
 	"errors"
+	"net"
 	"net/netip"
 	"os"
 	"path/filepath"
@@ -51,6 +53,8 @@ func (r *systemRunner) Run(_ context.Context, input []byte, name string, args ..
 	switch {
 	case command == "nft list table inet nftfw_setup_guard":
 		return nil, errors.New("absent")
+	case command == "nft list table inet nftfw_setup_resume_guard":
+		return nil, errors.New("absent")
 	case command == "ip link show dev nftfw0":
 		return nil, errors.New("absent")
 	case command == "ip -j -4 rule show":
@@ -63,6 +67,13 @@ func (r *systemRunner) Run(_ context.Context, input []byte, name string, args ..
 		return nil, errors.New("disabled")
 	case strings.HasPrefix(command, "systemctl is-active"):
 		return nil, errors.New("inactive")
+	case command == "systemctl show --property=LoadState,ActiveState docker.service":
+		return []byte("LoadState=loaded\nActiveState=active\n"), nil
+	case command == "systemctl show --property=LoadState,ActiveState docker.socket":
+		return []byte("LoadState=not-found\nActiveState=inactive\n"), nil
+	case strings.HasPrefix(command, "systemctl show --property=LoadState,ActiveState nftfw-") ||
+		command == "systemctl show --property=LoadState,ActiveState nftfwd.service":
+		return []byte("LoadState=loaded\nActiveState=inactive\n"), nil
 	case strings.HasPrefix(command, "sysctl -n"):
 		return []byte("0\n"), nil
 	case strings.Contains(command, "latest-handshakes"):
@@ -114,23 +125,34 @@ func testSystem(t testing.TB, runner *systemRunner) (*System, Paths) {
 	t.Helper()
 	root := t.TempDir()
 	paths := Paths{
-		Config:           filepath.Join(root, "etc/nftfw/nftfw.toml"),
-		Intent:           filepath.Join(root, "etc/nftfw/intent.toml"),
-		VPN:              filepath.Join(root, "etc/wireguard/nftfw0.conf"),
-		Sysctl:           filepath.Join(root, "etc/sysctl.d/90-nftfw-managed.conf"),
-		StateDir:         filepath.Join(root, "var/lib/nftfw"),
-		RuntimeDir:       filepath.Join(root, "run/nftfw"),
-		SystemdDir:       filepath.Join(root, "etc/systemd/system"),
-		DockerDaemon:     filepath.Join(root, "etc/docker/daemon.json"),
-		DockerDropIn:     filepath.Join(root, "etc/systemd/system/nftfwd.service.d/docker-access.conf"),
-		InitramfsMarker:  filepath.Join(root, "etc/nftfw/initramfs-managed-disabled-v1"),
-		InitramfsManager: filepath.Join(root, "usr/lib/nftfw/initramfs/nftfw-initramfs-manage"),
-		ControlSocket:    filepath.Join(root, "run/nftfw/control.sock"),
-		StatusSocket:     filepath.Join(root, "run/nftfw/status.sock"),
+		Config:            filepath.Join(root, "etc/nftfw/nftfw.toml"),
+		Intent:            filepath.Join(root, "etc/nftfw/intent.toml"),
+		VPN:               filepath.Join(root, "etc/wireguard/nftfw0.conf"),
+		Sysctl:            filepath.Join(root, "etc/sysctl.d/90-nftfw-managed.conf"),
+		StateDir:          filepath.Join(root, "var/lib/nftfw"),
+		RuntimeDir:        filepath.Join(root, "run/nftfw"),
+		SystemdDir:        filepath.Join(root, "etc/systemd/system"),
+		DockerDaemon:      filepath.Join(root, "etc/docker/daemon.json"),
+		DockerDropIn:      filepath.Join(root, "etc/systemd/system/nftfwd.service.d/docker-access.conf"),
+		InitramfsMarker:   filepath.Join(root, "etc/nftfw/initramfs-managed-disabled-v1"),
+		InitramfsOwner:    filepath.Join(root, "etc/nftfw/initramfs-source-owner-v1"),
+		InitramfsLoader:   filepath.Join(root, "etc/initramfs-tools/scripts/init-top/nftfw-ipv6-early"),
+		InitramfsGate:     filepath.Join(root, "etc/initramfs-tools/scripts/init-top/udev"),
+		InitramfsManager:  filepath.Join(root, "usr/lib/nftfw/initramfs/nftfw-initramfs-manage"),
+		BootHoldMarker:    filepath.Join(root, "etc/nftfw/setup-boot-hold-v1"),
+		BootHoldReady:     filepath.Join(root, "run/nftfw/setup-boot-hold-ready"),
+		BootHoldRelease:   filepath.Join(root, "run/nftfw/setup-boot-release"),
+		DockerHoldReady:   filepath.Join(root, "run/nftfw/setup-docker-hold-ready"),
+		DockerHoldRelease: filepath.Join(root, "run/nftfw/setup-docker-release"),
+		DockerHoldService: filepath.Join(root, "run/systemd/generator/docker.service.d/50-nftfw-setup-hold.conf"),
+		DockerHoldSocket:  filepath.Join(root, "run/systemd/generator/docker.socket.d/50-nftfw-setup-hold.conf"),
+		ControlSocket:     filepath.Join(root, "run/nftfw/control.sock"),
+		StatusSocket:      filepath.Join(root, "run/nftfw/status.sock"),
 	}
 	profile := setupProfile(t)
 	system := &System{
 		Paths: paths, Runner: runner,
+		InspectBoot: func(context.Context) (*bootObservation, error) { return nil, nil },
 		Discover: func(context.Context) (discovery.Snapshot, error) {
 			return discovery.Snapshot{
 				OSID: "debian", OSVersion: "13", Architecture: "amd64",
@@ -160,10 +182,11 @@ func testSystem(t testing.TB, runner *systemRunner) (*System, Paths) {
 		},
 		Status: func(context.Context) (health.Snapshot, error) {
 			return health.Snapshot{
-				Schema: health.StatusSchema, Status: "HEALTHY", Active: true,
+				Schema: health.StatusSchema, Version: "2.1.0", Status: "HEALTHY", Active: true,
 				PolicyMatch: true, KillSwitchEnforced: true,
 			}, nil
 		},
+		RuntimeReady: func(context.Context) error { return nil },
 		ValidateHook: func(context.Context, prepared, uint64) error { return nil },
 	}
 	return system, paths
@@ -208,7 +231,7 @@ func configuredDockerPlan(
 		Summary: Summary{
 			Schema: "nftfw.setup-plan.v1", VPNInterface: "nftfw0",
 			DockerMode: "enabled", DockerNetworks: []string{"media"},
-			DockerRestart: changed,
+			DockerRestart: changed, ResolverMode: "none",
 		},
 		PrivateData: &prepared{
 			Intent: intent.Intent{
@@ -278,7 +301,6 @@ func TestSystemExecutorCompletesSimulatedCleanHost(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(paths.SystemdDir, "nftfwd.service.d", "50-nftfw-final-early.conf"),
 		filepath.Join(paths.SystemdDir, "nftfw-rollback.service.d", "50-nftfw-final-early.conf"),
-		paths.InitramfsMarker,
 	} {
 		if _, err := os.Stat(path); err != nil {
 			t.Fatalf("final dependency artifact missing %s: %v", path, err)
@@ -299,7 +321,7 @@ func TestInstallDefersFinalDependenciesUntilCommittedHandoff(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(paths.SystemdDir, "nftfwd.service.d", "50-nftfw-final-early.conf"),
 		filepath.Join(paths.SystemdDir, "nftfw-rollback.service.d", "50-nftfw-final-early.conf"),
-		paths.InitramfsMarker,
+		paths.InitramfsMarker, paths.InitramfsOwner, paths.InitramfsLoader, paths.InitramfsGate,
 	} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
 			t.Fatalf("install phase published final artifact %s: %v", path, err)
@@ -317,58 +339,510 @@ func TestInstallDefersFinalDependenciesUntilCommittedHandoff(t *testing.T) {
 	}
 }
 
-func TestManagedInitramfsMarkerLifecycle(t *testing.T) {
-	marker := filepath.Join(t.TempDir(), "etc/nftfw/initramfs-managed-disabled-v1")
-	if err := ensureManagedInitramfsMarker(marker); err != nil {
+func TestStartRuntimeWaitsForDaemonReadiness(t *testing.T) {
+	runner := &systemRunner{}
+	system, _ := testSystem(t, runner)
+	system.RuntimeReadyPoll = time.Millisecond
+	system.RuntimeReadyTimeout = time.Second
+	calls := 0
+	system.RuntimeReady = func(context.Context) error {
+		calls++
+		if calls < 4 {
+			return errRuntimeStarting
+		}
+		return nil
+	}
+	if err := system.StartRuntime(context.Background(), Plan{}); err != nil {
 		t.Fatal(err)
 	}
-	info, err := os.Stat(marker)
-	if err != nil || info.Mode().Perm() != 0o600 ||
-		string(mustRead(t, marker)) != "nftfw.initramfs-managed-disabled.v1\n" {
-		t.Fatalf("managed marker is not exact: info=%v err=%v", info, err)
+	if calls != 4 {
+		t.Fatalf("readiness probes=%d want=4", calls)
 	}
-	if err := ensureManagedInitramfsMarker(marker); err != nil {
-		t.Fatalf("exact existing marker was not idempotent: %v", err)
+	joined := strings.Join(runner.commands, "\n")
+	if !strings.Contains(joined, "systemctl start nftfwd.service") {
+		t.Fatalf("daemon was not started before readiness:\n%s", joined)
 	}
-	if err := os.WriteFile(marker, []byte("foreign\n"), 0o600); err != nil {
+}
+
+func TestStartRuntimeReadinessFailuresAreBounded(t *testing.T) {
+	tests := []struct {
+		name    string
+		ctx     func() (context.Context, context.CancelFunc)
+		probe   func(context.Context) error
+		timeout time.Duration
+		want    string
+	}{
+		{
+			name: "daemon-exit", ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			probe:   func(context.Context) error { return errors.New("SETUP_DAEMON_NOT_RUNNING") },
+			timeout: time.Second, want: "SETUP_DAEMON_NOT_RUNNING",
+		},
+		{
+			name: "degraded", ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			probe:   func(context.Context) error { return errors.New("SETUP_DAEMON_DEGRADED") },
+			timeout: time.Second, want: "SETUP_DAEMON_DEGRADED",
+		},
+		{
+			name: "timeout", ctx: func() (context.Context, context.CancelFunc) {
+				return context.WithCancel(context.Background())
+			},
+			probe:   func(context.Context) error { return errRuntimeStarting },
+			timeout: 2 * time.Millisecond, want: "SETUP_DAEMON_READINESS_TIMEOUT",
+		},
+		{
+			name: "canceled", ctx: func() (context.Context, context.CancelFunc) {
+				ctx, cancel := context.WithCancel(context.Background())
+				cancel()
+				return ctx, func() {}
+			},
+			probe:   func(context.Context) error { return errRuntimeStarting },
+			timeout: time.Second, want: "SETUP_DAEMON_READINESS_CANCELED",
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			system, _ := testSystem(t, &systemRunner{})
+			system.RuntimeReady = test.probe
+			system.RuntimeReadyPoll = time.Millisecond
+			system.RuntimeReadyTimeout = test.timeout
+			ctx, cancel := test.ctx()
+			defer cancel()
+			err := system.StartRuntime(ctx, Plan{})
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("readiness error=%v want=%s", err, test.want)
+			}
+		})
+	}
+}
+
+func TestRuntimeProcessPropertiesAreStrict(t *testing.T) {
+	valid, err := parseRuntimeProperties([]byte("MainPID=42\nActiveState=active\nSubState=running\n"))
+	if err != nil || valid["MainPID"] != "42" {
+		t.Fatalf("valid process properties rejected: %#v %v", valid, err)
+	}
+	for _, data := range [][]byte{
+		[]byte("MainPID=42\nActiveState=active\n"),
+		[]byte("MainPID=42\nMainPID=43\nActiveState=active\nSubState=running\n"),
+		[]byte("MainPID=42\nActiveState=active\nSubState=running\nUnknown=x\n"),
+		[]byte("MainPID=\nActiveState=active\nSubState=running\n"),
+	} {
+		if _, err := parseRuntimeProperties(data); err == nil {
+			t.Fatalf("unsafe process properties accepted: %q", data)
+		}
+	}
+}
+
+func TestRuntimeExecutableAllowsOnlySystemdExecTransition(t *testing.T) {
+	if err := validateRuntimeExecutable("/usr/lib/nftfw/nftfwd"); err != nil {
+		t.Fatalf("expected daemon executable rejected: %v", err)
+	}
+	if err := validateRuntimeExecutable("/usr/lib/systemd/systemd-executor"); !errors.Is(err, errRuntimeStarting) {
+		t.Fatalf("ordinary systemd exec transition rejected: %v", err)
+	}
+	for _, path := range []string{
+		"/tmp/nftfwd", "/usr/local/bin/nftfwd", "/usr/lib/nftfw/nftfwd (deleted)",
+	} {
+		if err := validateRuntimeExecutable(path); err == nil ||
+			err.Error() != "SETUP_DAEMON_PROCESS_UNSAFE" {
+			t.Fatalf("unexpected daemon executable accepted %q: %v", path, err)
+		}
+	}
+}
+
+func TestRuntimeProcessReadinessIsFailClosed(t *testing.T) {
+	processRoot := t.TempDir()
+	uid := uint32(os.Geteuid())
+	response := func(value string) systemRunnerFunc {
+		return func(_ context.Context, _ []byte, name string, args ...string) ([]byte, error) {
+			if name != "systemctl" || strings.Join(args, " ") !=
+				"show --property=MainPID,ActiveState,SubState nftfwd.service" {
+				t.Fatalf("unexpected command: %s %s", name, strings.Join(args, " "))
+			}
+			return []byte(value), nil
+		}
+	}
+	systemFor := func(runner routing.Runner) *System {
+		return &System{Runner: runner, runtimeProcessRoot: processRoot, runtimeProcessUID: &uid}
+	}
+	for _, test := range []struct {
+		name string
+		data string
+		want string
+	}{
+		{"empty", "", "SETUP_DAEMON_STATE_FAILED"},
+		{"activating", "MainPID=2\nActiveState=activating\nSubState=start\n", errRuntimeStarting.Error()},
+		{"active-start", "MainPID=2\nActiveState=active\nSubState=start\n", errRuntimeStarting.Error()},
+		{"inactive", "MainPID=2\nActiveState=inactive\nSubState=dead\n", "SETUP_DAEMON_NOT_RUNNING"},
+		{"invalid-pid", "MainPID=text\nActiveState=active\nSubState=running\n", errRuntimeStarting.Error()},
+		{"unsafe-pid", "MainPID=1\nActiveState=active\nSubState=running\n", errRuntimeStarting.Error()},
+		{"missing-process", "MainPID=42\nActiveState=active\nSubState=running\n", errRuntimeStarting.Error()},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := systemFor(response(test.data)).runtimeProcessReady(context.Background())
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("error=%v want=%s", err, test.want)
+			}
+		})
+	}
+	errRunner := systemRunnerFunc(func(context.Context, []byte, string, ...string) ([]byte, error) {
+		return nil, errors.New("injected")
+	})
+	if err := systemFor(errRunner).runtimeProcessReady(context.Background()); err == nil ||
+		err.Error() != "SETUP_DAEMON_STATE_FAILED" {
+		t.Fatalf("command failure was accepted: %v", err)
+	}
+	oversized := strings.Repeat("x", 4097)
+	if err := systemFor(response(oversized)).runtimeProcessReady(context.Background()); err == nil ||
+		err.Error() != "SETUP_DAEMON_STATE_FAILED" {
+		t.Fatalf("oversized state was accepted: %v", err)
+	}
+
+	process := filepath.Join(processRoot, "43")
+	if err := os.WriteFile(process, []byte("not a directory"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureManagedInitramfsMarker(marker); err == nil ||
-		err.Error() != "SETUP_INITRAMFS_MARKER_INVALID" {
-		t.Fatalf("foreign marker content was accepted: %v", err)
+	running := response("MainPID=43\nActiveState=active\nSubState=running\n")
+	if err := systemFor(running).runtimeProcessReady(context.Background()); err == nil ||
+		err.Error() != "SETUP_DAEMON_PROCESS_UNSAFE" {
+		t.Fatalf("non-directory process identity was accepted: %v", err)
 	}
-	if err := os.Chmod(marker, 0o640); err != nil {
+	if err := os.Remove(process); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureManagedInitramfsMarker(marker); err == nil ||
-		err.Error() != "SETUP_INITRAMFS_MARKER_UNSAFE" {
-		t.Fatalf("unsafe marker mode was accepted: %v", err)
-	}
-	if err := os.Remove(marker); err != nil {
+	if err := os.Mkdir(process, 0o700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Symlink("missing", marker); err != nil {
+	if err := systemFor(running).runtimeProcessReady(context.Background()); !errors.Is(err, errRuntimeStarting) {
+		t.Fatalf("missing executable was not treated as startup: %v", err)
+	}
+	if err := os.Symlink("/usr/lib/systemd/systemd-executor", filepath.Join(process, "exe")); err != nil {
 		t.Fatal(err)
 	}
-	if err := ensureManagedInitramfsMarker(marker); err == nil ||
-		err.Error() != "SETUP_INITRAMFS_MARKER_UNSAFE" {
-		t.Fatalf("symlinked marker was accepted: %v", err)
+	if err := systemFor(running).runtimeProcessReady(context.Background()); !errors.Is(err, errRuntimeStarting) {
+		t.Fatalf("systemd exec transition was rejected incorrectly: %v", err)
+	}
+	if err := os.Remove(filepath.Join(process, "exe")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/lib/nftfw/nftfwd", filepath.Join(process, "exe")); err != nil {
+		t.Fatal(err)
+	}
+	if err := systemFor(running).runtimeProcessReady(context.Background()); err != nil {
+		t.Fatalf("exact daemon process was rejected: %v", err)
+	}
+	wrongUID := uid + 1
+	wrongOwner := systemFor(running)
+	wrongOwner.runtimeProcessUID = &wrongUID
+	if err := wrongOwner.runtimeProcessReady(context.Background()); err == nil ||
+		err.Error() != "SETUP_DAEMON_PROCESS_UNSAFE" {
+		t.Fatalf("wrong process owner was accepted: %v", err)
+	}
+}
+
+func TestRuntimeReadinessRequiresBothAPIsAndExactProcess(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	statusPath := filepath.Join(root, "status.sock")
+	controlPath := filepath.Join(root, "control.sock")
+	statusSocket, err := net.Listen("unix", statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer statusSocket.Close()
+	controlSocket, err := net.Listen("unix", controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer controlSocket.Close()
+	if err := os.Chmod(statusPath, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(controlPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	processRoot := filepath.Join(root, "proc")
+	process := filepath.Join(processRoot, "44")
+	if err := os.MkdirAll(process, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/lib/nftfw/nftfwd", filepath.Join(process, "exe")); err != nil {
+		t.Fatal(err)
+	}
+	uid := uint32(os.Geteuid())
+	healthy := health.Snapshot{
+		Schema: health.StatusSchema, Version: "2.1.0", Status: "HEALTHY",
+		Active: true, PolicyMatch: true, KillSwitchEnforced: true,
+	}
+	system := &System{
+		Paths: Paths{StatusSocket: statusPath, ControlSocket: controlPath},
+		Runner: systemRunnerFunc(func(_ context.Context, _ []byte, name string, args ...string) ([]byte, error) {
+			if name != "systemctl" || len(args) == 0 {
+				return nil, errors.New("unexpected")
+			}
+			return []byte("MainPID=44\nActiveState=active\nSubState=running\n"), nil
+		}),
+		Status:             func(context.Context) (health.Snapshot, error) { return healthy, nil },
+		Control:            func(context.Context, api.Request) (any, error) { return healthy, nil },
+		runtimeProcessRoot: processRoot,
+		runtimeProcessUID:  &uid,
+	}
+	if err := system.runtimeReady(context.Background()); err != nil {
+		t.Fatalf("complete readiness proof failed: %v", err)
+	}
+}
+
+func TestRuntimeReadinessStopsBeforeUnsafeDependencies(t *testing.T) {
+	if uid := (&System{}).expectedRuntimeUID(); uid != 0 {
+		t.Fatalf("production runtime UID=%d want=0", uid)
+	}
+	processFailure := &System{Runner: systemRunnerFunc(func(context.Context, []byte, string, ...string) ([]byte, error) {
+		return nil, errors.New("injected")
+	})}
+	if err := processFailure.runtimeReady(context.Background()); err == nil ||
+		err.Error() != "SETUP_DAEMON_STATE_FAILED" {
+		t.Fatalf("process inspection failure was accepted: %v", err)
+	}
+	root := t.TempDir()
+	process := filepath.Join(root, "45")
+	if err := os.Mkdir(process, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/usr/lib/nftfw/nftfwd", filepath.Join(process, "exe")); err != nil {
+		t.Fatal(err)
+	}
+	uid := uint32(os.Geteuid())
+	socketFailure := &System{
+		Paths: Paths{
+			StatusSocket:  filepath.Join(root, "missing-runtime", "status.sock"),
+			ControlSocket: filepath.Join(root, "missing-runtime", "control.sock"),
+		},
+		Runner: systemRunnerFunc(func(context.Context, []byte, string, ...string) ([]byte, error) {
+			return []byte("MainPID=45\nActiveState=active\nSubState=running\n"), nil
+		}),
+		runtimeProcessRoot: root,
+		runtimeProcessUID:  &uid,
+	}
+	if err := socketFailure.runtimeReady(context.Background()); !errors.Is(err, errRuntimeStarting) {
+		t.Fatalf("missing socket contract was not fail-closed: %v", err)
+	}
+}
+
+func TestRuntimeAPIReadinessFailureMatrix(t *testing.T) {
+	healthy := health.Snapshot{
+		Schema: health.StatusSchema, Version: "2.1.0", Status: "HEALTHY",
+		Active: true, PolicyMatch: true, KillSwitchEnforced: true,
+	}
+	degraded := healthy
+	degraded.Status = "DEGRADED"
+	for _, test := range []struct {
+		name    string
+		status  func(context.Context) (health.Snapshot, error)
+		control func(context.Context, api.Request) (any, error)
+		want    string
+	}{
+		{"status-error", func(context.Context) (health.Snapshot, error) { return health.Snapshot{}, errors.New("injected") }, nil, errRuntimeStarting.Error()},
+		{"status-degraded", func(context.Context) (health.Snapshot, error) { return degraded, nil }, nil, "SETUP_DAEMON_DEGRADED"},
+		{"control-error", func(context.Context) (health.Snapshot, error) { return healthy, nil }, func(context.Context, api.Request) (any, error) { return nil, errors.New("injected") }, errRuntimeStarting.Error()},
+		{"control-invalid", func(context.Context) (health.Snapshot, error) { return healthy, nil }, func(context.Context, api.Request) (any, error) { return "invalid", nil }, "SETUP_DAEMON_STATUS_INVALID"},
+		{"control-degraded", func(context.Context) (health.Snapshot, error) { return healthy, nil }, func(context.Context, api.Request) (any, error) { return degraded, nil }, "SETUP_DAEMON_DEGRADED"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			system := &System{Status: test.status, Control: test.control}
+			err := system.runtimeAPIReady(context.Background())
+			if err == nil || err.Error() != test.want {
+				t.Fatalf("error=%v want=%s", err, test.want)
+			}
+		})
+	}
+	if _, err := decodeRuntimeSnapshot(make(chan int)); err == nil || err.Error() != "SETUP_DAEMON_STATUS_INVALID" {
+		t.Fatalf("unencodable runtime status was accepted: %v", err)
+	}
+}
+
+func TestRuntimeSocketContracts(t *testing.T) {
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	statusPath := filepath.Join(root, "status.sock")
+	controlPath := filepath.Join(root, "control.sock")
+	system := &System{Paths: Paths{StatusSocket: statusPath, ControlSocket: controlPath}}
+	if err := system.runtimeSocketContracts(uint32(os.Geteuid())); !errors.Is(err, errRuntimeStarting) {
+		t.Fatalf("missing sockets were not treated as startup: %v", err)
+	}
+	status, err := net.Listen("unix", statusPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer status.Close()
+	if err := os.Chmod(statusPath, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	if err := system.runtimeSocketContracts(uint32(os.Geteuid())); !errors.Is(err, errRuntimeStarting) {
+		t.Fatalf("missing control socket was not treated as startup: %v", err)
+	}
+	control, err := net.Listen("unix", controlPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer control.Close()
+	if err := os.Chmod(controlPath, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := system.runtimeSocketContracts(uint32(os.Geteuid())); err != nil {
+		t.Fatalf("valid runtime sockets rejected: %v", err)
+	}
+	if err := os.Chmod(statusPath, 0o666); err != nil {
+		t.Fatal(err)
+	}
+	if err := system.runtimeSocketContracts(uint32(os.Geteuid())); err == nil ||
+		err.Error() != "SETUP_DAEMON_SOCKET_UNSAFE" {
+		t.Fatalf("unsafe socket mode accepted: %v", err)
+	}
+	if err := os.Chmod(statusPath, 0o660); err != nil {
+		t.Fatal(err)
+	}
+	if err := system.runtimeSocketContracts(uint32(os.Geteuid() + 1)); err == nil ||
+		err.Error() != "SETUP_DAEMON_SOCKET_UNSAFE" {
+		t.Fatalf("wrong socket ownership accepted: %v", err)
+	}
+	status.(*net.UnixListener).SetUnlinkOnClose(false)
+	if err := status.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(statusPath); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statusPath, []byte("not-a-socket"), 0o660); err != nil {
+		t.Fatal(err)
+	}
+	if err := system.runtimeSocketContracts(uint32(os.Geteuid())); err == nil ||
+		err.Error() != "SETUP_DAEMON_SOCKET_UNSAFE" {
+		t.Fatalf("wrong socket type accepted: %v", err)
+	}
+}
+
+func TestRuntimeSnapshotRejectsEstablishedDegradation(t *testing.T) {
+	bootstrap := health.Snapshot{
+		Schema: health.StatusSchema, Version: "2.1.0", Status: "DEGRADED",
+		Reason: "no applied or committed policy generation exists", Database: "ok",
+		Managed: true,
+	}
+	if err := validateRuntimeSnapshot(bootstrap); err != nil {
+		t.Fatalf("exact clean-host bootstrap state rejected: %v", err)
+	}
+	healthy := health.Snapshot{
+		Schema: health.StatusSchema, Version: "2.1.0", Status: "HEALTHY",
+		Active: true, PolicyMatch: true, KillSwitchEnforced: true,
+	}
+	if err := validateRuntimeSnapshot(healthy); err != nil {
+		t.Fatalf("healthy daemon rejected: %v", err)
+	}
+	for _, snapshot := range []health.Snapshot{
+		{Schema: health.StatusSchema, Version: "2.1.0", Status: "DEGRADED", Database: "degraded", Managed: true},
+		{Schema: health.StatusSchema, Version: "2.1.0", Status: "DEGRADED", Reason: bootstrap.Reason, Database: "ok"},
+		{Schema: health.StatusSchema, Status: "HEALTHY"},
+		{Schema: health.StatusSchema, Version: "2.1.0", Status: "HEALTHY"},
+	} {
+		if err := validateRuntimeSnapshot(snapshot); err == nil {
+			t.Fatalf("unsafe runtime status accepted: %#v", snapshot)
+		}
+	}
+}
+
+func TestRuntimeAPIReadinessUsesStatusAndAuthenticatedControl(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("root peer credentials are required for the control-socket readiness proof")
+	}
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	statusPath := filepath.Join(root, "status.sock")
+	controlPath := filepath.Join(root, "control.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	server := &api.Server{
+		Handler: setupAPIHandler{status: health.Snapshot{
+			Schema: health.StatusSchema, Version: "2.1.0", Status: "HEALTHY",
+			Active: true, PolicyMatch: true, KillSwitchEnforced: true,
+		}},
+		StatusPath: statusPath, ControlPath: controlPath,
+	}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	for deadline := time.Now().Add(time.Second); ; {
+		if statusInfo, statusErr := os.Lstat(statusPath); statusErr == nil && statusInfo.Mode()&os.ModeSocket != 0 {
+			if controlInfo, controlErr := os.Lstat(controlPath); controlErr == nil && controlInfo.Mode()&os.ModeSocket != 0 {
+				break
+			}
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("daemon API sockets did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	system := &System{Paths: Paths{StatusSocket: statusPath, ControlSocket: controlPath}}
+	if err := system.runtimeAPIReady(context.Background()); err != nil {
+		cancel()
+		t.Fatalf("protected daemon API readiness failed: %v", err)
+	}
+	cancel()
+	<-done
+}
+
+func TestDockerBackupCapturesSocketPresenceExactly(t *testing.T) {
+	runner := &systemRunner{outputs: map[string][]byte{
+		"systemctl show --property=LoadState,ActiveState docker.service": []byte("LoadState=loaded\nActiveState=active\n"),
+		"systemctl show --property=LoadState,ActiveState docker.socket":  []byte("LoadState=loaded\nActiveState=inactive\n"),
+	}}
+	system, plan, _ := configuredDockerPlan(t, runner, false)
+	directory, err := system.Backup(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := readBackup(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manifest.Units["docker.socket"]; !ok {
+		t.Fatal("present Docker socket state was not captured")
+	}
+	runner.outputs["systemctl show --property=LoadState,ActiveState docker.socket"] = []byte("LoadState=not-found\nActiveState=inactive\n")
+	system.Now = func() time.Time { return time.Now().Add(time.Second) }
+	directory, err = system.Backup(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err = readBackup(directory)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := manifest.Units["docker.socket"]; ok {
+		t.Fatal("absent Docker socket was recorded as present")
+	}
+	runner.outputs["systemctl show --property=LoadState,ActiveState docker.socket"] = []byte("LoadState=loaded\nActiveState=failed\n")
+	system.Now = func() time.Time { return time.Now().Add(2 * time.Second) }
+	if _, err := system.Backup(context.Background(), plan); err == nil ||
+		err.Error() != "SETUP_BACKUP_DOCKER_SOCKET_STATE_INVALID" {
+		t.Fatalf("ambiguous Docker socket state accepted: %v", err)
 	}
 }
 
 func TestFinalDependencyPublicationFailureBranches(t *testing.T) {
-	t.Run("marker", func(t *testing.T) {
+	t.Run("initramfs-manager", func(t *testing.T) {
 		runner := &systemRunner{}
 		system, paths := testSystem(t, runner)
-		if err := os.MkdirAll(filepath.Dir(paths.InitramfsMarker), 0o700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.WriteFile(paths.InitramfsMarker, []byte("foreign\n"), 0o600); err != nil {
-			t.Fatal(err)
-		}
+		runner.fail = paths.InitramfsManager + " rebuild-enabled"
 		if err := system.PublishFinalDependencies(context.Background(), Plan{}); err == nil ||
-			err.Error() != "SETUP_INITRAMFS_MARKER_INVALID" {
-			t.Fatalf("invalid marker error=%v", err)
+			err.Error() != "SETUP_INITRAMFS_GUARD_FAILED" {
+			t.Fatalf("manager error=%v", err)
 		}
 	})
 	t.Run("dependency-target", func(t *testing.T) {
@@ -802,6 +1276,62 @@ func TestManagedDockerOwnershipForwardingAndRollback(t *testing.T) {
 	}
 }
 
+func TestPostRebootRollbackRestoresDockerBeforeHoldRelease(t *testing.T) {
+	runner := &systemRunner{}
+	system, plan, paths := configuredDockerPlan(t, runner, false)
+	runner.outputs["systemctl is-active --quiet docker.service"] = []byte("active\n")
+	cmdline := filepath.Join(t.TempDir(), "cmdline")
+	writeFixture(t, cmdline, []byte("root=/dev/test ro\n"), 0o600)
+	system.Paths.ProcCmdline = cmdline
+	backup, err := system.Backup(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest, err := readBackup(backup)
+	if err != nil {
+		t.Fatal(err)
+	}
+	manifest.Boot = &bootBackup{
+		Schema: bootBackupSchema, PreBootID: testBootID1,
+		MountSHA256:            strings.Repeat("a", 64),
+		KernelSHA256:           strings.Repeat("b", 64),
+		InitialGeneratedSHA256: strings.Repeat("c", 64),
+		ResumeEndpointIPv4:     []string{"198.51.100.8"},
+		ResumeDockerPresent:    true,
+		ResumeDockerClean:      true,
+		ResumeDockerNetworks:   plan.PrivateData.(*prepared).Intent.DockerNetworks,
+	}
+	if err := writeBackupManifest(manifest); err != nil {
+		t.Fatal(err)
+	}
+	original := append([]byte(nil), mustRead(t, paths.DockerDaemon)...)
+	writeFixture(t, paths.DockerDaemon, []byte("{\"iptables\":true}\n"), 0o600)
+	writeFixture(t, paths.DockerHoldService, []byte(dockerServiceHoldDropInData), 0o644)
+	writeFixture(t, paths.DockerHoldSocket, []byte(dockerSocketHoldDropInData), 0o644)
+	if err := os.MkdirAll(filepath.Dir(paths.DockerHoldRelease), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := system.Rollback(context.Background(), plan, Journal{
+		Phase: PhaseInstall, BackupDir: backup,
+	}); err != nil {
+		t.Fatalf("post-reboot Docker rollback failed: %v", err)
+	}
+	if !bytes.Equal(mustRead(t, paths.DockerDaemon), original) {
+		t.Fatal("rollback released Docker before restoring its exact daemon config")
+	}
+	joined := strings.Join(runner.commands, "\n")
+	reload := strings.Index(joined, "systemctl daemon-reload")
+	dockerRestore := strings.Index(joined, "systemctl restart docker.service")
+	if reload < 0 || dockerRestore < 0 || reload > dockerRestore {
+		t.Fatalf("Docker hold release/restore ordering is unsafe:\n%s", joined)
+	}
+	for _, path := range []string{paths.DockerHoldReady, paths.DockerHoldRelease} {
+		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("rollback retained Docker hold runtime state %s: %v", path, err)
+		}
+	}
+}
+
 func TestConfigureDockerRequiresImmediateRestartApproval(t *testing.T) {
 	id := strings.Repeat("b", 64)
 	runner := &systemRunner{outputs: map[string][]byte{
@@ -850,6 +1380,143 @@ func TestConfigureDockerRequiresImmediateRestartApproval(t *testing.T) {
 		}
 	}
 	_ = id
+}
+
+func TestResumeDockerConfirmationPrecedesHoldRelease(t *testing.T) {
+	runner := &systemRunner{}
+	system, plan, paths := configuredDockerPlan(t, runner, false)
+	plan.ResumeReady = true
+	writeFixture(t, paths.DockerHoldService, []byte(dockerServiceHoldDropInData), 0o644)
+	writeFixture(t, paths.DockerHoldSocket, []byte(dockerSocketHoldDropInData), 0o644)
+	if err := os.MkdirAll(filepath.Dir(paths.DockerHoldRelease), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	confirmed := 0
+	system.ConfirmDockerRestart = func(Summary) error {
+		confirmed++
+		if _, err := os.Lstat(paths.DockerHoldRelease); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("Docker hold was released before immediate confirmation: %v", err)
+		}
+		return nil
+	}
+	if err := system.ConfigureDocker(context.Background(), plan); err != nil {
+		t.Fatalf("confirmed resume restart failed: %v", err)
+	}
+	if confirmed != 1 {
+		t.Fatalf("resume restart confirmations=%d want=1", confirmed)
+	}
+	if present, err := protectedFixedRuntimeState(paths.DockerHoldRelease, dockerHoldReleaseData); err != nil || !present {
+		t.Fatalf("confirmed resume did not release Docker exactly: %t %v", present, err)
+	}
+	if err := system.cleanupDockerHold(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+
+	declinedRunner := &systemRunner{}
+	declined, declinedPlan, declinedPaths := configuredDockerPlan(t, declinedRunner, false)
+	declinedPlan.ResumeReady = true
+	writeFixture(t, declinedPaths.DockerHoldService, []byte(dockerServiceHoldDropInData), 0o644)
+	writeFixture(t, declinedPaths.DockerHoldSocket, []byte(dockerSocketHoldDropInData), 0o644)
+	declined.ConfirmDockerRestart = func(Summary) error { return errors.New("declined") }
+	if err := declined.ConfigureDocker(context.Background(), declinedPlan); err == nil || err.Error() != "declined" {
+		t.Fatalf("resume confirmation refusal was not preserved: %v", err)
+	}
+	if _, err := os.Lstat(declinedPaths.DockerHoldRelease); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("declined resume released Docker: %v", err)
+	}
+}
+
+func TestResumeInstallRequiresInactiveGeneratedDockerHold(t *testing.T) {
+	for _, active := range []bool{false, true} {
+		t.Run(map[bool]string{false: "inactive", true: "active"}[active], func(t *testing.T) {
+			runner := &systemRunner{}
+			system, plan, paths := configuredDockerPlan(t, runner, false)
+			plan.ResumeReady = true
+			private, err := privatePlan(plan)
+			if err != nil {
+				t.Fatal(err)
+			}
+			private.DockerData, private.DockerChanged, err = containers.ManagedDaemonConfig(paths.DockerDaemon)
+			if err != nil || private.DockerChanged {
+				t.Fatalf("invalid resume fixture: changed=%t err=%v", private.DockerChanged, err)
+			}
+			private.PolicyData = []byte("table inet nftfw_filter {}\n")
+			writeFixture(t, paths.DockerHoldService, []byte(dockerServiceHoldDropInData), 0o644)
+			writeFixture(t, paths.DockerHoldSocket, []byte(dockerSocketHoldDropInData), 0o644)
+			if active {
+				runner.outputs["systemctl is-active --quiet docker.service"] = []byte("active\n")
+			}
+			err = system.Install(context.Background(), plan)
+			if active {
+				if err == nil || err.Error() != "SETUP_DOCKER_STARTED_BEFORE_OWNERSHIP" {
+					t.Fatalf("early Docker start was accepted: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("inactive generated Docker hold was refused: %v", err)
+			}
+		})
+	}
+}
+
+func TestManagedDisabledSysctlNeverReenablesLoopback(t *testing.T) {
+	data := string(renderSysctl([]string{"eth0"}, true, false))
+	if !strings.Contains(data, "net.ipv6.conf.lo.disable_ipv6 = 1\n") ||
+		strings.Contains(data, "net.ipv6.conf.lo.disable_ipv6 = 0") {
+		t.Fatalf("managed disabled policy attempted to re-enable loopback IPv6: %q", data)
+	}
+	bootData := string(renderSysctl([]string{"eth0"}, true, true))
+	if bootData != "# Managed by NFT Firewall V2.\nnet.ipv4.ip_forward = 1\n" {
+		t.Fatalf("kernel-disabled policy retained unavailable IPv6 sysctls: %q", bootData)
+	}
+	runner := &systemRunner{}
+	system, plan, paths := configuredDockerPlan(t, runner, false)
+	plan.ResumeReady = true
+	writeFixture(t, paths.DockerHoldService, []byte(dockerServiceHoldDropInData), 0o644)
+	writeFixture(t, paths.DockerHoldSocket, []byte(dockerSocketHoldDropInData), 0o644)
+	private, err := privatePlan(plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	private.PolicyData = []byte("table inet nftfw_filter {}\n")
+	private.DockerData, private.DockerChanged, err = containers.ManagedDaemonConfig(system.Paths.DockerDaemon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := system.Install(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	joined := strings.Join(runner.commands, "\n")
+	if strings.Contains(joined, "sysctl -w net.ipv6.conf.lo.disable_ipv6=0") ||
+		!strings.Contains(joined, "sysctl -w net.ipv6.conf.lo.disable_ipv6=1") {
+		t.Fatalf("runtime setup loopback IPv6 ownership is unsafe:\n%s", joined)
+	}
+
+	bootRunner := &systemRunner{}
+	bootSystem, bootPlan, bootPaths := configuredDockerPlan(t, bootRunner, false)
+	bootPlan.ResumeReady = true
+	bootPlan.Summary.BootPolicy = ManagedBootPolicy
+	writeFixture(t, bootPaths.DockerHoldService, []byte(dockerServiceHoldDropInData), 0o644)
+	writeFixture(t, bootPaths.DockerHoldSocket, []byte(dockerSocketHoldDropInData), 0o644)
+	bootPrivate, err := privatePlan(bootPlan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	bootPrivate.PolicyData = []byte("table inet nftfw_filter {}\n")
+	bootPrivate.DockerData, bootPrivate.DockerChanged, err =
+		containers.ManagedDaemonConfig(bootSystem.Paths.DockerDaemon)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := bootSystem.Install(context.Background(), bootPlan); err != nil {
+		t.Fatal(err)
+	}
+	bootCommands := strings.Join(bootRunner.commands, "\n")
+	if strings.Contains(bootCommands, "sysctl -w net.ipv6.") ||
+		!strings.Contains(bootCommands, "sysctl -w net.ipv4.ip_forward=1") {
+		t.Fatalf("kernel-disabled resume touched an unavailable sysctl:\n%s", bootCommands)
+	}
 }
 
 func TestConfigureDockerFailureBranches(t *testing.T) {
@@ -1256,6 +1923,97 @@ func TestApplyCommitAndCommitInspectionFailures(t *testing.T) {
 	}
 }
 
+func TestGenerationCommittedInitializesDefaultsAndPreservesInjections(t *testing.T) {
+	defaults := DefaultPaths()
+	fresh := &System{}
+	fresh.Status = func(context.Context) (health.Snapshot, error) {
+		if fresh.Paths.StatusSocket != defaults.StatusSocket {
+			t.Fatalf("fresh status socket=%q want=%q", fresh.Paths.StatusSocket, defaults.StatusSocket)
+		}
+		if fresh.Runner == nil {
+			t.Fatal("fresh commit-state inspector did not initialize its runner")
+		}
+		return health.Snapshot{
+			ActiveGeneration: 7, Active: true, PolicyMatch: true, KillSwitchEnforced: true,
+		}, nil
+	}
+	committed, err := fresh.GenerationCommitted(context.Background(), 7)
+	if err != nil || !committed {
+		t.Fatalf("fresh committed generation not recognized: committed=%t err=%v", committed, err)
+	}
+
+	const injectedStatus = "/private/test/status.sock"
+	injectedRunner := &systemRunner{}
+	injected := &System{Paths: Paths{StatusSocket: injectedStatus}, Runner: injectedRunner}
+	injected.Status = func(context.Context) (health.Snapshot, error) {
+		if injected.Paths.StatusSocket != injectedStatus {
+			t.Fatalf("injected status socket was overwritten: %q", injected.Paths.StatusSocket)
+		}
+		if injected.Runner != injectedRunner {
+			t.Fatal("injected runner was overwritten")
+		}
+		return health.Snapshot{
+			ActiveGeneration: 7, PendingGeneration: 8, Active: true,
+			PolicyMatch: true, KillSwitchEnforced: true,
+		}, nil
+	}
+	committed, err = injected.GenerationCommitted(context.Background(), 7)
+	if err != nil || committed {
+		t.Fatalf("pending generation was accepted as committed: committed=%t err=%v", committed, err)
+	}
+}
+
+func TestGenerationCommittedFailsClosedOnUnavailableOrMalformedStatus(t *testing.T) {
+	missing := filepath.Join(t.TempDir(), "missing-status.sock")
+	system := &System{Paths: Paths{StatusSocket: missing}}
+	if committed, err := system.GenerationCommitted(context.Background(), 7); err == nil ||
+		err.Error() != "SETUP_COMMIT_STATE_UNKNOWN" || committed {
+		t.Fatalf("missing status evidence did not fail closed: committed=%t err=%v", committed, err)
+	}
+	if system.Paths.StatusSocket != missing {
+		t.Fatalf("missing injected status path was overwritten: %q", system.Paths.StatusSocket)
+	}
+
+	root := t.TempDir()
+	if err := os.Chmod(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statusPath := filepath.Join(root, "status.sock")
+	controlPath := filepath.Join(root, "control.sock")
+	ctx, cancel := context.WithCancel(context.Background())
+	server := &api.Server{
+		Handler:    setupAPIHandler{status: "not-a-health-snapshot"},
+		StatusPath: statusPath, ControlPath: controlPath,
+	}
+	done := make(chan error, 1)
+	go func() { done <- server.Serve(ctx) }()
+	for deadline := time.Now().Add(time.Second); ; {
+		select {
+		case err := <-done:
+			cancel()
+			t.Fatalf("malformed-status server failed: %v", err)
+		default:
+		}
+		if _, err := os.Stat(statusPath); err == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			cancel()
+			t.Fatal("malformed-status socket did not start")
+		}
+		time.Sleep(time.Millisecond)
+	}
+	malformed := &System{Paths: Paths{StatusSocket: statusPath}}
+	committed, err := malformed.GenerationCommitted(context.Background(), 7)
+	if err == nil || err.Error() != "SETUP_COMMIT_STATE_UNKNOWN" || committed {
+		cancel()
+		<-done
+		t.Fatalf("malformed status evidence did not fail closed: committed=%t err=%v", committed, err)
+	}
+	cancel()
+	<-done
+}
+
 func TestResolveAndRouteHelpers(t *testing.T) {
 	addresses, err := resolveIPv4(context.Background(), "198.51.100.8")
 	if err != nil || len(addresses) != 1 || addresses[0].String() != "198.51.100.8" {
@@ -1603,14 +2361,74 @@ func TestStatusSocketDecode(t *testing.T) {
 }
 
 func TestPhaseTunnelClassification(t *testing.T) {
-	for _, phase := range []Phase{PhaseTunnel, PhaseValidate, PhaseCommit, PhaseHandoff, PhaseBoot, PhaseFinalize, PhaseComplete} {
+	for _, phase := range []Phase{
+		PhaseTunnel, PhaseValidate, PhaseCommit, PhaseHandoff, PhaseBoot, PhaseFinalize,
+		PhaseComplete, PhaseRollback, PhaseFailed,
+	} {
 		if !phaseMayHaveTunnel(phase) {
 			t.Fatalf("phase %s should permit tunnel cleanup", phase)
 		}
 	}
-	for _, phase := range []Phase{PhaseInspect, PhaseBackup, PhaseGuard, PhaseInstall, PhaseDocker, PhaseRuntime, PhaseApply} {
+	for _, phase := range []Phase{
+		PhaseInspect, PhaseBackup, PhaseGuard, PhaseInstall, PhaseDocker, PhaseRuntime, PhaseApply,
+	} {
 		if phaseMayHaveTunnel(phase) {
 			t.Fatalf("phase %s unexpectedly permits tunnel cleanup", phase)
+		}
+	}
+}
+
+func TestManagedRollbackUsesCanonicalRoutingIdentityAndOriginPhase(t *testing.T) {
+	runner := &systemRunner{}
+	system, _ := testSystem(t, runner)
+	plan, err := system.Prepare(context.Background(), "/provider.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := system.Backup(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner.commands = nil
+	if err := system.Rollback(context.Background(), plan, Journal{
+		Phase: PhaseValidate, Status: "rolling_back", Generation: 7,
+		BackupDir: backup, Summary: plan.Summary,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	commands := strings.Join(runner.commands, "\n")
+	for _, want := range []string{
+		"ip -4 rule del pref 32765 not fwmark 0xca6c table 51820",
+		"ip -4 rule del pref 32764 table main suppress_prefixlength 0",
+		"ip -4 route flush table 51820",
+		"ip link delete dev nftfw0",
+	} {
+		if !strings.Contains(commands, want) {
+			t.Fatalf("managed rollback omitted canonical routing command %q:\n%s", want, commands)
+		}
+	}
+}
+
+func TestManagedRollbackRouteRejectsNoncanonicalRecoveryIdentity(t *testing.T) {
+	valid := Summary{
+		Schema: "nftfw.setup-plan.v1", VPNInterface: intent.VPNInterface,
+		ResolverMode: string(routing.ResolverNone),
+	}
+	route, err := managedRollbackRoute(valid)
+	if err != nil || route.Interface != intent.VPNInterface || route.Fwmark != intent.VPNFwmark ||
+		route.Table != routing.DefaultTable || route.Resolver != routing.ResolverNone {
+		t.Fatalf("canonical rollback route invalid: %#v %v", route, err)
+	}
+	for _, mutate := range []func(*Summary){
+		func(summary *Summary) { summary.VPNInterface = "wg-attacker" },
+		func(summary *Summary) { summary.VPNInterface = "" },
+		func(summary *Summary) { summary.ResolverMode = "forged" },
+	} {
+		summary := valid
+		mutate(&summary)
+		if _, err := managedRollbackRoute(summary); err == nil ||
+			err.Error() != "SETUP_ROLLBACK_PLAN_INVALID" {
+			t.Fatalf("noncanonical rollback identity accepted: %#v err=%v", summary, err)
 		}
 	}
 }
@@ -1690,7 +2508,10 @@ func TestRollbackReportsEachIncompleteRecoveryClass(t *testing.T) {
 		system, _ := testSystem(t, &systemRunner{})
 		err := system.Rollback(context.Background(), Plan{}, Journal{
 			Phase: PhaseInstall, BackupDir: filepath.Join(t.TempDir(), "missing"),
-			Summary: Summary{Schema: "nftfw.setup-plan.v1"},
+			Summary: Summary{
+				Schema: "nftfw.setup-plan.v1", VPNInterface: intent.VPNInterface,
+				ResolverMode: string(routing.ResolverNone),
+			},
 		})
 		if err == nil || !strings.Contains(err.Error(), "RESTORE") {
 			t.Fatalf("backup restore failure not reported: %v", err)
