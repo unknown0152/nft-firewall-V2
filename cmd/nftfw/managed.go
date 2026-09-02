@@ -385,7 +385,16 @@ func setupRollbackCommand(args []string) error {
 			return errors.New("SETUP_ROLLBACK_REBOOT_STILL_REQUIRED")
 		}
 		journal.Status, journal.Phase, journal.ErrorCode = "rolled_back", managedsetup.PhaseFailed, ""
-		journal.Committed, journal.Generation = false, 0
+		// An uncommitted first-setup generation remains the durable identity
+		// that binds its rolled-back database row, immutable snapshot, backup,
+		// and terminal journal. Clearing it here makes strict retry lineage
+		// impossible after the inverse boot. A committed journal instead comes
+		// from package boot-policy handoff, which is not a complete firewall
+		// rollback and must not be published as retryable generation evidence.
+		if journal.Committed {
+			journal.Generation = 0
+		}
+		journal.Committed = false
 		journal.UpdatedAt = time.Now().UTC()
 		if err := store.Write(journal); err != nil {
 			return errors.New("SETUP_RECOVERY_RESULT_WRITE_FAILED")

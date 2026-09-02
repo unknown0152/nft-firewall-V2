@@ -79,7 +79,12 @@ two consecutive managed boots with zero pre-readiness packets, a
 contradictory boot with zero guest packets, package removal, and exact 2.0.3
 rollback. The complete source gates pass as well. A frozen commit, two
 independent quarantined candidates, and their external comparison are still
-required before renewed E-R2; this tree is not yet a release.
+required before renewed E-R2. The first renewed E-R2 retry run also proved
+that inverse-boot rollback cleared the terminal journal generation while the
+database and immutable snapshots correctly retained it, blocking the next
+strict retry. Amendment Z preserves that generation only for an uncommitted
+first-setup rollback and keeps package-only/pre-generation paths at zero. This
+tree remains source-only and is not yet a release.
 
 ## Supported clean-host setup
 

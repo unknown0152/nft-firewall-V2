@@ -200,6 +200,51 @@ func TestRetiredFirstSetupRetryPreservesMonotonicState(t *testing.T) {
 	}
 }
 
+func TestRetiredFirstSetupRequiresInverseBootTerminalGeneration(t *testing.T) {
+	fixture := newRetiredSetupFixture(t)
+	snapshot, err := fixture.system.Discover(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeDB, err := digestTestFile(filepath.Join(fixture.paths.StateDir, "generation-state", "state.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	beforeLedger, err := digestTestFile(filepath.Join(fixture.paths.StateDir, "provenance-ledger.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	terminal, err := fixture.journal.Read()
+	if err != nil || terminal.Generation != fixture.generation {
+		t.Fatalf("invalid retained terminal fixture: %#v err=%v", terminal, err)
+	}
+	terminal.Generation = 0
+	if err := fixture.journal.Write(terminal); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := inspectRetiredFirstSetup(
+		context.Background(), fixture.runner, fixture.paths, snapshot,
+	); err == nil || err.Error() != "retired setup current journal is not the latest generation" {
+		t.Fatalf("cleared inverse-boot generation was not refused: %v", err)
+	}
+	terminal.Generation = fixture.generation
+	if err := fixture.journal.Write(terminal); err != nil {
+		t.Fatal(err)
+	}
+	classified, err := inspectRetiredFirstSetup(
+		context.Background(), fixture.runner, fixture.paths, snapshot,
+	)
+	if err != nil || classified.LatestGeneration != fixture.generation ||
+		!validSHA256(classified.PriorJournalSHA256) {
+		t.Fatalf("preserved inverse-boot lineage was not retryable: %#v err=%v", classified, err)
+	}
+	afterDB, _ := digestTestFile(filepath.Join(fixture.paths.StateDir, "generation-state", "state.db"))
+	afterLedger, _ := digestTestFile(filepath.Join(fixture.paths.StateDir, "provenance-ledger.db"))
+	if beforeDB != afterDB || beforeLedger != afterLedger {
+		t.Fatal("inverse-boot lineage classification mutated retained state")
+	}
+}
+
 func TestRetiredFirstSetupRepeatedTerminalLineage(t *testing.T) {
 	fixture := newRetiredSetupFixture(t)
 	plan, err := fixture.system.Prepare(context.Background(), "/provider.conf")

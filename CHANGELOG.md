@@ -99,6 +99,10 @@
   atomically published and directory-synced lineage before the next setup can
   mutate; refuse collisions, unsafe paths, changed evidence, and incomplete
   archival while remaining retry-safe across publication process death.
+- Preserve the exact rolled-back generation when an uncommitted first setup
+  crosses the managed inverse-boot rollback. Keep genuine pre-generation and
+  package-only boot handoffs at generation zero, so strict retry lineage can
+  advance monotonically without inventing rollback evidence.
 - Add setup, importer, routing, discovery, intent, rollback, benchmark,
   packaging, and reproducible-candidate validation.
 

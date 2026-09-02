@@ -187,9 +187,11 @@ type setupRecoveryFixture struct {
 	err         error
 	rollbackErr error
 	recoveryErr error
+	finalizeErr error
 	calls       []string
 	onRollback  func(managedsetup.Journal)
 	onRecovery  func(managedsetup.Journal)
+	onFinalize  func(managedsetup.Journal)
 }
 
 func (f *setupRecoveryFixture) GenerationCommitted(_ context.Context, generation uint64) (bool, error) {
@@ -215,6 +217,16 @@ func (f *setupRecoveryFixture) RecoverCommitted(
 		f.onRecovery(journal)
 	}
 	return f.recoveryErr
+}
+
+func (f *setupRecoveryFixture) FinalizeBootRollback(
+	_ context.Context, journal managedsetup.Journal,
+) error {
+	f.calls = append(f.calls, "finalize:"+strconv.FormatUint(journal.Generation, 10))
+	if f.onFinalize != nil {
+		f.onFinalize(journal)
+	}
+	return f.finalizeErr
 }
 
 type setupRecoveryJournalFixture struct {
@@ -612,6 +624,108 @@ func TestOutOfProcessSetupRollbackClassifiesEveryPostApplyPrecommitPhase(t *test
 				t.Fatalf("uncommitted process-death journal not terminalized: %#v %v", journal, err)
 			}
 		})
+	}
+}
+
+func TestInverseBootRollbackFinalizationPreservesOnlyUncommittedGeneration(t *testing.T) {
+	for _, test := range []struct {
+		name           string
+		generation     uint64
+		committed      bool
+		wantGeneration uint64
+	}{
+		{name: "retained-first-setup-generation", generation: 7, wantGeneration: 7},
+		{name: "pre-generation-rollback", generation: 0, wantGeneration: 0},
+		{name: "committed-package-handoff", generation: 7, committed: true, wantGeneration: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _ = withManagedTestEnvironment(t)
+			now := time.Now().UTC()
+			backup := filepath.Join(managedStateRoot, "setup/backups/inverse-boot-"+test.name)
+			store := managedsetup.FileJournal{Path: setupJournalPath}
+			journal := managedsetup.Journal{
+				Schema: "nftfw.setup-journal.v1", Transaction: "inverse-boot-" + test.name,
+				Phase: managedsetup.PhaseFailed, Status: "rollback_reboot_required",
+				StartedAt: now.Add(-time.Minute), UpdatedAt: now, Deadline: now.Add(time.Minute),
+				BackupDir: backup, Generation: test.generation, Committed: test.committed,
+				Summary: managedsetup.Summary{
+					Schema: "nftfw.setup-plan.v1", BootPolicy: managedsetup.ManagedBootPolicy,
+				},
+			}
+			if err := store.Write(journal); err != nil {
+				t.Fatal(err)
+			}
+			fixture := &setupRecoveryFixture{}
+			setupRecoverySystem = func() setupRecoveryExecutor { return fixture }
+			if err := setupRollbackCommand(nil); err != nil {
+				t.Fatalf("inverse-boot rollback finalization failed: %v", err)
+			}
+			if strings.Join(fixture.calls, ",") != "finalize:"+strconv.FormatUint(test.generation, 10) {
+				t.Fatalf("unexpected finalizer calls: %v", fixture.calls)
+			}
+			final, err := store.Read()
+			if err != nil || final.Status != "rolled_back" || final.Phase != managedsetup.PhaseFailed ||
+				final.Committed || final.Generation != test.wantGeneration || final.BackupDir != backup {
+				t.Fatalf("invalid inverse-boot terminal lineage: %#v err=%v", final, err)
+			}
+			if err := validateSetupWatchdogJournal(final); err != nil {
+				t.Fatalf("terminal inverse-boot journal was not valid: %v", err)
+			}
+		})
+	}
+}
+
+func TestInverseBootRollbackFinalizerFailureCannotPublishTerminalState(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	now := time.Now().UTC()
+	store := managedsetup.FileJournal{Path: setupJournalPath}
+	journal := managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "inverse-boot-finalizer-failure",
+		Phase: managedsetup.PhaseFailed, Status: "rollback_reboot_required",
+		StartedAt: now.Add(-time.Minute), UpdatedAt: now, Deadline: now.Add(time.Minute),
+		BackupDir:  filepath.Join(managedStateRoot, "setup/backups/inverse-boot-finalizer-failure"),
+		Generation: 7,
+		Summary: managedsetup.Summary{
+			Schema: "nftfw.setup-plan.v1", BootPolicy: managedsetup.ManagedBootPolicy,
+		},
+	}
+	if err := store.Write(journal); err != nil {
+		t.Fatal(err)
+	}
+	fixture := &setupRecoveryFixture{finalizeErr: errors.New("injected finalizer failure")}
+	setupRecoverySystem = func() setupRecoveryExecutor { return fixture }
+	if err := setupRollbackCommand(nil); err == nil || err.Error() != "SETUP_ROLLBACK_REBOOT_STILL_REQUIRED" {
+		t.Fatalf("finalizer failure was not fail-closed: %v", err)
+	}
+	retained, err := store.Read()
+	if err != nil || !reflect.DeepEqual(retained, journal) {
+		t.Fatalf("finalizer failure changed durable state: %#v err=%v", retained, err)
+	}
+}
+
+func TestInverseBootRollbackTerminalWriteFailureRetainsRebootState(t *testing.T) {
+	_, _ = withManagedTestEnvironment(t)
+	now := time.Now().UTC()
+	journal := managedsetup.Journal{
+		Schema: "nftfw.setup-journal.v1", Transaction: "inverse-boot-write-failure",
+		Phase: managedsetup.PhaseFailed, Status: "rollback_reboot_required",
+		StartedAt: now.Add(-time.Minute), UpdatedAt: now, Deadline: now.Add(time.Minute),
+		BackupDir:  filepath.Join(managedStateRoot, "setup/backups/inverse-boot-write-failure"),
+		Generation: 7,
+		Summary: managedsetup.Summary{
+			Schema: "nftfw.setup-plan.v1", BootPolicy: managedsetup.ManagedBootPolicy,
+		},
+	}
+	store := &setupRecoveryJournalFixture{journal: journal, failWrite: 1}
+	setupRecoveryJournal = func() managedsetup.JournalStore { return store }
+	fixture := &setupRecoveryFixture{}
+	setupRecoverySystem = func() setupRecoveryExecutor { return fixture }
+	if err := setupRollbackCommand(nil); err == nil || err.Error() != "SETUP_RECOVERY_RESULT_WRITE_FAILED" {
+		t.Fatalf("terminal write failure was not fail-closed: %v", err)
+	}
+	if !reflect.DeepEqual(store.journal, journal) || len(store.writes) != 1 ||
+		store.writes[0].Status != "rolled_back" || store.writes[0].Generation != journal.Generation {
+		t.Fatalf("terminal write failure published or changed lineage: journal=%#v writes=%#v", store.journal, store.writes)
 	}
 }
 
@@ -1066,6 +1180,48 @@ func TestSetupPackageBootHandoffPublishesRollbackRebootState(t *testing.T) {
 	}
 	if err := validateSetupWatchdogJournal(updated); err != nil {
 		t.Fatalf("package handoff journal was not a valid explicit state: %v", err)
+	}
+}
+
+func TestSetupPackageBootHandoffWithoutRebootDoesNotPublishRetryGeneration(t *testing.T) {
+	for _, test := range []struct {
+		name      string
+		phase     managedsetup.Phase
+		status    string
+		committed bool
+	}{
+		{name: "committed-install", phase: managedsetup.PhaseComplete, status: "complete", committed: true},
+		{name: "failed-setup", phase: managedsetup.PhaseFailed, status: "rollback_reboot_required"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			_, _ = withManagedTestEnvironment(t)
+			now := time.Now().UTC()
+			store := managedsetup.FileJournal{Path: setupJournalPath}
+			journal := managedsetup.Journal{
+				Schema: "nftfw.setup-journal.v1", Transaction: "boot-handoff-no-reboot-" + test.name,
+				Phase: test.phase, Status: test.status,
+				StartedAt: now, UpdatedAt: now, Deadline: now.Add(time.Minute),
+				BackupDir:  filepath.Join(managedStateRoot, "setup/backups/boot-handoff-no-reboot-"+test.name),
+				Generation: 7, Committed: test.committed,
+				Summary: managedsetup.Summary{
+					Schema: "nftfw.setup-plan.v1", BootPolicy: managedsetup.ManagedBootPolicy,
+				},
+			}
+			if err := store.Write(journal); err != nil {
+				t.Fatal(err)
+			}
+			setupBootHandoff = func(context.Context, managedsetup.Journal) (bool, error) {
+				return false, nil
+			}
+			if err := setupBootHandoffCommand([]string{"--package-remove"}); err != nil {
+				t.Fatal(err)
+			}
+			updated, err := store.Read()
+			if err != nil || updated.Status != "rolled_back" || updated.Phase != managedsetup.PhaseFailed ||
+				updated.Committed || updated.Generation != 0 {
+				t.Fatalf("package-only handoff published retry lineage: %#v err=%v", updated, err)
+			}
+		})
 	}
 }
 

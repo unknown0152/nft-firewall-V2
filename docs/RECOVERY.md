@@ -411,13 +411,19 @@ generated configuration and reaches `rolled_back`. Rollback after the kernel
 has booted with managed disablement restores the next-boot files exactly but
 reports `rollback_reboot_required`; it never claims the running kernel has
 changed. Reboot explicitly, then run `nftfw setup rollback` once more to
-verify the restored boot and terminalize `rolled_back`.
+verify the restored boot and terminalize `rolled_back`. If safe apply already
+allocated an uncommitted generation, that exact generation remains in the
+terminal journal so its rolled-back database row, immutable snapshot,
+protected backup, and next retry stay cryptographically and monotonically
+bound. A rollback that never allocated a generation remains at zero.
 
 Package removal, the source uninstaller, and exact-2.0.3 downgrade invoke the
 same narrow boot handoff before the 2.1.0 helper disappears. They refuse a
 foreign or changed fragment/generated configuration or an unverifiable
 initramfs. When they print `rollback_reboot_required`, a reboot is still
 mandatory even though the on-disk next boot has already been restored.
+Package-only boot handoff is not a complete firewall rollback and therefore
+does not publish retained setup generation evidence as retryable.
 
 ## Managed WireGuard failure
 

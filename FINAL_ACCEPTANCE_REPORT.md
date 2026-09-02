@@ -11,16 +11,16 @@ Release approval status: STAGE_R_CANDIDATE_ONLY
 | Build date | `@BUILD_DATE@` |
 | Build disposition | `@RELEASE_DISPOSITION@` |
 | Artifact label | `@RELEASE_ARTIFACT_LABEL@` |
-| Source-only Stage E-R | AMENDMENT Y SOURCE GATES PASS; CANDIDATES PENDING |
-| Privileged Stage E-R2 | NOT AUTHORIZED for the Amendment Y working tree |
+| Source-only Stage E-R | AMENDMENT Z SOURCE GATES PASS; CANDIDATES PENDING |
+| Privileged Stage E-R2 | NOT AUTHORIZED for the Amendment Z working tree |
 | Publication | NOT AUTHORIZED |
 | Deployment | NOT AUTHORIZED |
 
 ## Source decision
 
-The 2.1.0 working source has passed the Amendment Y gate set and is accepted
+The 2.1.0 working source has passed the Amendment Z gate set and is accepted
 for a clean source freeze and the two intrinsically nondeployable candidate
-builds. The retained Amendment E-through-X source scope
+builds. The retained Amendment E-through-Y source scope
 includes Go 1.27, one-file managed setup, strict VPN import, managed routing,
 strict managed Docker IPv4 bridge adoption and forwarding ownership,
 the explicit dry-run-only existing-host adoption planner, CLI/dashboard
@@ -30,8 +30,11 @@ strict exact-2.0.3 absent-unit planning, the committed first-setup handoff,
 the two-pass pre-driver Debian GRUB transaction and exact guard handoff, and the
 protected exact-2.0.3 Debian rollback transaction. It also includes strict
 terminal first-setup retry classification, monotonic retained-state reentry,
-and checksum-bound durable terminal-journal lineage, plus package source,
-documentation, benchmarks, tests, and local nondeployable candidate builds.
+checksum-bound durable terminal-journal lineage, and the inverse-boot
+generation correction: an uncommitted first setup retains its exact rolled-back
+generation, while genuine pre-generation and package-only paths remain
+non-retryable. Package source, documentation, benchmarks, tests, and local
+nondeployable candidate builds are included.
 
 The candidate binaries permit only their quarantine-safe behavior, candidate
 daemon/web processes refuse startup, and candidate Debian packages refuse
@@ -62,6 +65,13 @@ live installation, firewall application, VPN interruption, or deployment.
   endpoint cache, and unchanged monotonic provenance are all proven together.
   The prior terminal journal is durably archived before the next transaction
   can mutate; collisions, partial evidence, and changed lineage refuse.
+- Inverse-boot rollback finalization preserves the exact nonzero generation
+  only for an uncommitted first setup. It publishes no terminal state when the
+  finalizer or journal write fails, keeps a genuine pre-generation rollback at
+  zero, and clears committed package-only handoff so it cannot masquerade as a
+  complete firewall rollback. A fresh disposable run repeats two failed
+  generations, nonmutating retry, generation-3 success, Docker/VPN leak
+  recovery, and two managed boots.
 - The temporary setup guard renders every prefix-bearing set with interval
   semantics, keeps VPN bootstrap endpoints restricted to canonical IPv4
   `/32` values, passes the real nftables parser in a gated disposable guest,
@@ -126,7 +136,7 @@ tag, remote publication, or current-server deployment requires still later
 identity-bound approval.
 
 Successive approved R2/source-disposable attempts hard-stopped safely and led
-through NFV2-064. Amendment W's W6 protected matrix passes exact retry,
+through NFV2-065. Amendment W's W6 protected matrix passes exact retry,
 generation-3 success, Docker VPN/leak recovery, and two managed boots; W7
 passes the real native initramfs package lifecycle. W11 then failed the
 mandatory zero-pre-readiness-packet gate: two IPv6 MLD/DAD frames left the
@@ -136,8 +146,11 @@ validation passed and froze as
 `e48d071783cd9a62ad3424c917957e4f0e6ea06a`. Its E-R2 private-build stage then
 exposed three deterministic privileged fixture failures before package
 construction. Amendment Y corrects only those fixtures; its focused and full
-ordinary/restrictive/root-disposable suites pass. The replacement clean freeze
-and two quarantined candidate builds may proceed. E-R2, tagging, publication,
+ordinary/restrictive/root-disposable suites pass. The following recovery run
+exposed the inverse-boot generation loss; Amendment Z corrects it and its
+direct, full, restrictive-umask, and source-only disposable lifecycle gates
+pass. The replacement clean freeze and two quarantined candidate builds may
+proceed. E-R2, tagging, publication,
 installation, and deployment remain outside this report.
 
 R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED

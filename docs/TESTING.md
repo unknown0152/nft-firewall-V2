@@ -1,6 +1,6 @@
 # Testing
 
-Current disposition: **2.1.0 AMENDMENT Y STAGE E-R SOURCE GATES PASS**.
+Current disposition: **2.1.0 AMENDMENT Z STAGE E-R SOURCE VALIDATION**.
 Source-only results are consolidated in `TEST_RESULTS.md`. The narrowly
 approved source-stage disposable GRUB/boot, native-initramfs, setup-guard, and
 exact-package rollback preflights have run. The complete namespace, Docker,
@@ -160,6 +160,18 @@ before package construction when two independent guests reproduced the three
 fixture defects corrected by Amendment Y. The Amendment Y focused and full
 root restrictive-umask regression now passes; replacement candidate
 construction follows only from the new clean frozen commit.
+
+Amendment Z adds the inverse-boot terminal-lineage regression. The CLI test
+proves that finalization preserves a nonzero generation only for an
+uncommitted first setup, leaves a genuine pre-generation rollback at zero,
+and prevents finalizer or journal-write failure from publishing a false
+terminal state. Package-only boot handoff remains non-retryable. The strict
+classifier test rejects a cleared/mismatched current generation, accepts the
+preserved exact generation without mutation, and binds the terminal checksum.
+The fresh disposable source transaction repeated and passed two validate-phase
+deaths, reboot/resume/inverse-reboot rollback, nonmutating retry, generation-3
+success, stable provenance, Docker VPN-only traffic, tunnel-loss zero leak,
+and repeated managed boots before the replacement source freeze.
 
 The setup-guard unit regression covers one and multiple endpoint `/32`
 elements, exact interval flags, deterministic order, malformed/broader-prefix

@@ -51,6 +51,10 @@ cache, and the monotonic provenance ledger. If it still returns
 `DISCOVERY_EXISTING_NFTFW_REQUIRES_ADOPT`, preserve `/var/lib/nftfw`, because
 one of those predicates is missing, changed, unsafe, or ambiguous. Manual
 cleanup would destroy the evidence needed to distinguish a safe retry.
+After an inverse-boot rollback, the terminal journal must retain the same
+nonzero generation as the latest rolled-back database row. A missing or
+mismatched generation is deliberately refused; preserve the state and use the
+documented recovery inspection rather than editing the journal or database.
 
 ### Setup reports `reboot_required` or `resume_ready`
 

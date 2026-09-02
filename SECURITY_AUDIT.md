@@ -2,11 +2,11 @@
 
 Audit date: 2026-08-16, 2026-08-17, 2026-08-23, 2026-08-24,
 2026-08-25, 2026-08-26, 2026-08-29, 2026-08-30, 2026-08-31, and
-2026-09-01 UTC. Scope: production Go, configuration/compiler,
+2026-09-01, and 2026-09-02 UTC. Scope: production Go, configuration/compiler,
 nftables ownership, Unix APIs, persistence/rollback, systemd, integrations,
 web, installers, tests, dependencies, Git history, and release contents.
 
-Current source disposition: **2.1.0 AMENDMENT Y SOURCE VALIDATED; CANDIDATES
+Current source disposition: **2.1.0 AMENDMENT Z SOURCE VALIDATED; CANDIDATES
 PENDING**.
 The Amendment W retry and native-lifecycle rows pass, but the mandatory W11
 boot capture reopened NFV2-057 before source freeze. Amendment X now supplies
@@ -36,7 +36,13 @@ ambient-umask directory fixtures and one deliberately impossible control API
 fixture, recorded as NFV2-064. Amendment Y explicitly establishes the unsafe
 directory modes, serves authenticated control status, refuses non-status
 control, and passes the focused plus complete suite as disposable guest root
-under `umask 0077`. Replacement candidate builds, renewed E-R2, tag
+under `umask 0077`. The next E-R2 recovery path exposed NFV2-065: inverse-boot
+finalization cleared the exact uncommitted generation while its rolled-back
+database row, immutable snapshot, backup, and provenance correctly remained.
+Amendment Z preserves that identity only for an uncommitted first setup and
+keeps pre-generation and package-only handoff paths non-retryable. Its direct,
+restrictive-umask, complete source, and disposable two-failure/eventual-success
+regressions pass. Replacement candidate builds, renewed E-R2, tag
 validation, publication, and deployment have not been executed. The findings
 below through NFV2-030 record the tagged 2.0.1 audit history; NFV2-031 through
 NFV2-041 record the accepted 2.0.2/2.0.3 release work; NFV2-042 onward records
@@ -129,6 +135,7 @@ and post-tag gates.
 | NFV2-062 | Exact downgrade could restore boot ownership before discovering that exact 2.0.3 rejects a v2.1-only configuration | HIGH | Extract and authenticate the bundle-bound exact old binary; run its parser with output suppressed before boot handoff and again immediately before dpkg; keep incompatible configuration on a fixed redacted refusal path | CLOSED at source boundary; ordering contracts, private-value non-disclosure, unchanged-package refusal, and compatible full disposable rollback PASS; complete renewed E-R2 repeat NOT EXECUTED |
 | NFV2-063 | The generated bridge accepted only the v2.1 systemd `root:nftfw-web` database group, refusing a genuine legacy root-CLI `root:root` schema-6 database | MEDIUM | Accept only the two real ownership histories while retaining UID 0, mode 0600, one link, protected parents, exact runtime GID, and exact schema history; reject every other group | CLOSED at source boundary; both positive histories and malformed/root-runtime/unrecognized-group/symlink/hard-link/mode/owner refusals PASS; genuine legacy-to-new-to-exact-old guest rollback PASS |
 | NFV2-064 | Two directory refusal tests inherited privileged `umask 0077` and therefore created safe mode-0700 fixtures, while the root-only readiness fixture required control status from a handler that rejected every control request | MEDIUM | Explicitly set and verify both intended mode-0750 unsafe directories; return the healthy snapshot only for control status; directly refuse a non-status control operation; retain all production validators, peer credentials, request validation, and readiness logic unchanged | CLOSED at source boundary; focused ordinary-user proof and focused plus complete disposable-root `umask 0077` suite PASS; renewed E-R2 NOT EXECUTED |
+| NFV2-065 | Inverse-boot rollback finalization cleared an uncommitted first-setup generation even though the rolled-back database row, immutable snapshot, backup, terminal journal lineage, and provenance remained bound to it | HIGH | Preserve the exact generation when finalizing only an uncommitted first-setup rollback; retain zero for genuine pre-generation rollback and clear package-only committed handoff so it cannot masquerade as complete retry evidence | CLOSED at source boundary; direct finalizer/write-failure/package-handoff/classifier proof plus disposable generations 1/2 exact rollback, nonmutating retry, and generation-3 success PASS; renewed E-R2 NOT EXECUTED |
 
 ## Adversarial review areas
 
@@ -194,6 +201,11 @@ the coverage/benchmark gates. Amendment Y's two exact directory-mode fixtures,
 authenticated control-status/non-status-refusal regression, and complete fresh
 disposable-root `umask 0077` suite also pass without production runtime source
 changes.
+Amendment Z's inverse-boot finalizer and strict retry-classifier regressions
+also pass. A fresh disposable transaction preserves generations 1 and 2
+through reboot, process death, inverse reboot, exact rollback, and dry-run
+reentry before committing generation 3; the existing Docker/VPN/leak/reboot
+lifecycle remains green.
 Candidate
 source/history/extracted-tree scans and two-parent comparison are generated
 only after the clean source freeze. Privileged R2, tagged package/archive

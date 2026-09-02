@@ -1,11 +1,11 @@
 # NFT Firewall V2 2.1.0 Source Test Results
 
-Source disposition: **AMENDMENT Y SOURCE VALIDATED; CANDIDATES PENDING**
+Source disposition: **AMENDMENT Z SOURCE VALIDATED; CANDIDATES PENDING**
 
-Validation date: 2026-09-01
+Validation date: 2026-09-02
 
 Reopened source baseline:
-`e48d071783cd9a62ad3424c917957e4f0e6ea06a`
+`e4953a52384b351cc57849068759e27fadc95ec2`
 
 This tracked report is the pre-build source snapshot. The later frozen commit,
 candidate build evidence, candidate comparison, R2 evidence, tag, and any
@@ -35,13 +35,14 @@ publication decision must remain external and checksummed.
 | Disposable exact-package rollback bundle regression | PASS; protected inputs, exact payload-equivalent bridge, exact-old configuration preflight, generated-script exact `iHR` acceptance, legacy-root/service-group database ownership, argument/state/identity/metadata refusal, deterministic tamper/path coverage, no host dpkg install |
 | Disposable exact-package rollback transaction | PASS; v2.1-only config refuses before mutation without value disclosure; complete, configured-bridge resume, and idempotent paths restore exact 2.0.3 and protected snapshots; external canonical-lock probe remains blocked while legacy backup succeeds through the private dpkg lock view; no lock residue |
 | Protected Amendment W managed transaction | PASS in W6; coherent Docker baseline, two validate-phase process deaths, exact rollback, nonmutating reentry, durable lineage, stable provenance, generation-3 success, all adopted Docker bridges through VPN, idempotence without Docker restart, zero-leak tunnel loss across Docker restart, recovery, and two managed boots |
+| Protected Amendment Z inverse-boot retry | PASS in a fresh source-only disposable run; uncommitted generations 1/2 survive inverse-boot finalization, strict dry-run reentry remains nonmutating, and generation 3 commits before the retained Docker/VPN/leak/two-boot lifecycle completes; not E-R2 |
 | Disposable native initramfs package lifecycle | PASS in W7; inert install, exact native ownership/order, idempotence, tamper/foreign refusal, disabled restoration, and purge cleanup |
 | Zero-pre-readiness-packet boot | **FAIL / HARD STOP in W11**; two guest-originated IPv6 MLD/DAD frames were captured before readiness although the post-boot sysctls were disabled. Init-top is not a sufficient pre-driver boundary |
 | Amendment X direct GRUB transaction | PASS; strict BIOS/EFI identity, conflicting manager/mount/mode/link/race refusal, normalized mount identity, generated-entry argument parser, explicit two-pass resume, failed update, exact rollback, package handoff, and redacted status |
 | Amendment X disposable GRUB/reboot/capture matrix | PASS; failed update, pre/post-reboot process death, rollback finalization, package removal/restored boot, two consecutive managed boots with zero packets before readiness and traffic after readiness, and contradictory identity with zero guest packets |
 | Static amd64/arm64 CI package build and inspection | PASS |
 | Dependency/license inventory | PASS, 29 non-main modules |
-| Overall statement coverage | PASS, 78.7% |
+| Overall statement coverage | PASS, 78.8% |
 | `internal/setup` coverage | PASS, 90.0% |
 | `internal/bootguard` coverage | PASS, 91.2% |
 | `internal/wgconfig` coverage | PASS, 90.6% |
@@ -143,14 +144,18 @@ publication decision must remain external and checksummed.
   explicitly sets and verifies both intended mode-`0750` unsafe directory
   fixtures and proves the root-only readiness fixture accepts authenticated
   control-socket status while refusing every non-status operation.
+- Inverse-boot rollback preserves the exact nonzero generation only for an
+  uncommitted first setup. Finalizer or terminal-journal publication failure
+  cannot claim completion, and package-only or genuine pre-generation handoff
+  cannot publish retry evidence. The strict classifier rejects a cleared or
+  mismatched generation without changing the database or provenance ledger.
 
 ## Performance source results
 
 The repeated source matrix remained inside the Amendment E budgets on the
-reference NUC. Amendment X's GRUB generated-entry verifier measured
-2.109-2.684 microseconds/op, 4672 B/op, and 22 allocations/op. The strict
-retained-state classifier was measured in ten independent samples at
-1.344-1.424 ms/op, 231255-249600 B/op, and 1040-1044 allocations/op. It
+reference NUC. The strict retained-state classifier was measured in ten
+independent Amendment Z samples at 1.328-1.390 ms/op,
+231082-232286 B/op, and 1040-1042 allocations/op. It
 includes canonical journal/history reads, exact backup
 verification, schema-6 generation inspection, immutable snapshot checks, and
 read-only provenance validation. Performance evidence is not privileged
@@ -159,7 +164,7 @@ network proof.
 ## Not executed under Stage E-R
 
 Successive approval-bound R2/source-disposable attempts hard-stopped safely
-and led through NFV2-064. Amendment W's retry, managed-transaction, and native
+and led through NFV2-065. Amendment W's retry, managed-transaction, and native
 initramfs lifecycle rows pass. The preserved W11 baseline reopened NFV2-057
 when two IPv6 control frames left the guest before init-top readiness.
 Amendment X passed its source-stage capture, boot/package, quality, coverage,
@@ -169,8 +174,11 @@ quarantined candidates. The following E-R2 stopped before package construction
 when both independent private-build guests exposed the same three privileged
 test-fixture defects. Amendment Y explicitly corrects only those fixtures.
 The affected tests and complete suite now pass both unprivileged and as root
-under `umask 0077` in a fresh disposable guest. This tracked snapshot precedes
-the replacement clean freeze and independent quarantined candidate builds.
+under `umask 0077` in a fresh disposable guest. Amendment Z then corrects the
+inverse-boot generation loss and repeats the exact two-failure, nonmutating
+retry, generation-3 success, Docker/VPN/leak, and managed-boot lifecycle in a
+fresh source-only disposable run. This tracked snapshot precedes the
+replacement clean freeze and independent quarantined candidate builds.
 
 | Gate | Result |
 | --- | --- |
@@ -181,6 +189,7 @@ the replacement clean freeze and independent quarantined candidate builds.
 | Clean-server Amendment X setup and reboot matrix | Source-stage PASS; W11 remains the preserved failing pre-X baseline and complete E-R2 repeat is NOT EXECUTED |
 | Privileged Docker ownership/traffic/rollback matrix | NOT EXECUTED |
 | Protected Amendment W managed retry matrix | PASS in W6; source-only disposable scope, not complete E-R2 |
+| Protected Amendment Z inverse-boot retry matrix | PASS; source-only disposable scope, not complete E-R2 |
 | Disposable exact-2.0.3 adoption-planner no-mutation matrix | NOT EXECUTED |
 | Real-provider VPN test | NOT EXECUTED |
 | Local release tag | NOT CREATED |
