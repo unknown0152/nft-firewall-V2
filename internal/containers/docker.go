@@ -51,7 +51,7 @@ func (o Observer) FirewallPolicy() (bool, string, error) {
 	return true, "docker firewall, forwarding, masquerade, and userland proxy ownership disabled", nil
 }
 func (o Observer) Networks(ctx context.Context) ([]Network, error) {
-	if len(o.Expected) == 0 {
+	if len(o.Expected) == 0 || len(o.Expected) > 62 {
 		return nil, errors.New("docker observation requires an explicit stable network authorization")
 	}
 	expected := make(map[string]config.DockerNetwork, len(o.Expected))
@@ -74,7 +74,11 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 	if err != nil {
 		return nil, err
 	}
-	var result []Network
+	type authorizedSummary struct {
+		id, name, driver string
+		wanted           config.DockerNetwork
+	}
+	var authorizedSummaries []authorizedSummary
 	names := splitLines(string(out))
 	if len(names) > 1024 {
 		return nil, errors.New("docker network count exceeds 1024")
@@ -109,65 +113,92 @@ func (o Observer) Networks(ctx context.Context) ([]Network, error) {
 		if !authorized {
 			return nil, fmt.Errorf("undeclared routed Docker bridge %q", name)
 		}
-		raw, err := o.output(ctx, 1<<20, bin, "--host", localDockerHost, "network", "inspect", "--", id)
-		if err != nil {
-			return nil, fmt.Errorf("inspect docker network %s by immutable observation ID: %w", name, err)
+		authorizedSummaries = append(authorizedSummaries, authorizedSummary{
+			id: id, name: name, driver: driver, wanted: wanted,
+		})
+	}
+	for name := range expected {
+		if !seenNames[name] {
+			return nil, fmt.Errorf("configured Docker network %q is absent", name)
 		}
-		var items []inspectedNetwork
-		if err := json.Unmarshal(raw, &items); err != nil {
-			return nil, fmt.Errorf("decode docker network %s: %w", name, err)
+	}
+	if len(authorizedSummaries) != len(expected) {
+		return nil, errors.New("docker authorized bridge observation is incomplete")
+	}
+	inspectArgs := []string{"--host", localDockerHost, "network", "inspect", "--"}
+	for _, summary := range authorizedSummaries {
+		inspectArgs = append(inspectArgs, summary.id)
+	}
+	inspectLimit := int64(len(authorizedSummaries)) * (1 << 20)
+	raw, err := o.output(ctx, inspectLimit, bin, inspectArgs...)
+	if err != nil {
+		return nil, fmt.Errorf("inspect docker networks by immutable observation IDs: %w", err)
+	}
+	var inspected []inspectedNetwork
+	if err := json.Unmarshal(raw, &inspected); err != nil {
+		return nil, fmt.Errorf("decode docker network inspection: %w", err)
+	}
+	if len(inspected) != len(authorizedSummaries) {
+		return nil, fmt.Errorf("decode docker network inspection: expected %d objects, got %d", len(authorizedSummaries), len(inspected))
+	}
+	byID := make(map[string]inspectedNetwork, len(inspected))
+	for _, item := range inspected {
+		if !dockerID.MatchString(item.ID) {
+			return nil, errors.New("docker network inspection returned an invalid full network ID")
 		}
-		if len(items) != 1 {
-			return nil, fmt.Errorf("decode docker network %s: expected one object, got %d", name, len(items))
+		if _, duplicate := byID[item.ID]; duplicate {
+			return nil, errors.New("docker network inspection returned a duplicate network ID")
 		}
-		item := items[0]
+		byID[item.ID] = item
+	}
+	var result []Network
+	for _, summary := range authorizedSummaries {
+		item, present := byID[summary.id]
+		if !present {
+			return nil, fmt.Errorf("docker network %s changed during batched inspection", summary.name)
+		}
 		bridgeName := observedBridgeName(item.ID, item.Name, item.Options)
 		expectedIPv6 := false
-		for _, subnet := range wanted.Subnets {
+		for _, subnet := range summary.wanted.Subnets {
 			prefix, parseErr := netip.ParsePrefix(subnet)
 			expectedIPv6 = expectedIPv6 || parseErr == nil && prefix.Addr().Is6()
 		}
-		if item.ID != id || item.Name != name || item.Driver != driver ||
-			item.Driver != wanted.Driver || !linuxInterfaceName.MatchString(bridgeName) ||
-			(!wanted.DynamicBridge && bridgeName != wanted.BridgeInterface) ||
+		if item.ID != summary.id || item.Name != summary.name || item.Driver != summary.driver ||
+			item.Driver != summary.wanted.Driver || !linuxInterfaceName.MatchString(bridgeName) ||
+			(!summary.wanted.DynamicBridge && bridgeName != summary.wanted.BridgeInterface) ||
 			item.Internal == nil || item.EnableIPv6 == nil ||
 			*item.Internal || *item.EnableIPv6 != expectedIPv6 {
-			return nil, fmt.Errorf("docker network %s changed during inspection or its stable identity drifted", name)
+			return nil, fmt.Errorf("docker network %s changed during inspection or its stable identity drifted", summary.name)
 		}
-		if prior, duplicate := seenBridges[bridgeName]; duplicate && prior != name {
-			return nil, fmt.Errorf("docker bridge interface %s is shared by networks %s and %s", bridgeName, prior, name)
+		if prior, duplicate := seenBridges[bridgeName]; duplicate && prior != summary.name {
+			return nil, fmt.Errorf("docker bridge interface %s is shared by networks %s and %s", bridgeName, prior, summary.name)
 		}
 		if _, err := o.output(ctx, 64<<10, "ip", "-j", "link", "show", "dev", bridgeName); err != nil {
-			return nil, fmt.Errorf("docker network %s bridge interface %s is absent", name, bridgeName)
+			return nil, fmt.Errorf("docker network %s bridge interface %s is absent", summary.name, bridgeName)
 		}
-		seenBridges[bridgeName] = name
-		expectedIPAM, err := canonicalIPAM(wanted.Subnets, wanted.Gateways)
+		seenBridges[bridgeName] = summary.name
+		expectedIPAM, err := canonicalIPAM(summary.wanted.Subnets, summary.wanted.Gateways)
 		if err != nil {
-			return nil, fmt.Errorf("expected docker network %s: %w", name, err)
+			return nil, fmt.Errorf("expected docker network %s: %w", summary.name, err)
 		}
 		observedIPAM := make(map[string]string, len(item.IPAM.Config))
 		for _, ipam := range item.IPAM.Config {
 			prefix, parseErr := netip.ParsePrefix(ipam.Subnet)
 			gateway, gatewayErr := netip.ParseAddr(ipam.Gateway)
 			if parseErr != nil || gatewayErr != nil || prefix.Bits() == 0 || !prefix.Contains(gateway) || gateway.Is4() != prefix.Addr().Is4() {
-				return nil, fmt.Errorf("docker network %s returned invalid subnet/gateway", name)
+				return nil, fmt.Errorf("docker network %s returned invalid subnet/gateway", summary.name)
 			}
 			canonicalPrefix := prefix.Masked().String()
 			if _, duplicate := observedIPAM[canonicalPrefix]; duplicate {
-				return nil, fmt.Errorf("docker network %s returned duplicate subnet %s", name, canonicalPrefix)
+				return nil, fmt.Errorf("docker network %s returned duplicate subnet %s", summary.name, canonicalPrefix)
 			}
 			observedIPAM[canonicalPrefix] = gateway.String()
 		}
 		if !sameIPAM(expectedIPAM, observedIPAM) {
-			return nil, fmt.Errorf("docker network %s subnet/gateway tuple drifted", name)
+			return nil, fmt.Errorf("docker network %s subnet/gateway tuple drifted", summary.name)
 		}
 		for cidr, gateway := range observedIPAM {
-			result = append(result, Network{ID: id, Name: name, Driver: driver, BridgeInterface: bridgeName, CIDR: cidr, Gateway: gateway})
-		}
-	}
-	for name := range expected {
-		if !seenNames[name] {
-			return nil, fmt.Errorf("configured Docker network %q is absent", name)
+			result = append(result, Network{ID: summary.id, Name: summary.name, Driver: summary.driver, BridgeInterface: bridgeName, CIDR: cidr, Gateway: gateway})
 		}
 	}
 	sort.Slice(result, func(i, j int) bool {

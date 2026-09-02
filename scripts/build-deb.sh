@@ -51,7 +51,7 @@ case "$build_disposition" in
         }
         ;;
 esac
-for command_name in chmod dpkg-deb go grep install jq mktemp mv sed sha256sum strings; do
+for command_name in chmod dpkg-deb go grep install jq mktemp mv sed sha256sum; do
     command -v "$command_name" >/dev/null || { echo "Missing prerequisite: $command_name" >&2; exit 1; }
 done
 for binary in nftfw nftfwd nftfw-web; do
@@ -130,8 +130,10 @@ for metadata_arch in amd64 arm64; do
         fi
         # Go deliberately redacts -ldflags from `go version -m` output when
         # -trimpath is enabled. Bind its structural metadata above, then
-        # require one unique composite -X identity in every cross binary.
-        strings -n 2 "$metadata_path" | grep -Fx -- "$expected_artifact_identity" >/dev/null || {
+        # require the complete composite -X identity as one contiguous byte
+        # sequence in every cross binary. Do not depend on GNU strings line
+        # boundaries: Go may place adjacent printable data in the same run.
+        LC_ALL=C grep -aFq -- "$expected_artifact_identity" "$metadata_path" || {
             echo "Composite artifact identity is missing from $metadata_path" >&2
             exit 1
         }

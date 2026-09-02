@@ -47,7 +47,7 @@ func saveHealthGeneration(t *testing.T, store *state.Store, id uint64, checksum,
 type emptyRulesetRunner struct{}
 
 func (emptyRulesetRunner) Run(context.Context, ...string) (string, string, error) {
-	return `{"nftables":[]}`, "", nil
+	return `{"nftables":[{"metainfo":{"json_schema_version":1}}]}`, "", nil
 }
 
 func TestSnapshotFailsClosedWhenOwnedTablesAreAbsent(t *testing.T) {
@@ -79,6 +79,9 @@ type healthyRulesetRunner struct{}
 
 func (healthyRulesetRunner) Run(_ context.Context, args ...string) (string, string, error) {
 	joined := strings.Join(args, " ")
+	if joined == "-j list ruleset" {
+		return healthyFullRuleset(), "", nil
+	}
 	if joined == "-j list tables" {
 		return `{"nftables":[{"table":{"family":"inet","name":"nftfw_filter"}},{"table":{"family":"ip","name":"nftfw_nat"}},{"table":{"family":"ip6","name":"nftfw_filter6"}}]}`, "", nil
 	}
@@ -132,12 +135,50 @@ func (healthyRulesetRunner) Run(_ context.Context, args ...string) (string, stri
 	return "", "unexpected command: " + joined, nil
 }
 
+func healthyFullRuleset() string {
+	objects := []json.RawMessage{json.RawMessage(`{"metainfo":{"json_schema_version":1}}`)}
+	runner := healthyRulesetRunner{}
+	for _, table := range []nft.Table{
+		{Family: "inet", Name: nft.FilterTable},
+		{Family: "ip", Name: nft.NATTable},
+		{Family: "ip6", Name: nft.Filter6},
+	} {
+		out, _, _ := runner.Run(context.Background(), "-j", "list", "table", table.Family, table.Name)
+		var document struct {
+			Nftables []json.RawMessage `json:"nftables"`
+		}
+		if err := json.Unmarshal([]byte(out), &document); err != nil {
+			panic(err)
+		}
+		for _, raw := range document.Nftables {
+			var object map[string]map[string]any
+			if err := json.Unmarshal(raw, &object); err != nil {
+				panic(err)
+			}
+			if rule, ok := object["rule"]; ok {
+				if _, present := rule["expr"]; !present {
+					rule["expr"] = []any{}
+				}
+			}
+			encoded, err := json.Marshal(object)
+			if err != nil {
+				panic(err)
+			}
+			objects = append(objects, encoded)
+		}
+	}
+	encoded, err := json.Marshal(struct {
+		Nftables []json.RawMessage `json:"nftables"`
+	}{Nftables: objects})
+	if err != nil {
+		panic(err)
+	}
+	return string(encoded)
+}
+
 type healthyAuditRulesetRunner struct{}
 
 func (healthyAuditRulesetRunner) Run(ctx context.Context, args ...string) (string, string, error) {
-	if strings.Join(args, " ") == "-j list ruleset" {
-		return `{"nftables":[{"metainfo":{"json_schema_version":1}}]}`, "", nil
-	}
 	return (healthyRulesetRunner{}).Run(ctx, args...)
 }
 
@@ -169,10 +210,11 @@ func TestSnapshotStatusContractDistinguishesPolicyFromOverallHealth(t *testing.T
 	}
 	defer store.Close()
 	backend := nft.New(healthyRulesetRunner{})
-	fingerprint, err := backend.Fingerprint(ctx)
+	inspection, err := backend.InspectStatus(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fingerprint := inspection.Fingerprint
 	script := "add table inet nftfw_filter\n"
 	sum := sha256.Sum256([]byte(script))
 	checksum := hex.EncodeToString(sum[:])

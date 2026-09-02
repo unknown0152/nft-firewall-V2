@@ -3,15 +3,33 @@ package health
 import (
 	"context"
 	"crypto/sha256"
+	"database/sql"
+	"encoding/base64"
 	"encoding/hex"
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
+	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
+	"github.com/unknown0152/nft-firewall-v2/internal/wireguard"
 )
+
+type healthRulesetDocumentRunner struct{ document string }
+
+func (r healthRulesetDocumentRunner) Run(context.Context, ...string) (string, string, error) {
+	return r.document, "", nil
+}
+
+type failedWGHealthRunner struct{}
+
+func (failedWGHealthRunner) Run(context.Context, ...string) (string, error) {
+	return "", errors.New("synthetic WireGuard loss")
+}
 
 func newHealthyProvider(t *testing.T) (*state.Store, Provider, string) {
 	t.Helper()
@@ -30,10 +48,11 @@ func newHealthyProvider(t *testing.T) (*state.Store, Provider, string) {
 		}
 	})
 	backend := nft.New(healthyRulesetRunner{})
-	fingerprint, err := backend.Fingerprint(ctx)
+	inspection, err := backend.InspectStatus(ctx)
 	if err != nil {
 		t.Fatal(err)
 	}
+	fingerprint := inspection.Fingerprint
 	script := "add table inet nftfw_filter\n"
 	sum := sha256.Sum256([]byte(script))
 	checksum := hex.EncodeToString(sum[:])
@@ -165,4 +184,102 @@ func TestSnapshotRejectsWellFormedWrongGenerationChecksum(t *testing.T) {
 	if snapshot.PolicyHash != "" || snapshot.PolicyChecksum != "" || !strings.Contains(snapshot.Reason, "generation script checksum mismatch") {
 		t.Fatalf("wrong checksum identity was exposed as valid: %#v", snapshot)
 	}
+}
+
+func TestAdjacentSnapshotDegradesAfterEveryMutableProtectionInput(t *testing.T) {
+	t.Run("nftables", func(t *testing.T) {
+		_, provider, _ := newHealthyProvider(t)
+		before, err := provider.Snapshot(context.Background())
+		if err != nil || before.Status != "HEALTHY" || !before.PolicyMatch {
+			t.Fatalf("healthy baseline unavailable: %#v %v", before, err)
+		}
+		provider.Backend.Runner = healthRulesetDocumentRunner{document: strings.Replace(
+			healthyFullRuleset(), `"comment":"nftfw:vpn-only-egress",`, `"comment":"removed-vpn-egress",`, 1,
+		)}
+		after, err := provider.Snapshot(context.Background())
+		if err != nil || after.Status != "DEGRADED" || after.PolicyMatch || after.KillSwitchEnforced {
+			t.Fatalf("fresh nftables drift inherited protection: %#v %v", after, err)
+		}
+	})
+
+	t.Run("IPv4 forwarding", func(t *testing.T) {
+		_, provider, _ := newHealthyProvider(t)
+		provider.Managed = &ManagedProjection{
+			Tunnel: true, DockerEnabled: true, DockerNetworks: 1, IPv4Forwarding: true,
+		}
+		before, err := provider.Snapshot(context.Background())
+		if err != nil || before.Status != "HEALTHY" {
+			t.Fatalf("healthy baseline unavailable: %#v %v", before, err)
+		}
+		provider.Managed.IPv4Forwarding = false
+		after, err := provider.Snapshot(context.Background())
+		if err != nil || after.Status != "DEGRADED" || after.IPv4Forwarding ||
+			!strings.Contains(after.Reason, "forwarding") {
+			t.Fatalf("disabled forwarding inherited protection: %#v %v", after, err)
+		}
+	})
+
+	t.Run("WireGuard", func(t *testing.T) {
+		_, provider, _ := newHealthyProvider(t)
+		key := base64.StdEncoding.EncodeToString(make([]byte, 32))
+		provider.WG = &wireguard.Controller{Runner: healthyWGRunner{key: key, timestamp: time.Now().Unix()}}
+		provider.WGName = "wg0"
+		provider.WGHealthyWithin = time.Minute
+		before, err := provider.Snapshot(context.Background())
+		if err != nil || before.Status != "HEALTHY" || !before.WireGuard.Healthy {
+			t.Fatalf("healthy baseline unavailable: %#v %v", before, err)
+		}
+		provider.WG.Runner = failedWGHealthRunner{}
+		after, err := provider.Snapshot(context.Background())
+		if err != nil || after.Status != "DEGRADED" || after.WireGuard.Healthy {
+			t.Fatalf("WireGuard loss inherited protection: %#v %v", after, err)
+		}
+	})
+
+	t.Run("database", func(t *testing.T) {
+		store, provider, _ := newHealthyProvider(t)
+		before, err := provider.Snapshot(context.Background())
+		if err != nil || before.Status != "HEALTHY" {
+			t.Fatalf("healthy baseline unavailable: %#v %v", before, err)
+		}
+		if err := store.DB.Close(); err != nil {
+			t.Fatal(err)
+		}
+		failed, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "absent.db")+"?mode=ro")
+		if err != nil {
+			t.Fatal(err)
+		}
+		store.DB = failed
+		after, err := provider.Snapshot(context.Background())
+		if err != nil || after.Status != "DEGRADED" || after.Database != "degraded" {
+			t.Fatalf("database loss inherited protection: %#v %v", after, err)
+		}
+	})
+
+	t.Run("provenance ledger", func(t *testing.T) {
+		store, provider, _ := newHealthyProvider(t)
+		ledger, err := provenance.Open(context.Background(), filepath.Join(store.Dir, "provenance-ledger.db"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = ledger.Close() })
+		provider.Ledger = ledger
+		provider.RequireProvenance = true
+		before, err := provider.Snapshot(context.Background())
+		if err != nil || before.Status != "HEALTHY" || before.ProvenanceLedger != "ok" {
+			t.Fatalf("healthy baseline unavailable: %#v %v", before, err)
+		}
+		if err := ledger.DB.Close(); err != nil {
+			t.Fatal(err)
+		}
+		failed, err := sql.Open("sqlite", "file:"+filepath.Join(t.TempDir(), "absent-ledger.db")+"?mode=ro")
+		if err != nil {
+			t.Fatal(err)
+		}
+		ledger.DB = failed
+		after, err := provider.Snapshot(context.Background())
+		if err != nil || after.Status != "DEGRADED" || after.ProvenanceLedger != "degraded" {
+			t.Fatalf("provenance loss inherited protection: %#v %v", after, err)
+		}
+	})
 }

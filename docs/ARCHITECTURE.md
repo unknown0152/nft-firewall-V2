@@ -34,6 +34,18 @@ unavailable; packaged static recovery modes do the same. These explicit paths
 remain inside the sole `internal/nft` backend boundary and are never implicit
 fallbacks.
 
+Every status request is fresh. The daemon reloads and validates the protected
+configuration and managed intent, recompiles desired policy, and re-observes
+the schema-6 database, committed generation, provenance ledger, claims,
+integrations, WireGuard, forwarding, Docker, and nftables state. The nftables
+backend executes one bounded `nft -j list ruleset` and derives owned-table
+presence, structural integrity, the canonical generation fingerprint, and the
+foreign-provenance collision audit from that same immutable JSON document.
+Docker uses one bounded list followed by one batched inspect of every
+authorized immutable network ID, then verifies each expected Linux bridge.
+The dashboard adds real HTTP/Unix transport but never caches or weakens the
+daemon result; it independently derives `protected` from the typed v2 schema.
+
 ## State model
 
 Desired state consists of validated TOML and durable administrator/integration

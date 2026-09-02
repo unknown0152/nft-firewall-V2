@@ -64,27 +64,25 @@ The clean-host result is:
 The current tree targets **2.1.0** and requires **Go 1.27.0**. Until Stage
 E-R2, tagging, and final publication approval are complete, local Stage E-R
 candidate artifacts are deliberately quarantined and cannot run or install.
-The last published stable line remains 2.0.3. An earlier privileged 2.1.0
-source run safely rolled an interrupted first setup back, then found that its
-required retained audit state prevented an ordinary retry. Amendment W adds a
-strict terminal retry classification and checksum-bound journal lineage. Its
-protected W6 source matrix passes two failed retries, successful generation 3,
-Docker VPN/leak recovery, and two managed boots; W7 also passes the native
-initramfs package lifecycle. The mandatory W11 packet capture nevertheless
-observed two IPv6 MLD/DAD frames before init-top readiness. Amendment X
-replaces that insufficient boundary with a strict two-pass Debian GRUB
-ownership transaction. The source-stage disposable matrix now passes failed
-boot preparation, both process-death boundaries, explicit reboot/resume,
-two consecutive managed boots with zero pre-readiness packets, a
-contradictory boot with zero guest packets, package removal, and exact 2.0.3
-rollback. The complete source gates pass as well. A frozen commit, two
-independent quarantined candidates, and their external comparison are still
-required before renewed E-R2. The first renewed E-R2 retry run also proved
-that inverse-boot rollback cleared the terminal journal generation while the
-database and immutable snapshots correctly retained it, blocking the next
-strict retry. Amendment Z preserves that generation only for an uncommitted
-first-setup rollback and keeps package-only/pre-generation paths at zero. This
-tree remains source-only and is not yet a release.
+The last published stable line remains 2.0.3.
+
+The E-R2 run for source `01d559e884277a9b819aa712dec5620fed2d796a`
+passed seventeen disposable package, boot, network, Docker, recovery, and
+nonmutation subjects, then hard-stopped on the mandatory installed dashboard
+performance gate: CLI status p95 was 67.224 ms, but `/api/status` p95 was
+65.231 ms against an exclusive 50 ms budget. No tag was created. Amendment AA
+corrects the demonstrated process fan-out while keeping every fresh,
+fail-closed check: one immutable nftables ruleset read now supplies ownership,
+integrity, fingerprint, and foreign-provenance results, and one immutable-ID
+Docker inspect batch verifies all authorized networks. A fresh disposable
+managed-Docker diagnostic measured CLI p95 36.367 ms and dashboard p95 32.658
+ms, with all resource budgets passing; it had no independent provider
+assignment and therefore is not protected-status acceptance. Adjacent-request regressions prove that
+nftables drift, forwarding loss, Docker drift, WireGuard loss, database
+failure, and provenance failure degrade the very next completed response.
+The complete E-R2 matrix must run the strict shipped harness, which requires a
+healthy protected result on every sample, for the eventual frozen candidate.
+This tree remains source-only and is not yet a release.
 
 ## Supported clean-host setup
 

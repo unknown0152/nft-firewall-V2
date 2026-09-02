@@ -51,3 +51,26 @@ claims and the verified kernel policy remain installed. This distinction lets
 operators diagnose the subsystem without weakening the overall health gate.
 Managed Docker also degrades status when its network count is zero or IPv4
 forwarding is not ready.
+
+## Freshness and performance contract
+
+Every completed request observes the currently published protected config and
+managed intent and performs fresh fail-closed checks of schema-6 state,
+generation evidence, provenance, nftables, Docker topology, IPv4 forwarding,
+WireGuard, claims, and integrations. NFTFW does not cache a healthy or
+`protected=true` result across requests.
+
+The nftables checks use one immutable full-ruleset JSON snapshot per request;
+ownership, structural integrity, canonical fingerprint, and foreign
+provenance are all derived from that same observation. Docker network details
+are inspected in one bounded batch keyed by the immutable IDs returned by the
+immediately preceding bounded list. Missing, duplicate, reordered, changed,
+or malformed results fail closed. These consolidations reduce process fan-out
+without skipping a security decision.
+
+`BenchmarkDashboardProtected` is only a projection microbenchmark. Release
+performance evidence uses the real Unix status protocol and loopback HTTP
+transport, and the installed managed-Docker fixture must keep CLI p95 below 75
+ms and dashboard p95 below 50 ms while retaining the documented memory and
+idle-CPU budgets. Adjacent-request tests require the next response to degrade
+after any injectable observation changes.

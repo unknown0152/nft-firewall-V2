@@ -783,6 +783,84 @@ func TestAdvancedLegacyStaticDockerProjectionDoesNotRewriteConfig(t *testing.T) 
 	}
 }
 
+func TestRuntimeStatusReobservesDockerOnEveryAdjacentRequest(t *testing.T) {
+	root := secureRuntimeTestDir(t)
+	databasePath := filepath.Join(root, "state.db")
+	store, err := state.Open(context.Background(), databasePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	daemonPath := filepath.Join(root, "docker", "daemon.json")
+	if err := os.MkdirAll(filepath.Dir(daemonPath), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(daemonPath, []byte(
+		`{"iptables":false,"ip6tables":false,"ip-forward":false,"ip-masq":false,"userland-proxy":false}`+"\n",
+	), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	managed := intent.Intent{
+		Schema: intent.Schema, Managed: true, Uplink: "eth0",
+		VPNInterface: intent.VPNInterface,
+		LANNetworks:  []string{"192.168.1.0/24"}, ManagementTCP: []int{22},
+		VPNAddresses: []string{"10.8.0.2/32"}, EndpointHost: "vpn.example.test",
+		EndpointPort: 51820, BootstrapIPv4: []string{"198.51.100.8/32"},
+		MTU: 1420, ResolverMode: "none", DisableIPv6: true,
+		DockerEnabled: true,
+		DockerNetworks: []config.DockerNetwork{{
+			Name: "media", Driver: "bridge", BridgeInterface: "br-old",
+			DynamicBridge: true, Subnets: []string{"172.20.0.0/16"},
+			Gateways: []string{"172.20.0.1"},
+		}},
+	}
+	configured, err := managed.Config()
+	if err != nil {
+		t.Fatal(err)
+	}
+	id := strings.Repeat("d", 64)
+	inspectCalls := 0
+	runtime := &Runtime{
+		Config: configured, ManagedIntent: &managed, Store: store,
+		Backend: nft.New(&countingOwnedRunner{}),
+	}
+	runtime.dockerObserver = func(expected []config.DockerNetwork) containers.Observer {
+		return containers.Observer{
+			DaemonConfig: daemonPath, Expected: expected,
+			Run: func(_ context.Context, _ int64, name string, args ...string) ([]byte, error) {
+				command := name + " " + strings.Join(args, " ")
+				switch command {
+				case "docker --host unix:///var/run/docker.sock network ls --no-trunc --format {{.ID}}\t{{.Name}}\t{{.Driver}}":
+					return []byte(id + "\tmedia\tbridge\n"), nil
+				case "docker --host unix:///var/run/docker.sock network inspect -- " + id:
+					inspectCalls++
+					subnet, gateway := "172.20.0.0/16", "172.20.0.1"
+					if inspectCalls > 1 {
+						subnet, gateway = "172.21.0.0/16", "172.21.0.1"
+					}
+					return []byte(
+						`[{"Id":"` + id + `","Name":"media","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{"com.docker.network.bridge.name":"br-current"},"IPAM":{"Config":[{"Subnet":"` + subnet + `","Gateway":"` + gateway + `"}]}}]`,
+					), nil
+				case "ip -j link show dev br-current":
+					return []byte(`[{"ifname":"br-current"}]`), nil
+				default:
+					return nil, fmt.Errorf("unexpected Docker observation command: %s", command)
+				}
+			},
+		}
+	}
+	if _, err := runtime.Status(context.Background()); err != nil {
+		t.Fatalf("healthy first Docker observation failed: %v", err)
+	}
+	if _, err := runtime.Status(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "IPAM") && !strings.Contains(err.Error(), "subnet/gateway") {
+		t.Fatalf("adjacent Docker drift inherited stale status: %v", err)
+	}
+	if inspectCalls != 2 {
+		t.Fatalf("Docker was not freshly inspected for both requests: %d", inspectCalls)
+	}
+}
+
 func TestRuntimeArtifactStatusAndReadControlUseReloadedPolicy(t *testing.T) {
 	ctx := context.Background()
 	root := secureRuntimeTestDir(t)

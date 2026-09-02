@@ -11,16 +11,16 @@ Release approval status: STAGE_R_CANDIDATE_ONLY
 | Build date | `@BUILD_DATE@` |
 | Build disposition | `@RELEASE_DISPOSITION@` |
 | Artifact label | `@RELEASE_ARTIFACT_LABEL@` |
-| Source-only Stage E-R | AMENDMENT Z SOURCE GATES PASS; CANDIDATES PENDING |
-| Privileged Stage E-R2 | NOT AUTHORIZED for the Amendment Z working tree |
+| Source-only Stage E-R | AMENDMENT AA SOURCE GATES PASS; CANDIDATES PENDING |
+| Privileged Stage E-R2 | NOT AUTHORIZED for the Amendment AA working tree |
 | Publication | NOT AUTHORIZED |
 | Deployment | NOT AUTHORIZED |
 
 ## Source decision
 
-The 2.1.0 working source has passed the Amendment Z gate set and is accepted
+The 2.1.0 working source has passed the Amendment AA gate set and is accepted
 for a clean source freeze and the two intrinsically nondeployable candidate
-builds. The retained Amendment E-through-Y source scope
+builds. The retained Amendment E-through-Z source scope
 includes Go 1.27, one-file managed setup, strict VPN import, managed routing,
 strict managed Docker IPv4 bridge adoption and forwarding ownership,
 the explicit dry-run-only existing-host adoption planner, CLI/dashboard
@@ -33,8 +33,11 @@ terminal first-setup retry classification, monotonic retained-state reentry,
 checksum-bound durable terminal-journal lineage, and the inverse-boot
 generation correction: an uncommitted first setup retains its exact rolled-back
 generation, while genuine pre-generation and package-only paths remain
-non-retryable. Package source, documentation, benchmarks, tests, and local
-nondeployable candidate builds are included.
+non-retryable. Amendment AA also retains every fresh fail-closed status check
+while deriving nftables ownership, integrity, fingerprint, and foreign
+provenance from one immutable ruleset snapshot and inspecting all authorized
+Docker networks in one immutable-ID batch. Package source, documentation,
+benchmarks, tests, and local nondeployable candidate builds are included.
 
 The candidate binaries permit only their quarantine-safe behavior, candidate
 daemon/web processes refuse startup, and candidate Debian packages refuse
@@ -45,6 +48,17 @@ live installation, firewall application, VPN interruption, or deployment.
 
 - Full unit, race, vet, staticcheck, govulncheck, gosec, module, formatting,
   ShellCheck, fuzz, source-contract, systemd, coverage, and benchmark gates.
+- Adjacent daemon requests re-observe config, intent, database/provenance,
+  nftables, Docker, forwarding, WireGuard, claims, and integrations. Drift in
+  any injectable observation degrades the next completed response. The true
+  HTTP-to-Unix transport, concurrent saturation, timeout, cancellation, and
+  allocation regressions pass without caching a protected result.
+- The disposable installed managed-Docker source profile passes the unchanged
+  budgets: CLI p95 36.367 ms and persistent-HTTP dashboard p95 32.658 ms over
+  100 samples after 10 warmups, with RSS, cgroup memory, and 60-second idle CPU
+  also passing. That guest lacked an independent provider assignment and is
+  not protected-status acceptance. The shipped harness requires a healthy
+  protected result on every sample; complete E-R2 must run that strict proof.
 - Explicit mode fixtures and an isolated `umask 0077` regression preserve the
   mode-`0600`/root-ownership acceptance boundary and mode-`0644` refusal; the
   two intended unsafe directory fixtures explicitly establish and verify
@@ -136,7 +150,7 @@ tag, remote publication, or current-server deployment requires still later
 identity-bound approval.
 
 Successive approved R2/source-disposable attempts hard-stopped safely and led
-through NFV2-065. Amendment W's W6 protected matrix passes exact retry,
+through NFV2-066. Amendment W's W6 protected matrix passes exact retry,
 generation-3 success, Docker VPN/leak recovery, and two managed boots; W7
 passes the real native initramfs package lifecycle. W11 then failed the
 mandatory zero-pre-readiness-packet gate: two IPv6 MLD/DAD frames left the
@@ -149,8 +163,11 @@ construction. Amendment Y corrects only those fixtures; its focused and full
 ordinary/restrictive/root-disposable suites pass. The following recovery run
 exposed the inverse-boot generation loss; Amendment Z corrects it and its
 direct, full, restrictive-umask, and source-only disposable lifecycle gates
-pass. The replacement clean freeze and two quarantined candidate builds may
-proceed. E-R2, tagging, publication,
+pass. The next E-R2 passed seventeen disposable subjects, then hard-stopped on
+dashboard p95 65.231 ms against the exclusive 50 ms budget. Amendment AA
+corrects that demonstrated fan-out and passes the source-only disposable
+installed benchmark without weakening freshness. The replacement clean freeze
+and two quarantined candidate builds may proceed. E-R2, tagging, publication,
 installation, and deployment remain outside this report.
 
-R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED
+R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED FOR THE AMENDMENT AA CORRECTION

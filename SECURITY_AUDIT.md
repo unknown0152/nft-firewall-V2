@@ -6,7 +6,7 @@ Audit date: 2026-08-16, 2026-08-17, 2026-08-23, 2026-08-24,
 nftables ownership, Unix APIs, persistence/rollback, systemd, integrations,
 web, installers, tests, dependencies, Git history, and release contents.
 
-Current source disposition: **2.1.0 AMENDMENT Z SOURCE VALIDATED; CANDIDATES
+Current source disposition: **2.1.0 AMENDMENT AA SOURCE VALIDATED; CANDIDATES
 PENDING**.
 The Amendment W retry and native-lifecycle rows pass, but the mandatory W11
 boot capture reopened NFV2-057 before source freeze. Amendment X now supplies
@@ -42,8 +42,17 @@ database row, immutable snapshot, backup, and provenance correctly remained.
 Amendment Z preserves that identity only for an uncommitted first setup and
 keeps pre-generation and package-only handoff paths non-retryable. Its direct,
 restrictive-umask, complete source, and disposable two-failure/eventual-success
-regressions pass. Replacement candidate builds, renewed E-R2, tag
-validation, publication, and deployment have not been executed. The findings
+regressions pass. The following E-R2 completed seventeen disposable subjects
+and then exposed NFV2-066: the status path spawned nine sequential nftables
+reads and one Docker inspect per network, causing dashboard p95 to miss its
+mandatory budget. Amendment AA derives all nftables status results from one
+fresh immutable ruleset snapshot and batches Docker inspection by immutable
+IDs. Freshness/fail-closed, adjacent-request, concurrency, cancellation,
+saturation, allocation, and disposable installed-runtime timing regressions
+pass the unchanged latency and resource budgets. The timing guest lacked an
+independent provider assignment; the strict shipped harness requires healthy
+protection on every sample for renewed E-R2. Replacement candidate builds, renewed
+E-R2, tag validation, publication, and deployment have not been executed. The findings
 below through NFV2-030 record the tagged 2.0.1 audit history; NFV2-031 through
 NFV2-041 record the accepted 2.0.2/2.0.3 release work; NFV2-042 onward records
 2.1.0 source work.
@@ -136,6 +145,7 @@ and post-tag gates.
 | NFV2-063 | The generated bridge accepted only the v2.1 systemd `root:nftfw-web` database group, refusing a genuine legacy root-CLI `root:root` schema-6 database | MEDIUM | Accept only the two real ownership histories while retaining UID 0, mode 0600, one link, protected parents, exact runtime GID, and exact schema history; reject every other group | CLOSED at source boundary; both positive histories and malformed/root-runtime/unrecognized-group/symlink/hard-link/mode/owner refusals PASS; genuine legacy-to-new-to-exact-old guest rollback PASS |
 | NFV2-064 | Two directory refusal tests inherited privileged `umask 0077` and therefore created safe mode-0700 fixtures, while the root-only readiness fixture required control status from a handler that rejected every control request | MEDIUM | Explicitly set and verify both intended mode-0750 unsafe directories; return the healthy snapshot only for control status; directly refuse a non-status control operation; retain all production validators, peer credentials, request validation, and readiness logic unchanged | CLOSED at source boundary; focused ordinary-user proof and focused plus complete disposable-root `umask 0077` suite PASS; renewed E-R2 NOT EXECUTED |
 | NFV2-065 | Inverse-boot rollback finalization cleared an uncommitted first-setup generation even though the rolled-back database row, immutable snapshot, backup, terminal journal lineage, and provenance remained bound to it | HIGH | Preserve the exact generation when finalizing only an uncommitted first-setup rollback; retain zero for genuine pre-generation rollback and clear package-only committed handoff so it cannot masquerade as complete retry evidence | CLOSED at source boundary; direct finalizer/write-failure/package-handoff/classifier proof plus disposable generations 1/2 exact rollback, nonmutating retry, and generation-3 success PASS; renewed E-R2 NOT EXECUTED |
+| NFV2-066 | Status independently reread the same nftables state for ownership, integrity, fingerprint, and provenance and inspected Docker networks one at a time, exceeding the mandatory dashboard budget while widening cross-read race windows | HIGH | Derive all nftables results from one fresh immutable full-ruleset JSON snapshot and batch all authorized Docker inspections by immutable ID; preserve fresh config, state, forwarding, WireGuard, claim, and integration checks with no cache or skipped security gate | CLOSED at source boundary; one-read/batch, drift, adjacent-request, HTTP-to-Unix, cancellation, saturation, race, allocation, and no-provider disposable timing/resource proof PASS; strict healthy-protected E-R2 NOT EXECUTED |
 
 ## Adversarial review areas
 
@@ -157,6 +167,7 @@ and post-tag gates.
 | Capabilities/systemd | Static units bind the root daemon to `CAP_NET_ADMIN`; web has no capabilities; staged, package, runtime, and reboot verification passed |
 | Managed routing | Numeric all-table JSON makes an absent reserved table clean without accepting command failure, malformed identity, or populated ownership |
 | Managed Docker | Clean-host setup refuses running or retained workloads; Docker keeps all five packet-mutation settings false; NFTFW alone owns IPv4 forwarding, container policy/NAT, dynamic bridge binding, and the narrow local socket handoff |
+| Status freshness | Every request reloads protected config/intent and observes schema-6 state, provenance, one immutable nftables snapshot, one immutable-ID Docker batch, forwarding, WireGuard, claims, and integrations; no cache can preserve `protected=true` across adjacent drift |
 | Legacy Docker compatibility | Static advanced entries retain their exact bridge, tuple, historical interface-name provenance, and ledger ID; they never enter the managed rebind branch |
 | Adoption planner | Dry-run-only component has no writer/mutation backend; double observation, exact state/provenance verification, bounded fixed output, and untrusted-error redaction are source-tested |
 | Managed setup boundary | Profile/discovery/plan complete before journal creation; initial journal contains the prepared summary; pre-backup interruption changes no protected state; guard-or-later recovery requires a valid prepared summary, durable backup, and exact phase record before touching services |
@@ -191,7 +202,7 @@ unresolved high/critical implementation findings.
 ## Final scan evidence
 
 The amended 2.1.0 source passed Go 1.27.0 unit/race/vet/module/fmt, staticcheck
-v0.8.1, govulncheck v1.7.0, gosec v2.29.0, thirteen bounded fuzz targets,
+v0.8.1, govulncheck v1.7.0, gosec v2.29.0, fourteen bounded fuzz targets,
 complete shell analysis, Stage R source/guard/comparator contracts, staged
 systemd/package verification, the full suite under `umask 0077`, the retained
 Amendment M disposable root source regressions, the protected Amendment W
@@ -205,8 +216,11 @@ Amendment Z's inverse-boot finalizer and strict retry-classifier regressions
 also pass. A fresh disposable transaction preserves generations 1 and 2
 through reboot, process death, inverse reboot, exact rollback, and dry-run
 reentry before committing generation 3; the existing Docker/VPN/leak/reboot
-lifecycle remains green.
-Candidate
+lifecycle remains green. Amendment AA adds one-snapshot nftables status,
+batched Docker observation, adjacent-request fail-closed coverage, real
+HTTP-to-Unix transport tests, and a disposable installed-runtime benchmark;
+the source-only reference run passes every unchanged latency and resource
+budget. Candidate
 source/history/extracted-tree scans and two-parent comparison are generated
 only after the clean source freeze. Privileged R2, tagged package/archive
 inspection, post-tag validation, publication, and deployment are not current

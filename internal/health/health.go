@@ -156,15 +156,20 @@ func (p Provider) Snapshot(ctx context.Context) (Snapshot, error) {
 	} else if p.RequireProvenance {
 		degrade("monotonic provenance ledger is unavailable")
 	}
+	inspection, inspectionErr := p.Backend.InspectStatus(ctx)
 	if p.AuditForeignProvenance {
 		s.ProvenanceAuditScope = nft.ProvenanceCollisionScope
-		foreignAudit, auditErr := p.Backend.AuditForeignProvenanceMask(ctx)
-		if auditErr != nil {
+		if inspectionErr != nil {
 			s.ProvenanceAuditStatus = "degraded"
-			degrade("foreign provenance ownership audit failed: " + auditErr.Error())
+			degrade("foreign provenance ownership audit failed: " + inspectionErr.Error())
 		} else {
-			s.ProvenanceAuditStatus = "ok"
-			s.ProvenanceForeignRules = foreignAudit.ForeignRules
+			s.ProvenanceForeignRules = inspection.ForeignProvenance.ForeignRules
+			if inspection.ForeignProvenanceErr != nil {
+				s.ProvenanceAuditStatus = "degraded"
+				degrade("foreign provenance ownership audit failed: " + inspection.ForeignProvenanceErr.Error())
+			} else {
+				s.ProvenanceAuditStatus = "ok"
+			}
 		}
 	}
 	var expected *state.Generation
@@ -189,23 +194,19 @@ func (p Provider) Snapshot(ctx context.Context) (Snapshot, error) {
 	}
 	ownedHealthy := false
 	fingerprintMatches := false
-	owned, err := p.Backend.ListOwned(ctx)
-	if err != nil {
+	if inspectionErr != nil {
 		s.Drift = true
-		degrade(err.Error())
+		degrade(inspectionErr.Error())
 	} else {
+		owned := inspection.Owned
 		s.OwnedTables = owned
 		if len(owned) != len(p.Backend.Owned) {
 			s.Drift = true
 		}
 		if len(owned) == len(p.Backend.Owned) {
-			ok, detail, integrityErr := p.Backend.Integrity(ctx)
-			if integrityErr != nil {
+			if !inspection.IntegrityOK {
 				s.Drift = true
-				degrade("owned table integrity inspection failed: " + integrityErr.Error())
-			} else if !ok {
-				s.Drift = true
-				degrade(detail)
+				degrade(inspection.IntegrityDetail)
 			} else {
 				ownedHealthy = true
 			}
@@ -214,10 +215,7 @@ func (p Provider) Snapshot(ctx context.Context) (Snapshot, error) {
 			if expected.ObservedHash == "" {
 				s.Drift = true
 				degrade(fmt.Sprintf("generation %d lacks an observed-state fingerprint", expected.ID))
-			} else if observedHash, fingerprintErr := p.Backend.Fingerprint(ctx); fingerprintErr != nil {
-				s.Drift = true
-				degrade("owned table fingerprint failed: " + fingerprintErr.Error())
-			} else if observedHash != expected.ObservedHash {
+			} else if inspection.Fingerprint != expected.ObservedHash {
 				s.Drift = true
 				degrade(fmt.Sprintf("owned nftables fingerprint differs from generation %d", expected.ID))
 			} else {

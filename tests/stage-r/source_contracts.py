@@ -1934,6 +1934,11 @@ class ReleaseCandidateMetadataContracts(unittest.TestCase):
         self.assertIn("for metadata_binary in nftfw nftfwd nftfw-web", builder)
         self.assertIn("go version -m", builder)
         self.assertIn("expected_artifact_identity=", builder)
+        self.assertIn(
+            'LC_ALL=C grep -aFq -- "$expected_artifact_identity" "$metadata_path"',
+            builder,
+        )
+        self.assertNotIn('strings -n 2 "$metadata_path"', builder)
         self.assertIn("Composite artifact identity is missing", builder)
         self.assertIn('"$version" != "$target_version~stage.r.${candidate_commit:0:12}"', builder)
         self.assertIn("Package payload hash differs from standalone", builder)
@@ -2262,6 +2267,55 @@ class AmendmentXContracts(unittest.TestCase):
         pcap = read("tests/packaging/managed_boot_pcap.py")
         self.assertIn("--expect-zero-guest", pcap)
         self.assertIn("failed boot identity emitted a guest frame", pcap)
+
+
+class StatusPerformanceContracts(unittest.TestCase):
+    def test_installed_status_benchmark_is_disposable_bounded_and_redacted(self) -> None:
+        relative = "scripts/benchmark-status-e2e.py"
+        path = ROOT / relative
+        source = read(relative)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o755)
+        for expected in (
+            'parser.add_argument("--disposable-vm", action="store_true", required=True)',
+            '["systemd-detect-virt", "--vm"]',
+            '"managed setup is not complete"',
+            '"docker_enabled") is not True',
+            '"ipv4_forwarding") is not True',
+            'or not protected_contract(latest_cli)',
+            '"protected") is not True or not protected_contract(value)',
+            'SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")',
+            'STATUS_SOCKET = "/run/nftfw/status.sock"',
+            '"daemon_status_unix": measure(',
+            '"generation_database_quick_check"',
+            '"provenance_database_quick_check"',
+            '"dashboard_minus_unix"',
+            '"sensitive_output_emitted": False',
+            '"live_host_changes_authorized": False',
+            'CLI_BUDGET_MS = 75.0',
+            'DASHBOARD_BUDGET_MS = 50.0',
+            'NFTFWD_CGROUP_BUDGET_BYTES = 64 << 20',
+        ):
+            self.assertIn(expected, source)
+        self.assertNotIn("shell=True", source)
+        self.assertNotIn("private_key", source.lower())
+
+        help_result = subprocess.run(
+            [str(path), "--help"],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(help_result.returncode, 0, help_result.stderr)
+        self.assertIn("--disposable-vm", help_result.stdout)
+
+        refusal = subprocess.run(
+            [str(path)],
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        self.assertNotEqual(refusal.returncode, 0)
+        self.assertIn("--disposable-vm", refusal.stderr)
 
 
 if __name__ == "__main__":

@@ -2,9 +2,11 @@ package containers
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -12,8 +14,9 @@ import (
 )
 
 const (
-	dockerIDOne = "1111111111111111111111111111111111111111111111111111111111111111"
-	dockerIDTwo = "2222222222222222222222222222222222222222222222222222222222222222"
+	dockerIDOne   = "1111111111111111111111111111111111111111111111111111111111111111"
+	dockerIDTwo   = "2222222222222222222222222222222222222222222222222222222222222222"
+	dockerIDThree = "3333333333333333333333333333333333333333333333333333333333333333"
 )
 
 func expectedMediaNetwork() []config.DockerNetwork {
@@ -122,6 +125,84 @@ func TestObserverAllowsChangedGeneratedIDForSameStableTuple(t *testing.T) {
 	}
 }
 
+func TestObserverBatchesAuthorizedNetworkInspectionByImmutableIDs(t *testing.T) {
+	expected := []config.DockerNetwork{
+		{
+			Name: "bridge", Driver: "bridge", BridgeInterface: "docker0",
+			Subnets: []string{"172.17.0.0/16"}, Gateways: []string{"172.17.0.1"},
+		},
+		{
+			Name: "media", Driver: "bridge", BridgeInterface: "br-media",
+			Subnets: []string{"172.19.0.0/16"}, Gateways: []string{"172.19.0.1"},
+		},
+	}
+	var commands [][]string
+	observer := Observer{
+		Expected: expected,
+		Run: func(_ context.Context, _ int64, name string, args ...string) ([]byte, error) {
+			command := append([]string{name}, args...)
+			commands = append(commands, command)
+			switch {
+			case name == "docker" && reflect.DeepEqual(args, []string{
+				"--host", localDockerHost, "network", "ls", "--no-trunc",
+				"--format", "{{.ID}}\t{{.Name}}\t{{.Driver}}",
+			}):
+				return []byte(dockerIDOne + "\tbridge\tbridge\n" + dockerIDTwo + "\tmedia\tbridge\n"), nil
+			case name == "docker" && reflect.DeepEqual(args, []string{
+				"--host", localDockerHost, "network", "inspect", "--", dockerIDOne, dockerIDTwo,
+			}):
+				return []byte(`[
+{"Id":"` + dockerIDTwo + `","Name":"media","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{"com.docker.network.bridge.name":"br-media"},"IPAM":{"Config":[{"Subnet":"172.19.0.0/16","Gateway":"172.19.0.1"}]}},
+{"Id":"` + dockerIDOne + `","Name":"bridge","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{},"IPAM":{"Config":[{"Subnet":"172.17.0.0/16","Gateway":"172.17.0.1"}]}}
+]`), nil
+			case name == "ip":
+				return []byte(`[{"ifname":"present"}]`), nil
+			default:
+				return nil, fmt.Errorf("unexpected command: %v", command)
+			}
+		},
+	}
+	networks, err := observer.Networks(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(networks) != 2 || networks[0].Name != "bridge" || networks[1].Name != "media" {
+		t.Fatalf("batched observation lost a network: %#v", networks)
+	}
+	inspectCalls := 0
+	for _, command := range commands {
+		if len(command) >= 5 && command[0] == "docker" && command[4] == "inspect" {
+			inspectCalls++
+		}
+	}
+	if inspectCalls != 1 {
+		t.Fatalf("Docker networks were not inspected in one bounded call: %#v", commands)
+	}
+}
+
+func TestObserverRejectsIncompleteBatchedNetworkInspection(t *testing.T) {
+	expected := []config.DockerNetwork{
+		{Name: "bridge", Driver: "bridge", BridgeInterface: "docker0", Subnets: []string{"172.17.0.0/16"}, Gateways: []string{"172.17.0.1"}},
+		{Name: "media", Driver: "bridge", BridgeInterface: "br-media", Subnets: []string{"172.19.0.0/16"}, Gateways: []string{"172.19.0.1"}},
+	}
+	observer := Observer{
+		Expected: expected,
+		Run: func(_ context.Context, _ int64, name string, args ...string) ([]byte, error) {
+			if name == "docker" && len(args) > 3 && args[2] == "network" && args[3] == "ls" {
+				return []byte(dockerIDOne + "\tbridge\tbridge\n" + dockerIDTwo + "\tmedia\tbridge\n"), nil
+			}
+			if name == "docker" {
+				return []byte(`[{"Id":"` + dockerIDOne + `","Name":"bridge","Driver":"bridge"}]`), nil
+			}
+			return nil, errors.New("unexpected command")
+		},
+	}
+	if _, err := observer.Networks(context.Background()); err == nil ||
+		!strings.Contains(err.Error(), "expected 2 objects") {
+		t.Fatalf("incomplete batched inspection was accepted: %v", err)
+	}
+}
+
 func TestObserverRejectsDriftAmbiguityAndInspectionRace(t *testing.T) {
 	validIPAM := `{"Subnet":"172.19.0.0/16","Gateway":"172.19.0.1"},{"Subnet":"fd00:19::/64","Gateway":"fd00:19::1"}`
 	tests := []struct {
@@ -158,5 +239,45 @@ func TestObserverRejectsMissingAuthorization(t *testing.T) {
 	o := Observer{}
 	if _, err := o.Networks(context.Background()); err == nil {
 		t.Fatal("Docker observation without configured tuples accepted")
+	}
+}
+
+func BenchmarkObserveManagedDockerNetworksBatched(b *testing.B) {
+	expected := []config.DockerNetwork{
+		{Name: "bridge", Driver: "bridge", BridgeInterface: "docker0", Subnets: []string{"172.17.0.0/16"}, Gateways: []string{"172.17.0.1"}},
+		{Name: "media", Driver: "bridge", BridgeInterface: "br-media", Subnets: []string{"172.19.0.0/16"}, Gateways: []string{"172.19.0.1"}},
+		{Name: "apps", Driver: "bridge", BridgeInterface: "br-apps", Subnets: []string{"172.20.0.0/16"}, Gateways: []string{"172.20.0.1"}},
+	}
+	list := []byte(
+		dockerIDOne + "\tbridge\tbridge\n" +
+			dockerIDTwo + "\tmedia\tbridge\n" +
+			dockerIDThree + "\tapps\tbridge\n",
+	)
+	inspect := []byte(`[
+{"Id":"` + dockerIDThree + `","Name":"apps","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{"com.docker.network.bridge.name":"br-apps"},"IPAM":{"Config":[{"Subnet":"172.20.0.0/16","Gateway":"172.20.0.1"}]}},
+{"Id":"` + dockerIDOne + `","Name":"bridge","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{},"IPAM":{"Config":[{"Subnet":"172.17.0.0/16","Gateway":"172.17.0.1"}]}},
+{"Id":"` + dockerIDTwo + `","Name":"media","Driver":"bridge","Internal":false,"EnableIPv6":false,"Options":{"com.docker.network.bridge.name":"br-media"},"IPAM":{"Config":[{"Subnet":"172.19.0.0/16","Gateway":"172.19.0.1"}]}}
+]`)
+	observer := Observer{
+		Expected: expected,
+		Run: func(_ context.Context, _ int64, name string, args ...string) ([]byte, error) {
+			switch {
+			case name == "docker" && len(args) > 3 && args[2] == "network" && args[3] == "ls":
+				return list, nil
+			case name == "docker" && len(args) > 3 && args[2] == "network" && args[3] == "inspect":
+				return inspect, nil
+			case name == "ip":
+				return []byte(`[{"ifname":"present"}]`), nil
+			default:
+				return nil, fmt.Errorf("unexpected benchmark command: %s %v", name, args)
+			}
+		},
+	}
+	b.ReportAllocs()
+	for b.Loop() {
+		networks, err := observer.Networks(b.Context())
+		if err != nil || len(networks) != 3 {
+			b.Fatalf("batched Docker observation failed: networks=%#v err=%v", networks, err)
+		}
 	}
 }

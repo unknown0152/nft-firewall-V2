@@ -39,6 +39,20 @@ manual review: ignored cleanup errors, command execution, file paths, and a
 deliberately group-readable status socket. Argument arrays, fixed/validated
 paths, and socket purpose are reviewed in `SECURITY_AUDIT.md`.
 
+Status performance has three scopes. Run the Go microbenchmarks with allocation
+reporting:
+
+```bash
+go test ./internal/nft ./internal/containers ./internal/health ./cmd/nftfw-web \
+  -run '^$' -bench 'Status|DockerNetworks|Dashboard' -benchmem -count=10
+```
+
+`BenchmarkDashboardProtected` covers only the boolean projection;
+`BenchmarkDashboardStatusTransportEndToEnd` covers HTTP-to-Unix framing with a
+controlled status fixture. The installed CLI/dashboard/resource gate is
+`scripts/benchmark-status-e2e.py` and deliberately refuses to run outside a
+disposable virtual machine with completed managed setup. See `TESTING.md`.
+
 ## Build
 
 ```bash

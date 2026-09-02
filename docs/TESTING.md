@@ -1,6 +1,6 @@
 # Testing
 
-Current disposition: **2.1.0 AMENDMENT Z STAGE E-R SOURCE VALIDATION**.
+Current disposition: **2.1.0 AMENDMENT AA STAGE E-R SOURCE VALIDATION**.
 Source-only results are consolidated in `TEST_RESULTS.md`. The narrowly
 approved source-stage disposable GRUB/boot, native-initramfs, setup-guard, and
 exact-package rollback preflights have run. The complete namespace, Docker,
@@ -173,6 +173,45 @@ deaths, reboot/resume/inverse-reboot rollback, nonmutating retry, generation-3
 success, stable provenance, Docker VPN-only traffic, tunnel-loss zero leak,
 and repeated managed boots before the replacement source freeze.
 
+Amendment AA adds three deliberately separate performance scopes:
+
+- `BenchmarkDashboardProtected` measures only the final fail-closed boolean
+  projection and is not dashboard latency evidence;
+- `BenchmarkDashboardStatusTransportEndToEnd` uses real HTTP framing and the
+  real Unix protocol against a controlled full-status fixture; and
+- `scripts/benchmark-status-e2e.py` measures the installed CLI and persistent
+  loopback HTTP paths in a complete managed-Docker disposable guest.
+
+The installed harness refuses non-VM execution, requires completed managed
+setup, validates the full typed/protected contract on every CLI, Unix-socket,
+and HTTP sample, emits no command payloads or secrets, and records component
+timing only in aggregate. Its bounded component profile times the daemon Unix
+status path, config validation, one whole-ruleset nftables read, Docker list
+plus batched inspect, WireGuard reads, and read-only SQLite `quick_check` for
+both generation and provenance databases. Derived median deltas isolate the
+CLI and HTTP framing overhead from the daemon Unix path.
+It must be run only inside the approved disposable guest:
+
+```bash
+sudo ./scripts/benchmark-status-e2e.py --disposable-vm \
+  --samples 100 --warmups 10 --component-samples 20 --idle-seconds 60 \
+  --baseline-cli-p95-ms 67.224 \
+  --baseline-dashboard-p95-ms 65.231
+```
+
+The source-only diagnostic run reports CLI median/p95/max
+33.997/36.367/38.995 ms and dashboard 30.617/32.658/35.712 ms. It also checks
+the unchanged RSS, cgroup-memory, and idle-CPU budgets. That diagnostic guest
+had no independent provider assignment, so it is timing evidence rather than
+protected-status acceptance. The shipped harness additionally requires every
+CLI, daemon Unix-socket, and dashboard sample to satisfy the complete healthy
+protected contract. Unit and transport
+regressions change nftables, forwarding, WireGuard, database/provenance, and
+Docker observations between adjacent requests and require the next completed
+response to degrade. Concurrent HTTP saturation, cancellation, recovery, and
+the race suite ensure the optimization does not reuse mutable status or leak
+goroutines/file descriptors. Complete E-R2 must repeat the installed proof.
+
 The setup-guard unit regression covers one and multiple endpoint `/32`
 elements, exact interval flags, deterministic order, malformed/broader-prefix
 refusal, and absence of global flush or unrelated-table mutation. Its real
@@ -211,10 +250,11 @@ may rebind with exact `docker:<network>` provenance; mixed configurations keep
 both identity models isolated; and every tuple/observation mismatch is
 non-mutating.
 
-Thirteen fuzz targets cover config decoding, API decoding, policy explanation, runtime
+Fourteen fuzz targets cover config decoding, API decoding, policy explanation, runtime
 prefix compilation, nft transaction validation/fingerprinting, claim
 validation, strict Docker daemon JSON, managed route-table JSON, adoption error
-redaction, managed GRUB token parsing, and feed parsing. The adoption target proves untrusted provider/path/error strings
+redaction, managed GRUB token parsing, full-ruleset status projection, and feed
+parsing. The adoption target proves untrusted provider/path/error strings
 reduce to one bounded operator code without echoing input. Example bounded run:
 
 ```bash

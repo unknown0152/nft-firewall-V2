@@ -140,6 +140,24 @@ sudo nftfw tunnel restart
 
 Public IPv4 must remain blocked on the physical uplink during tunnel failure.
 
+## Dashboard status is slow or degraded
+
+Compare the CLI and dashboard result without bypassing either status socket:
+
+```bash
+sudo nftfw status --json
+curl --fail --max-time 2 http://127.0.0.1:8787/api/status
+sudo journalctl -u nftfwd -u nftfw-web
+```
+
+A degraded response is a security result, not a performance workaround. Do not
+cache or forge `protected`, disable the provenance/fingerprint/Docker/
+WireGuard checks, enlarge timeouts, or expose the loopback listener. Preserve
+the bounded error and check CPU, memory pressure, Docker responsiveness, the
+local nftables command, and storage latency. The release performance harness
+refuses an operator host and may be run only in an approved disposable VM; its
+use and unchanged budgets are documented in `TESTING.md`.
+
 ## Docker setup refused
 
 Common pre-mutation codes include:

@@ -86,20 +86,24 @@ func (b *Backend) AuditForeignProvenanceMask(ctx context.Context) (ForeignProven
 		return base, fmt.Errorf("foreign provenance audit scope=%s: list nft ruleset: %s: %w", ProvenanceCollisionScope, detail, err)
 	}
 
-	audit, first, err := auditForeignProvenanceRulesetJSON([]byte(out), b.Owned)
+	return foreignProvenanceAuditFromJSON([]byte(out), b.Owned)
+}
+
+func foreignProvenanceAuditFromJSON(data []byte, owned []Table) (ForeignProvenanceAudit, error) {
+	audit, first, err := auditForeignProvenanceRulesetJSON(data, owned)
 	if err != nil {
 		return audit, fmt.Errorf("foreign provenance audit scope=%s: %w", ProvenanceCollisionScope, err)
 	}
-	if audit.CollidingRules != 0 {
-		if first == nil {
-			return audit, fmt.Errorf("foreign provenance audit scope=%s mask=0x%08x: collision count has no rule location", ProvenanceCollisionScope, provenance.Mask)
-		}
-		return audit, fmt.Errorf(
-			"foreign provenance audit scope=%s mask=0x%08x: %d foreign rule(s) collide; first %s: %s",
-			ProvenanceCollisionScope, provenance.Mask, audit.CollidingRules, first.location.String(), first.reason,
-		)
+	if audit.CollidingRules == 0 {
+		return audit, nil
 	}
-	return audit, nil
+	if first == nil {
+		return audit, fmt.Errorf("foreign provenance audit scope=%s mask=0x%08x: collision count has no rule location", ProvenanceCollisionScope, provenance.Mask)
+	}
+	return audit, fmt.Errorf(
+		"foreign provenance audit scope=%s mask=0x%08x: %d foreign rule(s) collide; first %s: %s",
+		ProvenanceCollisionScope, provenance.Mask, audit.CollidingRules, first.location.String(), first.reason,
+	)
 }
 
 type provenanceRuleLocation struct {
