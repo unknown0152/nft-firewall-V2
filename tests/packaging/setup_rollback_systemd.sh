@@ -78,7 +78,21 @@ write_journal() {
             started_at:$started_at,
             updated_at:$started_at,
             deadline:$deadline,
-            summary:{schema:"nftfw.setup-plan.v1"}
+            summary:{
+                schema:"nftfw.setup-plan.v1",
+                uplink:"",
+                vpn_interface:"",
+                ipv6_interfaces:[],
+                lan_networks:[],
+                management_tcp:[],
+                public_tcp:[],
+                public_udp:[],
+                ipv6_mode:"",
+                docker_mode:"",
+                docker_restart_required:false,
+                resolver_mode:"",
+                source_mode_warning:false
+            }
         }' >"$temporary"
     chmod 0600 "$temporary"
     mv -f -- "$temporary" "$journal"
@@ -90,7 +104,10 @@ chmod 0600 /run/nftfw/setup.lock
 flock -n "$lock_fd" || fail "could not model the foreground setup lock"
 before_invocation=$(systemctl show --value --property=InvocationID "$service")
 systemctl start "$timer"
-for _ in $(seq 1 240); do
+# Both the elapsed OnBootSec trigger and recurring OnUnitActiveSec=15s use
+# systemd's default AccuracySec=1min. Permit the complete coalescing window
+# plus scheduling margin for both observations.
+for _ in $(seq 1 900); do
     after_invocation=$(systemctl show --value --property=InvocationID "$service")
     [[ -n $after_invocation && $after_invocation != "$before_invocation" ]] && break
     sleep 0.1
@@ -126,7 +143,7 @@ flock -u "$lock_fd"
 eval "exec ${lock_fd}>&-"
 unset lock_fd
 systemctl reset-failed "$service"
-for _ in $(seq 1 240); do
+for _ in $(seq 1 900); do
     status=$(jq -r '.status' "$journal")
     [[ $status == rolled_back ]] && break
     sleep 0.1

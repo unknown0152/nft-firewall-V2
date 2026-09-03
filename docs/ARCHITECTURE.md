@@ -143,6 +143,19 @@ resolve interrupted publication, reconstruct committed enforcement before
 normal networking, and remain active. The nonmutating readiness unit verifies
 the result before final network consumers may proceed.
 
+Every service that can independently reach the shared mutation lock creates
+`/run/nftfw` through the same systemd `RuntimeDirectory=` contract:
+`root:nftfw-web`, mode `0750`, with preservation across oneshot exit and
+restart. This includes early restore, readiness, the daemon, and each
+independently timer-activated rollback path. Early restore and readiness are
+also co-scheduled as separate `sysinit.target` wants, ordered early first, so
+neither relies on a conditionally started network consumer to construct the
+boot transaction. The VPN unit is deliberately a non-owner: its `Requires=`
+and `After=` edges require successful readiness, which has already established
+the directory, but readiness still has no activating edge to early restore.
+A missing runtime directory therefore cannot fail mount-namespace construction
+before the enforcement verifier runs.
+
 If the database cannot be opened, the independent path cannot authenticate its
 deadline metadata. It restores only when scoped foreign-rules audits pass, the
 authoritative pointer and immutable snapshot (including provenance) verify,

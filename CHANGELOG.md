@@ -20,6 +20,13 @@
 - Add `nftfw-vpn.service` and an independent managed-setup rollback
   service/timer plus a separate managed-change rollback service/timer while
   preserving the nonactivating package lifecycle.
+- Make readiness and independently timer-activated rollback services establish
+  the same preserved `root:nftfw-web`, mode-`0750` `/run/nftfw` directory
+  before systemd constructs their mount namespaces. Preserve independent early
+  scheduling and fail closed when early enforcement is skipped or fails.
+- Co-schedule early restore and readiness independently from `sysinit.target`
+  and make protected consumers require the nonmutating verifier, without
+  giving readiness an activating edge to early restoration.
 - Extend the additive status-v2 and read-only dashboard views with managed
   mode, public exposure, and LAN policy.
 - Preserve 2.0.3 advanced TOML, schema-6 state, generations, snapshots,

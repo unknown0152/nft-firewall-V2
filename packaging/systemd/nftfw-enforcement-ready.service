@@ -11,7 +11,10 @@ ExecStart=/usr/lib/nftfw/nftfwd --verify-enforcement --state-dir /var/lib/nftfw
 ExecStartPost=/usr/lib/nftfw/nftfwd --handoff-initramfs-guard --state-dir /var/lib/nftfw
 RemainAfterExit=yes
 User=root
-Group=root
+Group=nftfw-web
+RuntimeDirectory=nftfw
+RuntimeDirectoryMode=0750
+RuntimeDirectoryPreserve=yes
 UMask=0077
 NoNewPrivileges=yes
 ProtectSystem=strict
@@ -34,4 +37,5 @@ CapabilityBoundingSet=CAP_NET_ADMIN
 AmbientCapabilities=CAP_NET_ADMIN
 
 [Install]
+WantedBy=sysinit.target
 RequiredBy=network-pre.target

@@ -6,7 +6,7 @@ Audit date: 2026-08-16, 2026-08-17, 2026-08-23, 2026-08-24,
 nftables ownership, Unix APIs, persistence/rollback, systemd, integrations,
 web, installers, tests, dependencies, Git history, and release contents.
 
-Current source disposition: **2.1.0 AMENDMENT AB SOURCE VALIDATED; CANDIDATES
+Current source disposition: **2.1.0 AMENDMENT AC SOURCE VALIDATED; CANDIDATES
 PENDING**.
 The Amendment W retry and native-lifecycle rows pass, but the mandatory W11
 boot capture reopened NFV2-057 before source freeze. Amendment X now supplies
@@ -59,8 +59,23 @@ showed OVMF had regenerated PXE and HTTP entries, which must remain forbidden.
 Amendment AB makes singleton labels unique literal switch cases, adds explicit
 missing/duplicate/malformed and retained refusal coverage, and passes a real
 reboot/resume with the virtual NIC option ROM disabled while the network and
-Docker holds remain effective. Replacement candidate builds, renewed E-R2,
-tag validation, publication, and deployment have not been executed. The findings
+Docker holds remain effective. That replacement then passed fourteen E-R2
+subjects before repeated normal boot exposed NFV2-068: readiness could reach
+mount namespace construction before `/run/nftfw` existed. The service failed
+with `226/NAMESPACE` and SSH remained blocked. Amendment AC gives readiness
+and every independently timer-activated rollback path the same preserved
+`root:nftfw-web`, mode-`0750` runtime-directory identity. The required
+repeated-boot audit then exposed NFV2-069: consumer `Requisite=` ordering and
+the early unit's implicit basic-target dependency could respectively skip the
+boot transaction or form a socket/readiness ordering cycle. Early now has
+explicit early-boot dependencies, early/readiness are independent
+`sysinit.target` wants, and protected consumers require the nonmutating
+verifier without giving it an activating edge to early restore. Source
+contracts, condition-skip and early-failure cases, 150 absent-directory
+starts, concurrent lifecycle proof, and twenty consecutive unique ROM-less
+boots with zero pre-marker packets cover the correction. Replacement
+candidate builds, renewed E-R2, tag validation, publication, and deployment
+have not been executed. The findings
 below through NFV2-030 record the tagged 2.0.1 audit history; NFV2-031 through
 NFV2-041 record the accepted 2.0.2/2.0.3 release work; NFV2-042 onward records
 2.1.0 source work.
@@ -155,6 +170,8 @@ and post-tag gates.
 | NFV2-065 | Inverse-boot rollback finalization cleared an uncommitted first-setup generation even though the rolled-back database row, immutable snapshot, backup, terminal journal lineage, and provenance remained bound to it | HIGH | Preserve the exact generation when finalizing only an uncommitted first-setup rollback; retain zero for genuine pre-generation rollback and clear package-only committed handoff so it cannot masquerade as complete retry evidence | CLOSED at source boundary; direct finalizer/write-failure/package-handoff/classifier proof plus disposable generations 1/2 exact rollback, nonmutating retry, and generation-3 success PASS; renewed E-R2 NOT EXECUTED |
 | NFV2-066 | Status independently reread the same nftables state for ownership, integrity, fingerprint, and provenance and inspected Docker networks one at a time, exceeding the mandatory dashboard budget while widening cross-read race windows | HIGH | Derive all nftables results from one fresh immutable full-ruleset JSON snapshot and batch all authorized Docker inspections by immutable ID; preserve fresh config, state, forwarding, WireGuard, claim, and integration checks with no cache or skipped security gate | CLOSED at source boundary; one-read/batch, drift, adjacent-request, HTTP-to-Unix, cancellation, saturation, race, allocation, and no-provider disposable timing/resource proof PASS; strict healthy-protected E-R2 NOT EXECUTED |
 | NFV2-067 | The E-R2 hard stop attributed EFI refusal to a duplicate parser arm, but the exact frozen source digest contained one arm; the disposable firmware had regenerated forbidden PXE/HTTP entries after reboot | MEDIUM | A false root cause could invite weakening network-boot refusal or leave singleton dispatch vulnerable to a repeated empty arm | Parse `BootCurrent`, `BootOrder`, and `BootNext` through unique literal switch cases; explicitly test valid, missing, duplicate, malformed, inactive, network, one-shot, order, loader, distribution, and architecture identities; disable the disposable NIC option ROM before the mandatory reboot instead of relaxing verification | Exact source/guest audit, focused unit/source-contract proof, and direct disposable reboot to `resume_ready` plus protected completion PASS | CLOSED at source boundary; complete renewed E-R2 NOT EXECUTED |
+| NFV2-068 | Independently scheduled readiness declared `/run/nftfw` writable but relied on the conditionally scheduled early unit to create it | HIGH | An intermittent boot ordering path failed systemd mount namespace construction with `226/NAMESPACE` and kept all dependent network consumers unavailable | Make readiness and independently timer-activated rollback paths identical preserved owners of the shared `root:nftfw-web`, mode-`0750` runtime directory; retain nonactivating ordering and application-level verification | Source graph/sandbox contracts, condition-skipped and failed-early refusal, 150 absent-directory starts, concurrent-owner lifetime, disposable root/umask suite, and repeated-boot fixture | CLOSED at source boundary; complete renewed E-R2 NOT EXECUTED |
+| NFV2-069 | A protected consumer's nonactivating `Requisite=readiness` could be evaluated before it caused `network-pre.target` to schedule readiness; naively adding early to sysinit retained an implicit `After=basic.target` and formed a cycle through protected sockets | HIGH | Depending on transaction construction, networking/SSH remained inactive or systemd deleted early's job; readiness then failed closed because final enforcement was absent | Give early explicit `DefaultDependencies=no` plus `After=local-fs.target`; schedule early and readiness independently as sysinit wants; make consumers require the nonmutating verifier while readiness retains no activating edge to early | Source graph and systemd verification, preserved failed cycle/skip boots, twenty consecutive unique ROM-less boots, readiness-before-SSH, zero pre-marker packets, post-readiness traffic, and clean overlay | CLOSED at source boundary; complete renewed E-R2 NOT EXECUTED |
 
 ## Adversarial review areas
 
@@ -232,7 +249,14 @@ the source-only reference run passes every unchanged latency and resource
 budget. Amendment AB additionally passes the exact singleton-dispatch and
 expanded EFI refusal matrix plus a real reboot/resume with the virtual
 firmware network option-ROM path disabled; strict network-boot refusal remains
-unchanged. Candidate
+unchanged. Amendment AC additionally establishes deterministic runtime-directory
+ownership and an acyclic independent boot schedule without changing firewall
+policy or allowing readiness to activate early restoration. Its
+direct disposable regression proves missing and failed early enforcement
+remain blocked while systemd reaches the application verifier rather than
+`226/NAMESPACE`; 150 absent-directory starts and concurrent owner stops retain
+the exact shared identity. Twenty consecutive ROM-less source-stage boots also
+retain zero pre-marker packets and readiness-before-SSH ordering. Candidate
 source/history/extracted-tree scans and two-parent comparison are generated
 only after the clean source freeze. Privileged R2, tagged package/archive
 inspection, post-tag validation, publication, and deployment are not current

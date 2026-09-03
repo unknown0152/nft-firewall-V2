@@ -1,11 +1,11 @@
 # NFT Firewall V2 2.1.0 Source Test Results
 
-Source disposition: **AMENDMENT AB SOURCE VALIDATED; CANDIDATES PENDING**
+Source disposition: **AMENDMENT AC SOURCE VALIDATED; CANDIDATES PENDING**
 
-Validation date: 2026-09-02
+Validation date: 2026-09-03
 
 Reopened source baseline:
-`34ccc684b90286a3658564ad542371486fdff987`
+`2c757ed28a2efe0fa9f539ec7f00d95f56daece7`
 
 This tracked report is the pre-build source snapshot. The later frozen commit,
 candidate build evidence, candidate comparison, R2 evidence, tag, and any
@@ -42,6 +42,10 @@ publication decision must remain external and checksummed.
 | Amendment AB exact-source audit | PASS; the hard-stop file digest matches the frozen source object, which contains one active `BootCurrent` arm. The preserved failed guest shows regenerated PXE/HTTP firmware entries, so network-boot refusal—not a consumed `BootCurrent` line—caused the bounded error |
 | Amendment AB EFI parser regression | PASS; exact singleton labels use a literal switch, one valid amd64 and arm64 Debian identity passes, and missing/duplicate/malformed/inactive/network/`BootNext`/wrong-order/wrong-loader/non-Debian/unsupported-architecture cases fail closed |
 | Amendment AB direct disposable reboot/resume | PASS; after a real reboot with the virtual NIC option ROM disabled, status reaches `resume_ready`, the resume guard and Docker hold remain active until verification, and the same transaction completes protected setup |
+| Baseline E-R2 repeated normal boot | **FAIL / HARD STOP** after fourteen passed subjects; two ROM-less boots passed, but the third reached readiness before `/run/nftfw` existed, exited `226/NAMESPACE`, and kept SSH blocked; no tag or live-host change occurred |
+| Amendment AC systemd source contract | PASS; every independently activatable `/run/nftfw` writer owns the exact preserved `root:nftfw-web`, mode-`0750` directory; early/readiness are independent `sysinit.target` wants; the VPN remains a non-owner behind readiness `Requires=`/`After=` without giving readiness an activating edge to early restore |
+| Amendment AC disposable runtime-directory regression | PASS; condition-skipped and injected-failed early enforcement remain blocked without namespace failure, 150 absent-directory service starts pass, and concurrent owners preserve the shared directory and peer state |
+| Amendment AC repeated-boot source regression | PASS; twenty consecutive unique ROM-less boots retain exact installed readiness identity, early/readiness success, readiness-before-SSH timing, application verification, transient-guard cleanup, no namespace failure or NFTFW ordering cycle, zero frames before every initramfs marker, and post-readiness traffic; complete renewed E-R2 must repeat this candidate-bound |
 | Disposable native initramfs package lifecycle | PASS in W7; inert install, exact native ownership/order, idempotence, tamper/foreign refusal, disabled restoration, and purge cleanup |
 | Zero-pre-readiness-packet boot | **FAIL / HARD STOP in W11**; two guest-originated IPv6 MLD/DAD frames were captured before readiness although the post-boot sysctls were disabled. Init-top is not a sufficient pre-driver boundary |
 | Amendment X direct GRUB transaction | PASS; strict BIOS/EFI identity, conflicting manager/mount/mode/link/race refusal, normalized mount identity, generated-entry argument parser, explicit two-pass resume, failed update, exact rollback, package handoff, and redacted status |
@@ -226,6 +230,7 @@ candidate builds.
 | Protected Amendment Z inverse-boot retry matrix | PASS; source-only disposable scope, not complete E-R2 |
 | Amendment AA installed status/dashboard performance | Source-only timing/resource PASS without an independent provider assignment; strict healthy-protected E-R2 repeat NOT EXECUTED |
 | Amendment AB EFI reboot/resume | Source-only direct disposable PASS; complete E-R2 repeat NOT EXECUTED |
+| Amendment AC twenty consecutive boot handoffs | PASS in the source-only disposable run; 20 unique boot IDs, zero pre-marker packets on all 20, readiness-before-SSH, post-readiness traffic, stopped clean overlay; the complete candidate-bound E-R2 repeat remains NOT EXECUTED |
 | Disposable exact-2.0.3 adoption-planner no-mutation matrix | NOT EXECUTED |
 | Real-provider VPN test | NOT EXECUTED |
 | Local release tag | NOT CREATED |

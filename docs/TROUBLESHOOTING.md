@@ -125,6 +125,31 @@ An archive-listing, checksum, staged-order, ownership, or rebuild error is a
 real failure; do not treat unreadable initramfs content as proof that the
 guard is absent.
 
+If the journal reports systemd status `226/NAMESPACE` or
+`Failed to set up mount namespacing` for an NFTFW service, do not create
+`/run/nftfw` manually and continue the boot. Confirm the installed unit is the
+packaged version and inspect the shared directory contract:
+
+```bash
+systemctl cat nftfw-early.service nftfw-enforcement-ready.service \
+  nftfw-rollback.service nftfw-managed-rollback.service \
+  nftfw-setup-rollback.service
+systemctl show -p DefaultDependencies -p Wants -p Requires -p After -p Before \
+  nftfw-early.service nftfw-enforcement-ready.service
+systemctl show -p User -p Group -p RuntimeDirectory \
+  -p RuntimeDirectoryMode -p RuntimeDirectoryPreserve \
+  nftfw-enforcement-ready.service
+```
+
+Every independently activatable writer must report the common `nftfw`
+directory, mode `0750`, preserved, with `root:nftfw-web` credentials. A
+different or shadowed unit is a package-integrity failure; keep networking
+blocked and restore the verified package rather than weakening the sandbox.
+A `Found ordering cycle on nftfw-...` journal entry is also a package or
+drop-in graph failure. Early and readiness must be independently scheduled by
+`sysinit.target`, early must not inherit `After=basic.target`, protected
+consumers must require readiness, and readiness must never activate early.
+
 ## Interrupted exposure or LAN change
 
 ```bash

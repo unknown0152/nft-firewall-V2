@@ -66,23 +66,26 @@ E-R2, tagging, and final publication approval are complete, local Stage E-R
 candidate artifacts are deliberately quarantined and cannot run or install.
 The last published stable line remains 2.0.3.
 
-The E-R2 run for source `01d559e884277a9b819aa712dec5620fed2d796a`
-passed seventeen disposable package, boot, network, Docker, recovery, and
-nonmutation subjects, then hard-stopped on the mandatory installed dashboard
-performance gate: CLI status p95 was 67.224 ms, but `/api/status` p95 was
-65.231 ms against an exclusive 50 ms budget. No tag was created. Amendment AA
-corrects the demonstrated process fan-out while keeping every fresh,
-fail-closed check: one immutable nftables ruleset read now supplies ownership,
-integrity, fingerprint, and foreign-provenance results, and one immutable-ID
-Docker inspect batch verifies all authorized networks. A fresh disposable
-managed-Docker diagnostic measured CLI p95 36.367 ms and dashboard p95 32.658
-ms, with all resource budgets passing; it had no independent provider
-assignment and therefore is not protected-status acceptance. Adjacent-request regressions prove that
-nftables drift, forwarding loss, Docker drift, WireGuard loss, database
-failure, and provenance failure degrade the very next completed response.
-The complete E-R2 matrix must run the strict shipped harness, which requires a
-healthy protected result on every sample, for the eventual frozen candidate.
-This tree remains source-only and is not yet a release.
+The E-R2 run for source `2c757ed28a2efe0fa9f539ec7f00d95f56daece7`
+passed fourteen disposable package, network, Docker, recovery, managed-setup,
+and retry subjects before repeated boot validation exposed an intermittent
+systemd runtime-directory race. On the third normal boot,
+`nftfw-enforcement-ready.service` reached mount namespace construction before
+`/run/nftfw` existed and exited `226/NAMESPACE`; SSH remained blocked, so the
+failure was secure but the candidate was not reliable. No tag was created and
+the live host was unchanged.
+
+Amendment AC makes readiness and independently timer-activated recovery units
+consistent owners of the shared `root:nftfw-web`, mode-`0750`, preserved
+runtime directory. Early restore uses explicit early-boot dependencies and is
+co-scheduled with readiness from `sysinit.target`; protected consumers require
+the nonmutating verifier, which still has no activating dependency on early
+restore and still refuses missing or failed enforcement. Source contracts and
+destructive-guest-only regressions cover absent-directory starts, injected
+early failure, concurrent owners, and twenty consecutive ROM-less boots with
+zero pre-marker packets. The complete renewed
+E-R2 matrix must repeat every row for the eventual frozen candidate. This tree
+remains source-only and is not yet a release.
 
 ## Supported clean-host setup
 

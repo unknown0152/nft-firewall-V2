@@ -830,13 +830,16 @@ class SystemdGraphContracts(unittest.TestCase):
             "crash sidecar without making it writable",
         )
 
-    def test_shared_runtime_directory_has_one_owner_and_survives_oneshots(self) -> None:
+    def test_shared_runtime_directory_has_one_identity_and_survives_oneshots(self) -> None:
         users_and_groups: set[tuple[str, str]] = set()
         for relative in (
             "packaging/systemd/nftfw-early.service",
+            "packaging/systemd/nftfw-enforcement-ready.service",
+            "packaging/systemd/nftfw-managed-rollback.service",
             "packaging/systemd/nftfw-rollback.service",
             "packaging/systemd/nftfw-setup-boot-hold.service",
             "packaging/systemd/nftfw-setup-docker-hold.service",
+            "packaging/systemd/nftfw-setup-rollback.service",
             "packaging/systemd/nftfwd.service",
         ):
             unit = parse_unit(relative)
@@ -866,9 +869,47 @@ class SystemdGraphContracts(unittest.TestCase):
             "start cannot chown-break dashboard traversal",
         )
 
+    def test_every_independent_runtime_writer_establishes_the_shared_directory(self) -> None:
+        owners = {
+            "nftfw-early.service",
+            "nftfw-enforcement-ready.service",
+            "nftfw-managed-rollback.service",
+            "nftfw-rollback.service",
+            "nftfw-setup-boot-hold.service",
+            "nftfw-setup-docker-hold.service",
+            "nftfw-setup-rollback.service",
+            "nftfwd.service",
+        }
+        runtime_writers: set[str] = set()
+        for path in sorted((ROOT / "packaging/systemd").glob("*.service")):
+            unit = parse_unit(str(path.relative_to(ROOT)))
+            if any(
+                value == "/run/nftfw" or value.startswith("/run/nftfw/")
+                for value in words(unit, "Service", "ReadWritePaths")
+            ):
+                runtime_writers.add(path.name)
+
+        self.assertEqual(
+            runtime_writers - owners,
+            {"nftfw-vpn.service"},
+            "an independently activatable /run/nftfw writer must create the shared "
+            "runtime directory before systemd constructs its mount namespace",
+        )
+        vpn = parse_unit("packaging/systemd/nftfw-vpn.service")
+        self.assertIn(
+            "nftfw-enforcement-ready.service",
+            words(vpn, "Unit", "Requires"),
+        )
+        self.assertFalse(values(vpn, "Unit", "Requisite"))
+        self.assertIn(
+            "nftfw-enforcement-ready.service",
+            words(vpn, "Unit", "After"),
+        )
+
     def test_early_unit_remains_active_and_has_exact_storage_shape(self) -> None:
         relative = "packaging/systemd/nftfw-early.service"
         unit = parse_unit(relative)
+        self.assertEqual(one(unit, "Unit", "DefaultDependencies"), "no")
         self.assertEqual(one(unit, "Service", "Type"), "oneshot")
         self.assertEqual(
             one(unit, "Service", "RemainAfterExit"),
@@ -908,6 +949,11 @@ class SystemdGraphContracts(unittest.TestCase):
             }.issubset(words(unit, "Unit", "Before")),
             "early restore must precede networking, the daemon, and readiness",
         )
+        self.assertEqual(
+            words(unit, "Install", "WantedBy"),
+            {"sysinit.target", "network-pre.target"},
+            "boot must schedule early independently before readiness",
+        )
 
     def test_ready_unit_is_independently_scheduled_and_read_only(self) -> None:
         relative = "packaging/systemd/nftfw-enforcement-ready.service"
@@ -944,28 +990,64 @@ class SystemdGraphContracts(unittest.TestCase):
             "the readiness verifier may write only the common volatile flock path, "
             "never durable state",
         )
-        self.assertFalse(
-            values(unit, "Service", "RuntimeDirectory"),
-            "readiness must use the directory retained by early and must not become "
-            "another lifecycle owner that can remove shared sockets or the lock",
+        self.assertEqual(
+            words(unit, "Service", "RuntimeDirectory"),
+            {"nftfw"},
+            "readiness is independently scheduled and must create /run/nftfw before "
+            "systemd constructs its ReadWritePaths mount namespace",
         )
+        self.assertEqual(one(unit, "Service", "RuntimeDirectoryMode"), "0750")
+        self.assertEqual(one(unit, "Service", "RuntimeDirectoryPreserve"), "yes")
+        self.assertEqual(one(unit, "Service", "User"), "root")
+        self.assertEqual(one(unit, "Service", "Group"), "nftfw-web")
         self.assertEqual(
             words(unit, "Install", "RequiredBy"), {"network-pre.target"}
         )
-        self.assertFalse(
-            values(unit, "Install", "WantedBy"),
-            "readiness is required by network-pre only after explicit enablement",
+        self.assertEqual(
+            words(unit, "Install", "WantedBy"), {"sysinit.target"},
+            "sysinit must co-schedule readiness with the independent early restore",
         )
 
-    def _requisite_templates(self, target: str) -> list[Path]:
+    def test_runtime_directory_disposable_regression_is_bounded_and_fail_closed(self) -> None:
+        fixture = read("tests/packaging/runtime_directory_disposable.sh")
+        self.assertIn("/run/nftfw-disposable-test-guest", fixture)
+        self.assertIn("AMENDMENT_AC_ABSENT_DIRECTORY_FAIL_CLOSED_PASS", fixture)
+        self.assertIn("AMENDMENT_AC_EARLY_FAILURE_FAIL_CLOSED_PASS", fixture)
+        self.assertIn("AMENDMENT_AC_150_ABSENT_DIRECTORY_STARTS_PASS", fixture)
+        self.assertIn("AMENDMENT_AC_SHARED_LIFETIME_PASS", fixture)
+        self.assertIn("ExecMainStatus", fixture)
+        self.assertIn("!= 226", fixture)
+        self.assertIn("systemctl start --no-block", fixture)
+        self.assertIn("systemctl is-enabled --quiet", fixture)
+
+        boot = read("tests/packaging/runtime_directory_boot_disposable.sh")
+        self.assertIn("required_boots=20", boot)
+        self.assertIn("AMENDMENT_AC_20_CONSECUTIVE_BOOT_HANDOFFS_PASS", boot)
+        self.assertIn("ActiveEnterTimestampMonotonic", boot)
+        self.assertIn("--verify-enforcement", boot)
+        self.assertIn("nftfw_initramfs_guard", boot)
+        self.assertIn("Failed to set up mount namespacing", boot)
+        self.assertIn("Found ordering cycle on nftfw-", boot)
+        self.assertIn("/run/nftfw-disposable-test-guest", boot)
+        testing = read("docs/TESTING.md")
+        development = read("docs/DEVELOPMENT.md")
+        for name in (
+            "runtime_directory_disposable.sh",
+            "runtime_directory_boot_disposable.sh",
+        ):
+            self.assertIn(name, testing)
+            self.assertIn(name, development)
+        self.assertIn("No harness may pre-create `/run/nftfw`", testing)
+
+    def _dependency_templates(self, directive: str, target: str) -> list[Path]:
         result: list[Path] = []
-        needle = f"Requisite={target}"
+        needle = f"{directive}={target}"
         for path in sorted((ROOT / "packaging/systemd").rglob("*.conf.example")):
             if needle in path.read_text(encoding="utf-8"):
                 result.append(path)
         return result
 
-    def test_final_dependency_templates_are_inert_and_requisite_only(self) -> None:
+    def test_final_dependency_templates_are_inert_and_fail_closed(self) -> None:
         required_template_paths = {
             ROOT / "packaging/systemd/nftfwd-final-early.conf.example",
             ROOT / "packaging/systemd/nftfw-rollback-final-early.conf.example",
@@ -975,16 +1057,16 @@ class SystemdGraphContracts(unittest.TestCase):
             all(path.is_file() for path in required_template_paths),
             "the daemon, rollback, and consumer final dependency templates must all exist",
         )
-        expected_counts = {
+        expected_dependencies = {
             # The daemon and static rollback service receive separate inactive
             # copies of this final post-commit edge.
-            "nftfw-early.service": 2,
+            ("Requisite", "nftfw-early.service"): 2,
             # One reusable template is installed explicitly for each audited
             # network consumer during the later host handoff.
-            "nftfw-enforcement-ready.service": 1,
+            ("Requires", "nftfw-enforcement-ready.service"): 1,
         }
-        for target, expected_count in expected_counts.items():
-            templates = self._requisite_templates(target)
+        for (directive, target), expected_count in expected_dependencies.items():
+            templates = self._dependency_templates(directive, target)
             self.assertEqual(
                 len(templates),
                 expected_count,
@@ -994,9 +1076,13 @@ class SystemdGraphContracts(unittest.TestCase):
             for path in templates:
                 relative = str(path.relative_to(ROOT))
                 unit = parse_unit(relative)
-                self.assertEqual(words(unit, "Unit", "Requisite"), {target})
+                self.assertEqual(words(unit, "Unit", directive), {target})
                 self.assertEqual(words(unit, "Unit", "After"), {target})
+                if directive == "Requires":
+                    self.assertFalse(values(unit, "Unit", "Requisite"))
                 for key in self.ACTIVATING_KEYS:
+                    if key == directive:
+                        continue
                     self.assertFalse(
                         values(unit, "Unit", key),
                         f"{relative} must not contain activating {key}= edges",

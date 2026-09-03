@@ -100,9 +100,20 @@ timer, and publish commits through prepared database state, an immutable
 checksum-protected snapshot, a generation/checksum enforcement pointer, and a
 final database transition. Early recovery is idempotent across each boundary;
 `network-pre.target` independently pulls the early restorer and requires a
-nonmutating readiness verifier. Readiness orders after early without a
-`Requisite=` or activating dependency. Final network consumers retain
-nonactivating `Requisite=`/`After=` edges to the already-active verifier.
+nonmutating readiness verifier. The two services are also independent
+`sysinit.target` wants, which guarantees that both jobs exist in the boot
+transaction before a protected consumer is considered. Readiness orders after
+early without a `Requisite=` or activating dependency on it. Final network
+consumers use `Requires=`/`After=` edges to readiness, preventing a direct
+consumer transaction from being skipped while still activating only the
+nonmutating verifier, never early restoration.
+
+All independently activatable services that need the common mutation lock
+declare the same preserved systemd runtime-directory identity. Readiness owns
+that directory for namespace construction but does not gain an activating
+dependency on early restore. Timer recovery consequently cannot fail merely
+because the daemon did not start, while enforcement verification remains the
+only path that releases network consumers.
 
 Security implications: CLI/daemon death and database corruption do not imply
 allow-all. Missing or corrupt immutable recovery evidence stops before any

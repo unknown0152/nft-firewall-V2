@@ -11,14 +11,14 @@ Release approval status: STAGE_R_CANDIDATE_ONLY
 | Build date | `@BUILD_DATE@` |
 | Build disposition | `@RELEASE_DISPOSITION@` |
 | Artifact label | `@RELEASE_ARTIFACT_LABEL@` |
-| Source-only Stage E-R | AMENDMENT AB SOURCE GATES PASS; CANDIDATES PENDING |
-| Privileged Stage E-R2 | NOT AUTHORIZED for the Amendment AB working tree |
+| Source-only Stage E-R | AMENDMENT AC SOURCE GATES PASS; CANDIDATES PENDING |
+| Privileged Stage E-R2 | NOT AUTHORIZED for the Amendment AC working tree |
 | Publication | NOT AUTHORIZED |
 | Deployment | NOT AUTHORIZED |
 
 ## Source decision
 
-The 2.1.0 working source has passed the Amendment AB gate set and is accepted
+The 2.1.0 working source has passed the Amendment AC gate set and is accepted
 for a clean source freeze and the two intrinsically nondeployable candidate
 builds. The retained Amendment E-through-Z source scope
 includes Go 1.27, one-file managed setup, strict VPN import, managed routing,
@@ -43,6 +43,15 @@ literal switch arm, expands fail-closed `BootCurrent` coverage, and retains the
 strict rejection of firmware network boot paths. Its direct disposable reboot
 uses a virtual NIC without an option ROM, reaches `resume_ready` while both
 pre-policy holds remain effective, and completes the protected transaction.
+Amendment AC gives readiness and the independent rollback timers deterministic
+ownership of the common runtime directory before systemd constructs their
+mount namespaces. Early uses explicit early-boot dependencies; early and
+readiness are independently scheduled by `sysinit.target`; protected consumers
+require the verifier; and readiness still has no activating edge to early. The
+disposable source fixtures prove condition-skipped and failed early enforcement
+remain blocked, 150 absent-directory starts succeed, concurrent owners cannot
+remove or chown-break shared state, and twenty consecutive ROM-less boots
+release SSH only after verification with zero pre-marker packets.
 
 The candidate binaries permit only their quarantine-safe behavior, candidate
 daemon/web processes refuse startup, and candidate Debian packages refuse
@@ -178,8 +187,12 @@ that the frozen parser already had one active `BootCurrent` arm and that OVMF
 had regenerated PXE/HTTP entries across reboot. Amendment AB preserves that
 network refusal, makes singleton dispatch compile-time unique, and passes the
 focused real-reboot source regression with firmware network option ROMs
-disabled. The replacement clean freeze and two quarantined candidate builds may
+disabled. Its E-R2 replacement passed fourteen subjects and then failed closed
+on the intermittent readiness runtime-directory race. Amendment AC corrects
+that shared systemd ownership and directly coupled boot-transaction ordering
+boundary. Its source run passes twenty consecutive ROM-less boots. The
+replacement clean freeze and two quarantined candidate builds may
 proceed. E-R2, tagging, publication, installation, and deployment remain
 outside this report.
 
-R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED FOR THE AMENDMENT AB CORRECTION
+R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED FOR THE AMENDMENT AC CORRECTION

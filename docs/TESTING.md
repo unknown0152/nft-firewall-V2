@@ -1,6 +1,6 @@
 # Testing
 
-Current disposition: **2.1.0 AMENDMENT AB STAGE E-R SOURCE VALIDATION**.
+Current disposition: **2.1.0 AMENDMENT AC STAGE E-R SOURCE VALIDATION**.
 Source-only results are consolidated in `TEST_RESULTS.md`. The narrowly
 approved source-stage disposable GRUB/boot, native-initramfs, setup-guard, and
 exact-package rollback preflights have run. The complete namespace, Docker,
@@ -229,6 +229,37 @@ post-boot action must observe `resume_ready`, the exact resume guard, inactive
 Docker service, active socket queue, and activating Docker hold before the same
 profile completes protected setup. This is focused source-stage evidence, not
 the complete E-R2 matrix.
+
+Amendment AC adds a destructive-guest-only systemd runtime-directory fixture.
+It requires a clean disposable guest, exact installed unit hashes, inactive
+NFTFW services/timers, no committed enforcement, and the standard root-owned
+mode-`0600` guest marker:
+
+```bash
+sudo ./tests/packaging/runtime_directory_disposable.sh \
+  READY_UNIT_SHA256 MANAGED_ROLLBACK_UNIT_SHA256 SETUP_ROLLBACK_UNIT_SHA256
+```
+
+The fixture accepts only an absent runtime path or the verified exact empty
+package-created directory and removes the latter before testing. It then proves
+a condition-skipped early unit and an injected early failure both
+keep readiness fail closed without `226/NAMESPACE`. It performs 50 fresh
+absent-directory starts for each of readiness, managed rollback, and setup
+rollback, followed by concurrent-owner stop/lifetime checks. It restores the
+empty package directory before exit and must never run on an operator host.
+
+The external boot controller invokes
+`tests/packaging/runtime_directory_boot_disposable.sh` after each of twenty
+independent ROM-less boots. Each invocation binds the installed readiness-unit
+hash, records one unique kernel boot ID, requires early and readiness success,
+proves readiness became active before SSH, reruns the application verifier,
+requires every transient guard to be absent, and rejects a namespace-failure
+journal or NFTFW ordering-cycle diagnostic. Packet capture and
+marker-before-packet assertions remain controller responsibilities. The
+Amendment AC source run completed all twenty consecutive boots with unique
+boot IDs and zero captured frames before every initramfs marker; renewed E-R2
+must repeat the sequence from its own candidate-bound guest.
+No harness may pre-create `/run/nftfw`.
 
 The setup-guard unit regression covers one and multiple endpoint `/32`
 elements, exact interval flags, deterministic order, malformed/broader-prefix

@@ -156,9 +156,11 @@ public service exposure, container forwarding, NAT, and IPv6 hooks.
 ## 9. Install boot dependencies
 
 The package ships inert example drop-ins. Select only the consumers that must
-wait for verified enforcement. Final consumer drop-ins should use
-`Requisite=` and `After=` on `nftfw-enforcement-ready.service` so a routine
-consumer restart cannot activate early restoration by itself.
+wait for verified enforcement. Final consumer drop-ins must use `Requires=`
+and `After=` on `nftfw-enforcement-ready.service`; the enabled early/readiness
+units are independently co-scheduled from `sysinit.target`. A direct consumer
+can therefore start the nonmutating verifier but cannot activate early
+restoration by itself.
 
 Before first activation, verify the complete graph:
 

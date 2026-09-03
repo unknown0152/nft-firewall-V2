@@ -390,9 +390,22 @@ cannot replay.
 after early but has no `Wants=`, `Requires=`, or `Requisite=` edge to it, so
 the common boot transaction can run early first while a manual readiness start
 cannot activate snapshot restoration. The verifier, required by
-`network-pre.target`, is the fail-closed success dependency. Final consumer
-drop-ins retain `Requisite=` plus `After=` on readiness so a routine consumer
-restart cannot activate either readiness or early restore.
+`network-pre.target`, is the fail-closed success dependency. Both early and
+readiness are independently wanted by `sysinit.target`, ensuring the boot
+transaction contains both jobs even when a network consumer would otherwise
+be condition-skipped. Final consumer drop-ins use `Requires=` plus `After=` on
+readiness so a direct consumer transaction cannot be skipped. Readiness has no
+activating edge to early restore, so the consumer can start only the
+nonmutating verifier and cannot start snapshot restoration.
+
+Early restore and readiness both establish the same preserved
+`RuntimeDirectory=nftfw` identity (`root:nftfw-web`, mode `0750`) before their
+service sandboxes are constructed. This shared ownership does not make
+readiness activate early restore: a condition-skipped, failed, or manually
+absent early unit still makes the verifier fail and keeps `network-pre.target`
+and SSH blocked. The independent setup, managed-change, and generation
+rollback services use the same identity so their timers can recover even when
+the daemon never created `/run/nftfw` on that boot.
 
 After verification, readiness invokes the static initramfs handoff mode. It
 takes the canonical mutation lock and removes the bootstrap table only when
