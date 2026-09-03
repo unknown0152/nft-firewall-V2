@@ -386,14 +386,19 @@ func verifyEFIBootOutput(data []byte, arch string) error {
 	current, order, currentCount, orderCount := "", "", 0, 0
 	entries := map[string]string{}
 	for _, line := range lines {
-		switch {
-		case strings.HasPrefix(line, "BootCurrent: "):
-			current, currentCount = strings.TrimSpace(strings.TrimPrefix(line, "BootCurrent: ")), currentCount+1
-		case strings.HasPrefix(line, "BootOrder: "):
-			order, orderCount = strings.TrimSpace(strings.TrimPrefix(line, "BootOrder: ")), orderCount+1
-		case strings.HasPrefix(line, "BootNext: "):
-			return errors.New("one-shot EFI boot override is active")
-		case len(line) >= 9 && strings.HasPrefix(line, "Boot"):
+		// A switch over exact singleton labels makes duplicate parser arms a
+		// compile-time error while preserving fail-closed duplicate evidence.
+		if label, value, found := strings.Cut(line, ": "); found {
+			switch label {
+			case "BootCurrent":
+				current, currentCount = strings.TrimSpace(value), currentCount+1
+			case "BootOrder":
+				order, orderCount = strings.TrimSpace(value), orderCount+1
+			case "BootNext":
+				return errors.New("one-shot EFI boot override is active")
+			}
+		}
+		if len(line) >= 9 && strings.HasPrefix(line, "Boot") {
 			identifier := line[4:8]
 			if !fourHexDigits(identifier) || line[8] != '*' && line[8] != ' ' {
 				continue

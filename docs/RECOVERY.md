@@ -338,6 +338,16 @@ profile-only setup command to continue the original transaction. Missing,
 quoted, duplicated, conflicting, or changed proof fails closed before Docker,
 forwarding, VPN, routing, or firewall mutation.
 
+`SETUP_EFI_BOOT_IDENTITY_UNSUPPORTED` is also a deliberate hard refusal. The
+bounded EFI parser requires exactly one well-formed `BootCurrent`, exactly one
+`BootOrder` with the current entry first, no `BootNext`, one active local-disk
+Debian entry using the architecture-correct shim, and no PXE, HTTP-boot, or
+MAC device path anywhere in the firmware evidence. Preserve the output of
+`sudo efibootmgr -v`; do not delete or rewrite firmware entries as an ad-hoc
+recovery step. A virtual-machine test fixture must prevent firmware network
+options from being regenerated across the required reboot rather than weaken
+or bypass this identity check.
+
 During root switch the initramfs table still denies all interfaces. Before
 `network-pre.target` is released, `nftfw-setup-boot-hold.service` takes the
 canonical setup lock, proves the exact pending transaction, and atomically

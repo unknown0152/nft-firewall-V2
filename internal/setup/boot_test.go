@@ -672,12 +672,16 @@ func TestManagedGRUBEFIIdentityMatrix(t *testing.T) {
 		name string
 		data string
 	}{
+		{name: "missing-current", data: strings.Replace(validX64, "BootCurrent: 0001\n", "", 1)},
+		{name: "duplicate-current", data: "BootCurrent: 0001\n" + validX64},
+		{name: "malformed-current", data: strings.Replace(validX64, "BootCurrent: 0001", "BootCurrent: z001", 1)},
 		{name: "network-entry", data: validX64 + "Boot0003* UEFI PXEv4 (MAC:test)/MAC(test)\n"},
 		{name: "network-continuation", data: validX64 + "  dp: /MAC(test)\n"},
 		{name: "boot-next", data: "BootNext: 0000\n" + validX64},
 		{name: "wrong-first", data: strings.Replace(validX64, "BootOrder: 0001,0000", "BootOrder: 0000,0001", 1)},
 		{name: "duplicate-order", data: strings.Replace(validX64, "BootOrder: 0001,0000", "BootOrder: 0001,0001", 1)},
 		{name: "wrong-loader", data: strings.Replace(validX64, "shimx64.efi", "foreignx64.efi", 1)},
+		{name: "non-debian", data: strings.Replace(validX64, " debian", " foreign", 1)},
 		{name: "inactive-current", data: strings.Replace(validX64, "Boot0001*", "Boot0001 ", 1)},
 		{name: "duplicate-entry", data: validX64 + "Boot0001* duplicate\n"},
 		{name: "missing-ordered-entry", data: strings.Replace(validX64, "BootOrder: 0001,0000", "BootOrder: 0001,0002", 1)},
@@ -688,6 +692,9 @@ func TestManagedGRUBEFIIdentityMatrix(t *testing.T) {
 				t.Fatal("unsafe EFI boot identity was accepted")
 			}
 		})
+	}
+	if err := verifyEFIBootOutput([]byte(validX64), "ppc64le"); err == nil {
+		t.Fatal("unsupported EFI architecture was accepted")
 	}
 }
 

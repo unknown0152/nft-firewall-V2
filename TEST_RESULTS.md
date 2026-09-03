@@ -1,11 +1,11 @@
 # NFT Firewall V2 2.1.0 Source Test Results
 
-Source disposition: **AMENDMENT AA SOURCE VALIDATED; CANDIDATES PENDING**
+Source disposition: **AMENDMENT AB SOURCE VALIDATED; CANDIDATES PENDING**
 
 Validation date: 2026-09-02
 
 Reopened source baseline:
-`01d559e884277a9b819aa712dec5620fed2d796a`
+`34ccc684b90286a3658564ad542371486fdff987`
 
 This tracked report is the pre-build source snapshot. The later frozen commit,
 candidate build evidence, candidate comparison, R2 evidence, tag, and any
@@ -38,14 +38,18 @@ publication decision must remain external and checksummed.
 | Protected Amendment Z inverse-boot retry | PASS in a fresh source-only disposable run; uncommitted generations 1/2 survive inverse-boot finalization, strict dry-run reentry remains nonmutating, and generation 3 commits before the retained Docker/VPN/leak/two-boot lifecycle completes; not E-R2 |
 | Baseline E-R2 installed performance | **FAIL / HARD STOP**; CLI p95 67.224 ms passed, but persistent-HTTP dashboard p95 65.231 ms exceeded the exclusive 50 ms budget; no tag was created |
 | Amendment AA source-only disposable performance | PASS for timing/resources; CLI median/p95/max 33.997/36.367/38.995 ms and dashboard 30.617/32.658/35.712 ms over 100 samples after 10 warmups; all RSS, cgroup-memory, and 60-second idle-CPU budgets pass. The guest had no independent provider assignment, so protected-status acceptance and complete E-R2 remain pending |
+| Baseline E-R2 managed reboot/resume | **FAIL / HARD STOP** after eleven passed subjects; the guest booted with `ipv6.disable=1` but EFI identity validation refused and no tag was created |
+| Amendment AB exact-source audit | PASS; the hard-stop file digest matches the frozen source object, which contains one active `BootCurrent` arm. The preserved failed guest shows regenerated PXE/HTTP firmware entries, so network-boot refusal—not a consumed `BootCurrent` line—caused the bounded error |
+| Amendment AB EFI parser regression | PASS; exact singleton labels use a literal switch, one valid amd64 and arm64 Debian identity passes, and missing/duplicate/malformed/inactive/network/`BootNext`/wrong-order/wrong-loader/non-Debian/unsupported-architecture cases fail closed |
+| Amendment AB direct disposable reboot/resume | PASS; after a real reboot with the virtual NIC option ROM disabled, status reaches `resume_ready`, the resume guard and Docker hold remain active until verification, and the same transaction completes protected setup |
 | Disposable native initramfs package lifecycle | PASS in W7; inert install, exact native ownership/order, idempotence, tamper/foreign refusal, disabled restoration, and purge cleanup |
 | Zero-pre-readiness-packet boot | **FAIL / HARD STOP in W11**; two guest-originated IPv6 MLD/DAD frames were captured before readiness although the post-boot sysctls were disabled. Init-top is not a sufficient pre-driver boundary |
 | Amendment X direct GRUB transaction | PASS; strict BIOS/EFI identity, conflicting manager/mount/mode/link/race refusal, normalized mount identity, generated-entry argument parser, explicit two-pass resume, failed update, exact rollback, package handoff, and redacted status |
 | Amendment X disposable GRUB/reboot/capture matrix | PASS; failed update, pre/post-reboot process death, rollback finalization, package removal/restored boot, two consecutive managed boots with zero packets before readiness and traffic after readiness, and contradictory identity with zero guest packets |
 | Static amd64/arm64 CI package build and inspection | PASS; cross-binary composite identity is matched as an exact contiguous byte sequence and does not depend on tool-specific printable-run boundaries |
 | Dependency/license inventory | PASS, 29 non-main modules |
-| Overall statement coverage | PASS, 79.0% |
-| `internal/setup` coverage | PASS, 90.0% |
+| Overall statement coverage | PASS, 79.1% |
+| `internal/setup` coverage | PASS, 90.1% |
 | `internal/bootguard` coverage | PASS, 91.2% |
 | `internal/wgconfig` coverage | PASS, 90.6% |
 | `internal/intent` coverage | PASS, 92.6% |
@@ -175,7 +179,7 @@ The same run measured `nftfwd` RSS 27,408 KiB, cgroup memory 19,509,248
 bytes, `nftfw-web` RSS 14,364 KiB, and 60-second `nftfwd` idle CPU 0.15%; all
 unchanged Amendment E budgets passed. Ten-count source benchmarks retain
 median/p95/max plus B/op and allocations/op. In the complete ten-count sweep,
-the new three-network batched Docker projection measured 16.463-17.807 us/op,
+the new three-network batched Docker projection measured 16.084-17.299 us/op,
 6436-6438 B/op, and 74 allocations/op. The timing guest had no independent
 provider assignment and is not protected-status acceptance. The shipped
 disposable-only harness requires CLI, daemon Unix-socket, and dashboard
@@ -202,8 +206,13 @@ retry, generation-3 success, Docker/VPN/leak, and managed-boot lifecycle in a
 fresh source-only disposable run. The next E-R2 passed seventeen independent
 subjects, then hard-stopped when dashboard p95 exceeded 50 ms. Amendment AA's
 freshness, transport, concurrency, and disposable installed-runtime source
-proof now passes the unchanged budget. This tracked snapshot precedes the
-replacement clean freeze and independent quarantined candidate builds.
+proof now passes the unchanged budget. Its next E-R2 passed eleven subjects and
+then stopped at EFI identity verification. Amendment AB preserves the strict
+network-boot refusal, makes exact singleton dispatch structurally unique, and
+passes the focused parser plus real-reboot resume regression using a fixture
+whose virtual NIC cannot regenerate firmware network options. This tracked
+snapshot precedes the replacement clean freeze and independent quarantined
+candidate builds.
 
 | Gate | Result |
 | --- | --- |
@@ -216,6 +225,7 @@ replacement clean freeze and independent quarantined candidate builds.
 | Protected Amendment W managed retry matrix | PASS in W6; source-only disposable scope, not complete E-R2 |
 | Protected Amendment Z inverse-boot retry matrix | PASS; source-only disposable scope, not complete E-R2 |
 | Amendment AA installed status/dashboard performance | Source-only timing/resource PASS without an independent provider assignment; strict healthy-protected E-R2 repeat NOT EXECUTED |
+| Amendment AB EFI reboot/resume | Source-only direct disposable PASS; complete E-R2 repeat NOT EXECUTED |
 | Disposable exact-2.0.3 adoption-planner no-mutation matrix | NOT EXECUTED |
 | Real-provider VPN test | NOT EXECUTED |
 | Local release tag | NOT CREATED |

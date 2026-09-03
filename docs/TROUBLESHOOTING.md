@@ -78,6 +78,16 @@ bounded error code. A missing, quoted, duplicate, or conflicting
 remote/read-only boot filesystem, or changed generated configuration is a
 hard refusal.
 
+For `SETUP_EFI_BOOT_IDENTITY_UNSUPPORTED`, capture `sudo efibootmgr -v`
+without changing it. Exactly one valid `BootCurrent`, a matching first
+`BootOrder` entry, an active local Debian disk entry, and the correct shim are
+required. Missing, duplicate, malformed, inactive, one-shot `BootNext`, PXE,
+HTTP-boot, MAC device paths, or foreign loaders all fail closed. Some virtual
+firmware recreates network boot entries after every reboot; the disposable
+test machine must disable that firmware option-ROM path before the reboot.
+Deleting entries after the failed verification or bypassing the parser is not
+a recovery procedure.
+
 `SETUP_RESUME_GUARD_*`, `SETUP_BOOT_HOLD_*`, or
 `SETUP_DOCKER_HOLD_*` means an exact guard, journal, generator fragment, or
 runtime handshake could not be proved. Preserve the journal and backup. A

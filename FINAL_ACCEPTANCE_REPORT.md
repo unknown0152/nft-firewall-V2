@@ -11,14 +11,14 @@ Release approval status: STAGE_R_CANDIDATE_ONLY
 | Build date | `@BUILD_DATE@` |
 | Build disposition | `@RELEASE_DISPOSITION@` |
 | Artifact label | `@RELEASE_ARTIFACT_LABEL@` |
-| Source-only Stage E-R | AMENDMENT AA SOURCE GATES PASS; CANDIDATES PENDING |
-| Privileged Stage E-R2 | NOT AUTHORIZED for the Amendment AA working tree |
+| Source-only Stage E-R | AMENDMENT AB SOURCE GATES PASS; CANDIDATES PENDING |
+| Privileged Stage E-R2 | NOT AUTHORIZED for the Amendment AB working tree |
 | Publication | NOT AUTHORIZED |
 | Deployment | NOT AUTHORIZED |
 
 ## Source decision
 
-The 2.1.0 working source has passed the Amendment AA gate set and is accepted
+The 2.1.0 working source has passed the Amendment AB gate set and is accepted
 for a clean source freeze and the two intrinsically nondeployable candidate
 builds. The retained Amendment E-through-Z source scope
 includes Go 1.27, one-file managed setup, strict VPN import, managed routing,
@@ -38,6 +38,11 @@ while deriving nftables ownership, integrity, fingerprint, and foreign
 provenance from one immutable ruleset snapshot and inspecting all authorized
 Docker networks in one immutable-ID batch. Package source, documentation,
 benchmarks, tests, and local nondeployable candidate builds are included.
+Amendment AB additionally makes each EFI singleton dispatch label a unique
+literal switch arm, expands fail-closed `BootCurrent` coverage, and retains the
+strict rejection of firmware network boot paths. Its direct disposable reboot
+uses a virtual NIC without an option ROM, reaches `resume_ready` while both
+pre-policy holds remain effective, and completes the protected transaction.
 
 The candidate binaries permit only their quarantine-safe behavior, candidate
 daemon/web processes refuse startup, and candidate Debian packages refuse
@@ -167,7 +172,14 @@ pass. The next E-R2 passed seventeen disposable subjects, then hard-stopped on
 dashboard p95 65.231 ms against the exclusive 50 ms budget. Amendment AA
 corrects that demonstrated fan-out and passes the source-only disposable
 installed benchmark without weakening freshness. The replacement clean freeze
-and two quarantined candidate builds may proceed. E-R2, tagging, publication,
-installation, and deployment remain outside this report.
+then entered E-R2, where eleven subjects passed before the managed reboot guest
+failed closed on EFI identity. Exact source and failed-guest inspection showed
+that the frozen parser already had one active `BootCurrent` arm and that OVMF
+had regenerated PXE/HTTP entries across reboot. Amendment AB preserves that
+network refusal, makes singleton dispatch compile-time unique, and passes the
+focused real-reboot source regression with firmware network option ROMs
+disabled. The replacement clean freeze and two quarantined candidate builds may
+proceed. E-R2, tagging, publication, installation, and deployment remain
+outside this report.
 
-R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED FOR THE AMENDMENT AA CORRECTION
+R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED FOR THE AMENDMENT AB CORRECTION

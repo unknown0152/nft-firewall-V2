@@ -2123,9 +2123,9 @@ class AmendmentXContracts(unittest.TestCase):
             "/sys/firmware/efi",
             "/usr/bin/efibootmgr",
             "EFI firmware networking is enabled",
-            "BootCurrent: ",
-            "BootOrder: ",
-            "BootNext: ",
+            'case "BootCurrent":',
+            'case "BootOrder":',
+            'case "BootNext":',
             "setup-boot-hold-v1",
             "setup-boot-hold-ready",
             "setup-boot-release",
@@ -2267,6 +2267,32 @@ class AmendmentXContracts(unittest.TestCase):
         pcap = read("tests/packaging/managed_boot_pcap.py")
         self.assertIn("--expect-zero-guest", pcap)
         self.assertIn("failed boot identity emitted a guest frame", pcap)
+
+
+class AmendmentABContracts(unittest.TestCase):
+    def test_efi_singleton_dispatch_cannot_hide_boot_current(self) -> None:
+        boot = read("internal/setup/boot.go")
+        self.assertEqual(boot.count('case "BootCurrent":'), 1)
+        self.assertEqual(boot.count('case "BootOrder":'), 1)
+        self.assertEqual(boot.count('case "BootNext":'), 1)
+        self.assertNotIn('HasPrefix(line, "BootCurrent: ")', boot)
+        self.assertIn('strings.Cut(line, ": ")', boot)
+
+    def test_efi_regression_matrix_retains_fail_closed_cases(self) -> None:
+        tests = read("internal/setup/boot_test.go")
+        for expected in (
+            'name: "missing-current"',
+            'name: "duplicate-current"',
+            'name: "malformed-current"',
+            'name: "network-entry"',
+            'name: "boot-next"',
+            'name: "wrong-first"',
+            'name: "wrong-loader"',
+            'name: "non-debian"',
+            'name: "inactive-current"',
+            '"ppc64le"',
+        ):
+            self.assertIn(expected, tests)
 
 
 class StatusPerformanceContracts(unittest.TestCase):

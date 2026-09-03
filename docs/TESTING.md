@@ -1,6 +1,6 @@
 # Testing
 
-Current disposition: **2.1.0 AMENDMENT AA STAGE E-R SOURCE VALIDATION**.
+Current disposition: **2.1.0 AMENDMENT AB STAGE E-R SOURCE VALIDATION**.
 Source-only results are consolidated in `TEST_RESULTS.md`. The narrowly
 approved source-stage disposable GRUB/boot, native-initramfs, setup-guard, and
 exact-package rollback preflights have run. The complete namespace, Docker,
@@ -211,6 +211,24 @@ Docker observations between adjacent requests and require the next completed
 response to degrade. Concurrent HTTP saturation, cancellation, recovery, and
 the race suite ensure the optimization does not reuse mutable status or leak
 goroutines/file descriptors. Complete E-R2 must repeat the installed proof.
+
+Amendment AB directly binds the EFI parser regression to the stopped reboot
+case. `TestManagedGRUBEFIIdentityMatrix` proves one exact amd64 and arm64
+Debian identity passes while missing, duplicate, malformed, inactive, network,
+`BootNext`, wrong-order, wrong-loader, non-Debian, and unsupported-architecture
+evidence refuses. The source contract also requires exactly one literal switch
+arm for each singleton label, making a repeated `BootCurrent` arm a compile-time
+error. Exact frozen-source and preserved-guest inspection are separate inputs:
+the former had one active arm, while the latter showed OVMF-regenerated
+PXE/HTTP entries after reboot.
+
+The direct source-stage guest therefore performs a real first pass and reboot
+with the virtual NIC option ROM disabled before the second boot. It does not
+edit the journal, synthesize `resume_ready`, or bypass EFI verification. The
+post-boot action must observe `resume_ready`, the exact resume guard, inactive
+Docker service, active socket queue, and activating Docker hold before the same
+profile completes protected setup. This is focused source-stage evidence, not
+the complete E-R2 matrix.
 
 The setup-guard unit regression covers one and multiple endpoint `/32`
 elements, exact interval flags, deterministic order, malformed/broader-prefix

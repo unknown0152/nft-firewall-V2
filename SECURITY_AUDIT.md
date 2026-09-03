@@ -2,11 +2,11 @@
 
 Audit date: 2026-08-16, 2026-08-17, 2026-08-23, 2026-08-24,
 2026-08-25, 2026-08-26, 2026-08-29, 2026-08-30, 2026-08-31, and
-2026-09-01, and 2026-09-02 UTC. Scope: production Go, configuration/compiler,
+2026-09-01, 2026-09-02, and 2026-09-03 UTC. Scope: production Go, configuration/compiler,
 nftables ownership, Unix APIs, persistence/rollback, systemd, integrations,
 web, installers, tests, dependencies, Git history, and release contents.
 
-Current source disposition: **2.1.0 AMENDMENT AA SOURCE VALIDATED; CANDIDATES
+Current source disposition: **2.1.0 AMENDMENT AB SOURCE VALIDATED; CANDIDATES
 PENDING**.
 The Amendment W retry and native-lifecycle rows pass, but the mandatory W11
 boot capture reopened NFV2-057 before source freeze. Amendment X now supplies
@@ -51,8 +51,16 @@ IDs. Freshness/fail-closed, adjacent-request, concurrency, cancellation,
 saturation, allocation, and disposable installed-runtime timing regressions
 pass the unchanged latency and resource budgets. The timing guest lacked an
 independent provider assignment; the strict shipped harness requires healthy
-protection on every sample for renewed E-R2. Replacement candidate builds, renewed
-E-R2, tag validation, publication, and deployment have not been executed. The findings
+protection on every sample for renewed E-R2. That E-R2 passed eleven subjects
+before a managed reboot stopped at strict EFI identity verification. Exact
+digest-bound source review disproved the initial duplicate-arm diagnosis: the
+frozen object had one active `BootCurrent` arm. The preserved guest instead
+showed OVMF had regenerated PXE and HTTP entries, which must remain forbidden.
+Amendment AB makes singleton labels unique literal switch cases, adds explicit
+missing/duplicate/malformed and retained refusal coverage, and passes a real
+reboot/resume with the virtual NIC option ROM disabled while the network and
+Docker holds remain effective. Replacement candidate builds, renewed E-R2,
+tag validation, publication, and deployment have not been executed. The findings
 below through NFV2-030 record the tagged 2.0.1 audit history; NFV2-031 through
 NFV2-041 record the accepted 2.0.2/2.0.3 release work; NFV2-042 onward records
 2.1.0 source work.
@@ -146,6 +154,7 @@ and post-tag gates.
 | NFV2-064 | Two directory refusal tests inherited privileged `umask 0077` and therefore created safe mode-0700 fixtures, while the root-only readiness fixture required control status from a handler that rejected every control request | MEDIUM | Explicitly set and verify both intended mode-0750 unsafe directories; return the healthy snapshot only for control status; directly refuse a non-status control operation; retain all production validators, peer credentials, request validation, and readiness logic unchanged | CLOSED at source boundary; focused ordinary-user proof and focused plus complete disposable-root `umask 0077` suite PASS; renewed E-R2 NOT EXECUTED |
 | NFV2-065 | Inverse-boot rollback finalization cleared an uncommitted first-setup generation even though the rolled-back database row, immutable snapshot, backup, terminal journal lineage, and provenance remained bound to it | HIGH | Preserve the exact generation when finalizing only an uncommitted first-setup rollback; retain zero for genuine pre-generation rollback and clear package-only committed handoff so it cannot masquerade as complete retry evidence | CLOSED at source boundary; direct finalizer/write-failure/package-handoff/classifier proof plus disposable generations 1/2 exact rollback, nonmutating retry, and generation-3 success PASS; renewed E-R2 NOT EXECUTED |
 | NFV2-066 | Status independently reread the same nftables state for ownership, integrity, fingerprint, and provenance and inspected Docker networks one at a time, exceeding the mandatory dashboard budget while widening cross-read race windows | HIGH | Derive all nftables results from one fresh immutable full-ruleset JSON snapshot and batch all authorized Docker inspections by immutable ID; preserve fresh config, state, forwarding, WireGuard, claim, and integration checks with no cache or skipped security gate | CLOSED at source boundary; one-read/batch, drift, adjacent-request, HTTP-to-Unix, cancellation, saturation, race, allocation, and no-provider disposable timing/resource proof PASS; strict healthy-protected E-R2 NOT EXECUTED |
+| NFV2-067 | The E-R2 hard stop attributed EFI refusal to a duplicate parser arm, but the exact frozen source digest contained one arm; the disposable firmware had regenerated forbidden PXE/HTTP entries after reboot | MEDIUM | A false root cause could invite weakening network-boot refusal or leave singleton dispatch vulnerable to a repeated empty arm | Parse `BootCurrent`, `BootOrder`, and `BootNext` through unique literal switch cases; explicitly test valid, missing, duplicate, malformed, inactive, network, one-shot, order, loader, distribution, and architecture identities; disable the disposable NIC option ROM before the mandatory reboot instead of relaxing verification | Exact source/guest audit, focused unit/source-contract proof, and direct disposable reboot to `resume_ready` plus protected completion PASS | CLOSED at source boundary; complete renewed E-R2 NOT EXECUTED |
 
 ## Adversarial review areas
 
@@ -220,7 +229,10 @@ lifecycle remains green. Amendment AA adds one-snapshot nftables status,
 batched Docker observation, adjacent-request fail-closed coverage, real
 HTTP-to-Unix transport tests, and a disposable installed-runtime benchmark;
 the source-only reference run passes every unchanged latency and resource
-budget. Candidate
+budget. Amendment AB additionally passes the exact singleton-dispatch and
+expanded EFI refusal matrix plus a real reboot/resume with the virtual
+firmware network option-ROM path disabled; strict network-boot refusal remains
+unchanged. Candidate
 source/history/extracted-tree scans and two-parent comparison are generated
 only after the clean source freeze. Privileged R2, tagged package/archive
 inspection, post-tag validation, publication, and deployment are not current
