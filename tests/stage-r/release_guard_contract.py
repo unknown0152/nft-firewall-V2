@@ -58,7 +58,9 @@ class ReleaseGuardContracts(unittest.TestCase):
             '$(git cat-file -t "refs/tags/$tag"',
             'r2_attestation=${NFTFW_R2_ATTESTATION:-}',
             'jq -e -s --arg version "$version" --arg commit "$commit"',
-            '-f "$root_dir/scripts/validate-r2-attestation.jq"',
+            'git cat-file blob "$commit:scripts/validate-r2-attestation.jq" > "$r2_validation_filter"',
+            '[[ -s "$r2_validation_filter" ]]',
+            '-f "$r2_validation_filter"',
             'publication_authorized:false',
         )
         missing = [fragment for fragment in required if fragment not in self.script]

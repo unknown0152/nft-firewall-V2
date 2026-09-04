@@ -308,8 +308,14 @@ PY
         echo "R2 attestation could not be captured as a safe immutable external input" >&2
         exit 1
     fi
+    r2_validation_filter="$temporary/R2_ATTESTATION_VALIDATOR.jq"
+    git cat-file blob "$commit:scripts/validate-r2-attestation.jq" > "$r2_validation_filter"
+    [[ -s "$r2_validation_filter" ]] || {
+        echo "The committed R2 attestation validator is empty" >&2
+        exit 1
+    }
     jq -e -s --arg version "$version" --arg commit "$commit" \
-        -f "$root_dir/scripts/validate-r2-attestation.jq" \
+        -f "$r2_validation_filter" \
         "$r2_attestation_copy" >/dev/null || {
         echo "R2 attestation does not authorize tagged validation for this exact version/commit" >&2
         exit 1
