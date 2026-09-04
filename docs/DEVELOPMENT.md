@@ -170,6 +170,12 @@ the named package, boot, network/leak, Docker, OVPN, reproducibility,
 inspection, and secret-scan results. A tag is never moved and the frozen source
 is never amended merely to insert later results.
 
+The builder rejects missing, malformed, and all-zero evidence digests. This
+input check does not authenticate the referenced evidence: the release
+operator must also verify the actual candidate comparison and complete R2
+manifest against their hashes. See `RELEASE-2.1.0.md` for the publication audit
+that exposed this distinction.
+
 The post-R2 tagged build uses the canonical `2.1.0` archive, binary, and
 package filenames inside a protected non-public parent. Its notice and build
 evidence state that external final approval is still required. Approval may

@@ -1,5 +1,8 @@
 # Start Here
 
+**2.1.0 is awaiting stable validation.** Read `docs/RELEASE-2.1.0.md` before
+using these packages. Version 2.0.3 remains the stable advanced-mode release.
+
 NFT Firewall V2 2.1.0 adds the supported clean-server path:
 
 ```bash
@@ -17,9 +20,12 @@ Read these in order:
 The package is nonactivating. Setup defaults to VPN-only IPv4, disabled IPv6,
 preserved private-LAN SSH management, and no public inbound exposure.
 
-The current source is still within Stage E-R until disposable privileged R2,
-tagging, and publication gates pass. Candidate artifacts labeled
-`RELEASE-CANDIDATE-NOT-DEPLOYABLE` cannot run or install.
+The published 2.1.0 artifacts have not completed stable release validation.
+Read `docs/RELEASE-2.1.0.md` before using them. Version 2.0.3 remains the stable
+advanced-mode line. The 2.1.0 commands above describe the intended clean-host
+workflow; they are not a production deployment recommendation.
+Earlier candidate artifacts labeled `RELEASE-CANDIDATE-NOT-DEPLOYABLE` cannot
+run or install.
 
 Existing NFTFW, Docker, Cosmos, and application hosts must use the upgrade or
 adoption workflow. Do not erase state or disable another firewall owner to

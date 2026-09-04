@@ -308,15 +308,9 @@ PY
         echo "R2 attestation could not be captured as a safe immutable external input" >&2
         exit 1
     fi
-    jq -e --arg version "$version" --arg commit "$commit" '
-        .schema == "nftfw.r2-attestation.v1" and
-        .status == "R2_PASSED_TAG_BUILD_AUTHORIZED" and
-        .target_version == $version and .git_commit == $commit and
-        .publication_authorized == false and .deployment_authorized == false and
-        .privileged_evidence.package_boot_network_docker_ovpn == "PASS" and
-        (.privileged_evidence_manifest_sha256 | test("^[0-9a-f]{64}$")) and
-        (.stage_r_candidate_comparison_sha256 | test("^[0-9a-f]{64}$"))
-    ' "$r2_attestation_copy" >/dev/null || {
+    jq -e -s --arg version "$version" --arg commit "$commit" \
+        -f "$root_dir/scripts/validate-r2-attestation.jq" \
+        "$r2_attestation_copy" >/dev/null || {
         echo "R2 attestation does not authorize tagged validation for this exact version/commit" >&2
         exit 1
     }

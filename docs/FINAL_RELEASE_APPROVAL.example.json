@@ -1,9 +1,9 @@
 {
   "schema": "nftfw.final-release-approval.v1",
   "status": "FINAL_RELEASE_APPROVED",
-  "target_version": "2.0.3",
+  "target_version": "2.1.0",
   "git_commit": "@EXACT_40_HEX_GIT_COMMIT@",
-  "git_tag": "v2.0.3",
+  "git_tag": "v2.1.0",
   "git_tag_object": "@EXACT_40_HEX_ANNOTATED_TAG_OBJECT@",
   "tagged_build_evidence_sha256": "@EXACT_64_HEX_BUILD_EVIDENCE_SHA256@",
   "external_sha256sums_sha256": "@EXACT_64_HEX_SHA256SUMS_SHA256@",

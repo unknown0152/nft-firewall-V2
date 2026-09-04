@@ -1,5 +1,9 @@
 # Quick Start
 
+**2.1.0 is awaiting stable validation.** Read
+[`docs/RELEASE-2.1.0.md`](docs/RELEASE-2.1.0.md) before using these packages.
+Version 2.0.3 remains the stable advanced-mode release.
+
 This path is for a clean Debian 13 amd64 or arm64 server with one IPv4 uplink,
 local-console or directly connected private-LAN recovery, and one supported
 WireGuard provider profile.

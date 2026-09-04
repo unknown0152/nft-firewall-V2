@@ -5,6 +5,10 @@ NFT Firewall V2 2.1.0 supports Debian 13 on amd64 and arm64. Read
 `RELEASE-CANDIDATE-NOT-DEPLOYABLE` is intentionally non-runnable and
 non-installable; use only a final approved package.
 
+The currently published 2.1.0 artifacts are awaiting stable validation. See
+`docs/RELEASE-2.1.0.md` for the evidence gaps and tag-provenance discrepancy.
+The checksums below verify download integrity, not release approval.
+
 ## Package install
 
 Verify the final release checksum manifest, then install the package matching

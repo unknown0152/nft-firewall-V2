@@ -1,5 +1,10 @@
 # NFT Firewall V2
 
+**2.1.0 is awaiting stable validation.** Read the
+[publication audit](docs/RELEASE-2.1.0.md) before using its packages. The stable
+advanced-mode release is
+[2.0.3](https://github.com/unknown0152/nft-firewall-V2/releases/tag/v2.0.3).
+
 NFT Firewall V2 2.1.0 turns a working WireGuard provider profile into a
 managed, fail-closed Debian firewall. On a supported clean server, setup has
 one operator input:
@@ -69,26 +74,23 @@ The clean-host result is:
 
 ## Release status
 
-The current tree targets **2.1.0** and requires **Go 1.27.0**. Until Stage
-E-R2, tagging, and final publication approval are complete, local Stage E-R
-candidate artifacts are deliberately quarantined and cannot run or install.
-The last published stable line remains 2.0.3.
+The current tree targets **2.1.0** and requires **Go 1.27.0**.
+[Version 2.1.0](https://github.com/unknown0152/nft-firewall-V2/releases/tag/v2.1.0)
+has downloadable artifacts, but stable release validation is incomplete. Use
+[2.0.3](https://github.com/unknown0152/nft-firewall-V2/releases/tag/v2.0.3)
+for the existing stable advanced-mode workflow.
 
-The E-R2 run for source `53e53f0dbce141df33d8f2120be5757ab789773b`
-passed the independent package/runtime subjects and twenty consecutive normal
-boots. Its adverse ambiguous-state boot correctly failed readiness, but Debian
-udev directly activated `ifup@enp0s1.service`; that template bypassed the
-passive `network-pre.target` and emitted DHCP/ARP frames. The run hard-stopped,
-no tag was created, and the live host was unchanged.
+The [2.1.0 publication audit](docs/RELEASE-2.1.0.md) records passing artifact
+checksums and hosted CI, an unsubstantiated R2 attestation containing
+placeholder evidence hashes, and an archive/tag-object mismatch. The complete
+disposable package, boot, network, Docker, and provider matrix and final
+post-tag validation remain required before stable approval. Download
+checksums establish file integrity; they do not establish runtime acceptance.
 
-Amendment AD adds a closed Debian 13 producer inventory, transient setup-boot
-gates, post-commit final readiness gates, topology revalidation, exact backup
-and rollback, package handoff, status, adoption, and operator-backup coverage.
-Known alternate managers, custom fragments for supported entry points,
-contradictory observations, or multiple primary ownership refuse before
-mutation. The complete renewed E-R2 matrix must repeat every prior row
-and prove zero frames for failed readiness across every supported direct
-producer. This tree remains source-only and is not yet a release.
+The published 2.1.0 packages are runtime-capable validation artifacts. Earlier
+Stage E-R artifacts labeled `RELEASE-CANDIDATE-NOT-DEPLOYABLE` have a separate
+built-in quarantine and cannot run or install. The setup commands in this
+README describe the intended 2.1.0 workflow once release validation is complete.
 
 ## Supported clean-host setup
 
