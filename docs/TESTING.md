@@ -1,6 +1,6 @@
 # Testing
 
-Current disposition: **2.1.0 AMENDMENT AC STAGE E-R SOURCE VALIDATION**.
+Current disposition: **2.1.0 AMENDMENT AD STAGE E-R SOURCE VALIDATED**.
 Source-only results are consolidated in `TEST_RESULTS.md`. The narrowly
 approved source-stage disposable GRUB/boot, native-initramfs, setup-guard, and
 exact-package rollback preflights have run. The complete namespace, Docker,
@@ -261,6 +261,29 @@ boot IDs and zero captured frames before every initramfs marker; renewed E-R2
 must repeat the sequence from its own candidate-bound guest.
 No harness may pre-create `/run/nftfw`.
 
+Amendment AD adds a separate direct network-producer semantic fixture. It
+must run only as root in a marked disposable systemd guest; it creates only
+uniquely prefixed transient units under `/run/systemd/system` and restores the
+guest on exit:
+
+```bash
+sudo ./tests/packaging/network_producer_gate_disposable.sh
+```
+
+The fixture proves direct ordinary-service and template-instance activation
+cannot execute before readiness, an injected readiness failure executes no
+producer payload, a condition-skipped readiness verifier remains inactive and
+blocks the template, and stopping readiness tears down an active bound
+producer. It also inspects the effective `Requires=`/`BindsTo=`/`After=` graph.
+Unit and source-contract coverage separately enumerate NetworkManager,
+dhcpcd and its template, ifupdown hotplug, networking.service, and
+systemd-networkd; reject known unsupported/custom/ambiguous ownership; verify
+the transient setup generator; and exercise preparation, topology drift,
+backup, post-commit publication, watchdog recovery, exact rollback, package
+handoff, status, operator backup, and adoption planning. Complete E-R2 must
+repeat the real Debian services, hotplug traffic, adverse boots, and zero-frame
+capture matrix from fresh overlays; this source fixture is not that evidence.
+
 The setup-guard unit regression covers one and multiple endpoint `/32`
 elements, exact interval flags, deterministic order, malformed/broader-prefix
 refusal, and absence of global flush or unrelated-table mutation. Its real
@@ -279,8 +302,9 @@ The regression checks the exact rendered file, applies only its owned table,
 lists it, deletes that exact table, and verifies cleanup. It must never be run
 on an operator host or counted as the complete E-R2 matrix.
 
-The Stage R runner checks package nonactivation, the early/ready/rollback
-dependency graph, packaged CLI contracts, release-candidate metadata, and
+The Stage R runner checks package nonactivation, the early/ready/rollback and
+direct network-producer dependency graphs, packaged CLI contracts,
+release-candidate metadata, and
 immutable v2.0.1 expected-red defects without installing or starting anything.
 
 Unit tests cover strict config, compiler invariants, owned transaction

@@ -58,6 +58,18 @@ After=network-pre.target'
     echo "network target did not receive the exact pre-network hold" >&2
     exit 1
 }
+producer_expected='[Unit]
+Requires=nftfw-setup-boot-hold.service
+After=nftfw-setup-boot-hold.service'
+for producer in NetworkManager.service dhcpcd.service dhcpcd@.service \
+    ifup@.service networking.service systemd-networkd.service; do
+    producer_fragment=$normal/$producer.d/50-nftfw-setup-hold.conf
+    [[ -f $producer_fragment && ! -L $producer_fragment &&
+        $(cat "$producer_fragment") == "$producer_expected" ]] || {
+        echo "direct network producer did not receive the exact setup hold: $producer" >&2
+        exit 1
+    }
+done
 service_fragment=$normal/docker.service.d/50-nftfw-setup-hold.conf
 socket_fragment=$normal/docker.socket.d/50-nftfw-setup-hold.conf
 [[ -f $service_fragment && ! -L $service_fragment &&
@@ -90,6 +102,22 @@ if "$fixture" "$normal" "$normal.early" "$normal.late"; then
 fi
 rm -f -- "$network_fragment"
 printf '%s\n' "$network_expected" >"$network_fragment"
+
+producer_fragment=$normal/ifup@.service.d/50-nftfw-setup-hold.conf
+printf '%s\n' foreign >"$producer_fragment"
+if "$fixture" "$normal" "$normal.early" "$normal.late"; then
+    echo "foreign direct-producer hold fragment was accepted" >&2
+    exit 1
+fi
+printf '%s\n' "$producer_expected" >"$producer_fragment"
+rm -f -- "$normal/networking.service.d/50-nftfw-setup-hold.conf"
+ln -s /foreign/fragment "$normal/networking.service.d/50-nftfw-setup-hold.conf"
+if "$fixture" "$normal" "$normal.early" "$normal.late"; then
+    echo "symlinked direct-producer hold fragment was accepted" >&2
+    exit 1
+fi
+rm -f -- "$normal/networking.service.d/50-nftfw-setup-hold.conf"
+printf '%s\n' "$producer_expected" >"$normal/networking.service.d/50-nftfw-setup-hold.conf"
 
 docker_fragment=$service_fragment
 printf '%s\n' foreign >"$docker_fragment"

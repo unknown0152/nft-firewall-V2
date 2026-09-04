@@ -17,6 +17,7 @@ import (
 	"syscall"
 
 	"github.com/unknown0152/nft-firewall-v2/internal/discovery"
+	"github.com/unknown0152/nft-firewall-v2/internal/netgate"
 	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/routing"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
@@ -48,7 +49,8 @@ func inspectRetiredFirstSetup(
 	journalPath := filepath.Join(paths.StateDir, "setup", "journal.json")
 	current, currentRaw, currentSHA, err := readJournalFile(journalPath)
 	if err != nil || !terminalRolledBackJournal(current) ||
-		current.Summary.Schema != "nftfw.setup-plan.v1" {
+		current.Summary.Schema != "nftfw.setup-plan.v1" ||
+		netgate.ValidateUnits(current.Summary.NetworkProducers) != nil {
 		return retiredFirstSetup{}, errors.New("retired setup journal is not terminal")
 	}
 	journals, err := readTerminalJournalLineage(
@@ -302,6 +304,9 @@ func validateRetiredBackupPath(stateDir, backup string) error {
 }
 
 func backupMatchesRetiredPlan(paths Paths, summary Summary, manifest backupManifest) bool {
+	if netgate.ValidateUnits(summary.NetworkProducers) != nil {
+		return false
+	}
 	expectedFiles := (&System{Paths: paths}).touchedFiles(Plan{Summary: summary})
 	if len(manifest.Files) != len(expectedFiles) {
 		return false

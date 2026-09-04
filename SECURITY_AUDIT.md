@@ -2,11 +2,11 @@
 
 Audit date: 2026-08-16, 2026-08-17, 2026-08-23, 2026-08-24,
 2026-08-25, 2026-08-26, 2026-08-29, 2026-08-30, 2026-08-31, and
-2026-09-01, 2026-09-02, and 2026-09-03 UTC. Scope: production Go, configuration/compiler,
+2026-09-01, 2026-09-02, 2026-09-03, and 2026-09-04 UTC. Scope: production Go, configuration/compiler,
 nftables ownership, Unix APIs, persistence/rollback, systemd, integrations,
 web, installers, tests, dependencies, Git history, and release contents.
 
-Current source disposition: **2.1.0 AMENDMENT AC SOURCE VALIDATED; CANDIDATES
+Current source disposition: **2.1.0 AMENDMENT AD SOURCE VALIDATED; CANDIDATES
 PENDING**.
 The Amendment W retry and native-lifecycle rows pass, but the mandatory W11
 boot capture reopened NFV2-057 before source freeze. Amendment X now supplies
@@ -73,7 +73,13 @@ explicit early-boot dependencies, early/readiness are independent
 verifier without giving it an activating edge to early restore. Source
 contracts, condition-skip and early-failure cases, 150 absent-directory
 starts, concurrent lifecycle proof, and twenty consecutive unique ROM-less
-boots with zero pre-marker packets cover the correction. Replacement
+boots with zero pre-marker packets cover the correction. That replacement
+then passed twenty normal boots, but its adverse ambiguous-state boot exposed
+NFV2-070: Debian udev started `ifup@` directly without pulling the passive
+`network-pre.target`, and DHCP/ARP bootstrap frames escaped after readiness
+failed. Amendment AD adds closed-set direct-producer inventory, transient
+setup-boot holds, post-commit `Requires=`/`BindsTo=`/`After=` readiness gates,
+strict topology revalidation, and exact lifecycle ownership. Replacement
 candidate builds, renewed E-R2, tag validation, publication, and deployment
 have not been executed. The findings
 below through NFV2-030 record the tagged 2.0.1 audit history; NFV2-031 through
@@ -172,6 +178,7 @@ and post-tag gates.
 | NFV2-067 | The E-R2 hard stop attributed EFI refusal to a duplicate parser arm, but the exact frozen source digest contained one arm; the disposable firmware had regenerated forbidden PXE/HTTP entries after reboot | MEDIUM | A false root cause could invite weakening network-boot refusal or leave singleton dispatch vulnerable to a repeated empty arm | Parse `BootCurrent`, `BootOrder`, and `BootNext` through unique literal switch cases; explicitly test valid, missing, duplicate, malformed, inactive, network, one-shot, order, loader, distribution, and architecture identities; disable the disposable NIC option ROM before the mandatory reboot instead of relaxing verification | Exact source/guest audit, focused unit/source-contract proof, and direct disposable reboot to `resume_ready` plus protected completion PASS | CLOSED at source boundary; complete renewed E-R2 NOT EXECUTED |
 | NFV2-068 | Independently scheduled readiness declared `/run/nftfw` writable but relied on the conditionally scheduled early unit to create it | HIGH | An intermittent boot ordering path failed systemd mount namespace construction with `226/NAMESPACE` and kept all dependent network consumers unavailable | Make readiness and independently timer-activated rollback paths identical preserved owners of the shared `root:nftfw-web`, mode-`0750` runtime directory; retain nonactivating ordering and application-level verification | Source graph/sandbox contracts, condition-skipped and failed-early refusal, 150 absent-directory starts, concurrent-owner lifetime, disposable root/umask suite, and repeated-boot fixture | CLOSED at source boundary; complete renewed E-R2 NOT EXECUTED |
 | NFV2-069 | A protected consumer's nonactivating `Requisite=readiness` could be evaluated before it caused `network-pre.target` to schedule readiness; naively adding early to sysinit retained an implicit `After=basic.target` and formed a cycle through protected sockets | HIGH | Depending on transaction construction, networking/SSH remained inactive or systemd deleted early's job; readiness then failed closed because final enforcement was absent | Give early explicit `DefaultDependencies=no` plus `After=local-fs.target`; schedule early and readiness independently as sysinit wants; make consumers require the nonmutating verifier while readiness retains no activating edge to early | Source graph and systemd verification, preserved failed cycle/skip boots, twenty consecutive unique ROM-less boots, readiness-before-SSH, zero pre-marker packets, post-readiness traffic, and clean overlay | CLOSED at source boundary; complete renewed E-R2 NOT EXECUTED |
+| NFV2-070 | Debian ifupdown udev hotplug could start `ifup@<interface>.service` without pulling the passive `network-pre.target` or enforcement readiness | HIGH | A failed adverse boot kept SSH/application consumers stopped but the independent producer emitted DHCP and ARP frames through the narrow bootstrap exception | Inventory a closed set of Debian network producer services/templates before mutation; transiently gate all direct entry points on the setup boot hold; after commit publish and verify exact `Requires=`/`BindsTo=`/`After=` readiness edges; bind marker, files, topology, backup, watchdog recovery, rollback, uninstall, status, and adoption | Go/source/generator tests and bounded disposable direct-activation semantic fixture; full capture-backed E-R2 remains required | CLOSED in source; complete renewed E-R2 NOT EXECUTED |
 
 ## Adversarial review areas
 
@@ -200,6 +207,7 @@ and post-tag gates.
 | Temporary setup guard | Every prefix-bearing generated set uses nftables interval semantics; bootstrap endpoints remain canonical IPv4 `/32`; the guard is checked before apply and owns/deletes only `inet nftfw_setup_guard` |
 | Managed disabled boot boundary | A strict Debian GRUB transaction adds exactly one kernel-wide disable token, records `reboot_required`, and resumes only after changed-boot and running-kernel proof. The native loader verifies that contract and never re-enables loopback. A pre-network transaction atomically replaces its deny table with one checksum-bound DHCP/LAN/cached-endpoint guard, holds Docker service/socket activation until ownership and forwarding are durable, and makes exact rollback release Docker only after restoring its prior files; exact rollback records when another reboot is required |
 | Exact package rollback | Both release packages, helper, bridge, architecture, schema, canonical payload digest, protected metadata, exact `iHR` transition, and resumable outer-controller states are bound in a protected manifest; the exact old parser preflights configuration before mutation; the database permits only its two strict ownership histories; the parent retains the canonical lock while only dpkg receives a protected private lock view; neighboring states, unsafe paths, tampering, unlocked handoff, direct dpkg-status edits, and manual payload replacement are refused |
+| Direct network producers | Only canonical closed-set Debian 13 services/templates are accepted; the setup reboot holds every entry point and final managed state verifies exact readiness require/bind/order edges. Unsupported, custom, ambiguous, changed, condition-skipped, failed, and stopped-verifier states fail closed, while exact backup/handoff restores prior files or absence |
 
 ## Accepted residual risks
 

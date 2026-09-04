@@ -33,14 +33,16 @@ shellcheck scripts/*.sh packaging/initramfs/nftfw-ipv6-early \
   tests/packaging/*.sh packaging/deb/*inst packaging/deb/prerm
 ```
 
-Amendment AC's real-systemd regression is intentionally excluded from an
-operator host. Run `tests/packaging/runtime_directory_disposable.sh` only in a
-fresh marked guest with an installed source-bound package; the repeated boot
-controller calls `tests/packaging/runtime_directory_boot_disposable.sh` on
-twenty unique ROM-less boots. The boot graph must retain explicit early
+Amendment AC and AD real-systemd regressions are intentionally excluded from
+an operator host. Run `tests/packaging/runtime_directory_disposable.sh` and
+`tests/packaging/network_producer_gate_disposable.sh` only in a fresh marked
+guest with an installed source-bound package; the repeated boot controller
+calls `tests/packaging/runtime_directory_boot_disposable.sh` on twenty unique
+ROM-less boots. The boot graph must retain explicit early
 `DefaultDependencies=no`, independent early/readiness `sysinit.target` wants,
-and consumer `Requires=`/`After=` edges to readiness without adding an
-activating readiness-to-early edge. See `TESTING.md` for the exact boundary.
+consumer `Requires=`/`BindsTo=`/`After=` edges to readiness, and direct
+producer gating without adding an activating readiness-to-early edge. See
+`TESTING.md` for the exact boundary.
 
 The audited analyzer versions are staticcheck v0.8.1, govulncheck v1.7.0,
 and gosec v2.29.0. The gosec target excludes four heuristic classes only after

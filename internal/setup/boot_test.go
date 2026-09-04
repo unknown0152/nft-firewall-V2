@@ -16,6 +16,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/bootguard"
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
 	"github.com/unknown0152/nft-firewall-v2/internal/discovery"
+	"github.com/unknown0152/nft-firewall-v2/internal/netgate"
 )
 
 const (
@@ -541,7 +542,81 @@ func preparedBootState(t *testing.T) (*bootFixture, *System, Journal) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	writeNetworkHoldFixtures(t, system, journal.Summary.NetworkProducers)
 	return fixture, system, journal
+}
+
+func preparedResumePlan(t *testing.T) (*bootFixture, *System, Plan) {
+	t.Helper()
+	fixture, system, _ := preparedBootState(t)
+	journalPath := filepath.Join(system.Paths.StateDir, "setup", "journal.json")
+	writeFixture(t, fixture.paths.ProcBootID, []byte(testBootID2+"\n"), 0o600)
+	writeFixture(t, fixture.paths.ProcCmdline, []byte("root=/dev/test ro ipv6.disable=1\n"), 0o600)
+	writeFixture(t, fixture.paths.IPv6DisableParam, []byte("Y\n"), 0o600)
+	activateManagedBootHold(t, system, journalPath, fixture)
+	plan, err := system.Prepare(context.Background(), "/provider.conf")
+	if err != nil || !plan.ResumeReady {
+		t.Fatalf("boot fixture did not reach resume-ready plan: %#v %v", plan.Summary, err)
+	}
+	return fixture, system, plan
+}
+
+func TestVerifyBootResumeRefusesIncompleteProducerEvidence(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, *bootFixture, *System, Plan)
+		code   string
+	}{
+		{
+			name: "missing-manifest", code: "SETUP_RESUME_STATE_INVALID",
+			mutate: func(t *testing.T, _ *bootFixture, _ *System, plan Plan) {
+				private, err := privatePlan(plan)
+				if err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Remove(filepath.Join(private.BackupDir, "manifest.json")); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "prepared-boot-identity", code: "SETUP_RESUME_STATE_INVALID",
+			mutate: func(t *testing.T, fixture *bootFixture, _ *System, _ Plan) {
+				writeFixture(t, fixture.paths.GRUBGenerated, initialGRUB(), 0o600)
+			},
+		},
+		{
+			name: "initramfs-verification", code: "SETUP_INITRAMFS_GUARD_FAILED",
+			mutate: func(_ *testing.T, fixture *bootFixture, system *System, _ Plan) {
+				fixture.fail = system.Paths.InitramfsManager
+			},
+		},
+		{
+			name: "producer-marker", code: "SETUP_NETWORK_PRODUCER_MARKER_INVALID",
+			mutate: func(t *testing.T, _ *bootFixture, system *System, _ Plan) {
+				if err := os.Remove(system.Paths.NetworkBootMarker); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "producer-hold", code: "SETUP_NETWORK_PRODUCER_HOLD_INVALID",
+			mutate: func(t *testing.T, _ *bootFixture, system *System, _ Plan) {
+				path := filepath.Join(system.Paths.GeneratorDir, "ifup@.service.d", netgate.HoldDropInName)
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, system, plan := preparedResumePlan(t)
+			test.mutate(t, fixture, system, plan)
+			if err := system.VerifyBootResume(context.Background(), plan); err == nil || err.Error() != test.code {
+				t.Fatalf("incomplete resume producer evidence accepted: %v", err)
+			}
+		})
+	}
 }
 
 func TestManagedBootStatusAndLifecycleRefuseChangedEvidence(t *testing.T) {
@@ -770,6 +845,11 @@ func managedBootSystem(t *testing.T, fixture *bootFixture) (*System, string) {
 
 func activateManagedBootHold(t *testing.T, system *System, journalPath string, fixture *bootFixture) {
 	t.Helper()
+	journal, err := (FileJournal{Path: journalPath}).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeNetworkHoldFixtures(t, system, journal.Summary.NetworkProducers)
 	fixture.initramfsGuard = true
 	// The packaged hold runs with ProtectSystem=strict, so findmnt projects the
 	// otherwise writable boot filesystem as read-only inside that verifier.
@@ -781,6 +861,14 @@ func activateManagedBootHold(t *testing.T, system *System, journalPath string, f
 	fixture.mountOptions = originalOptions
 	if !fixture.resumeGuard || fixture.initramfsGuard {
 		t.Fatal("managed boot hold did not atomically replace the initramfs guard")
+	}
+}
+
+func writeNetworkHoldFixtures(t *testing.T, system *System, units []string) {
+	t.Helper()
+	for _, unit := range units {
+		path := filepath.Join(system.Paths.GeneratorDir, unit+".d", netgate.HoldDropInName)
+		writeFixture(t, path, []byte(netgate.HoldDropInData), 0o644)
 	}
 }
 
@@ -807,6 +895,11 @@ func TestManagedBootTwoPassTransaction(t *testing.T) {
 	}
 	if state, stateErr := protectedFixedRuntimeState(fixture.paths.BootHoldMarker, bootHoldMarkerData); stateErr != nil || !state {
 		t.Fatalf("first pass did not publish the exact persistent boot hold: %t %v", state, stateErr)
+	}
+	if markerErr := netgate.ValidateBootMarker(
+		system.Paths.NetworkBootMarker, journal.Summary.NetworkProducers,
+	); markerErr != nil {
+		t.Fatalf("first pass did not publish the exact producer marker: %v", markerErr)
 	}
 	manifest, manifestErr := readBackup(journal.BackupDir)
 	if manifestErr != nil || manifest.Boot == nil ||
@@ -859,6 +952,9 @@ func TestManagedBootTwoPassTransaction(t *testing.T) {
 	}
 	if _, markerErr := os.Lstat(fixture.paths.BootHoldMarker); !errors.Is(markerErr, os.ErrNotExist) {
 		t.Fatalf("completed setup retained its transient boot hold marker: %v", markerErr)
+	}
+	if _, markerErr := os.Lstat(system.Paths.NetworkBootMarker); !errors.Is(markerErr, os.ErrNotExist) {
+		t.Fatalf("completed setup retained its producer boot marker: %v", markerErr)
 	}
 }
 
@@ -1169,6 +1265,18 @@ func TestManagedBootPackageHandoffRestoresOnlyBootOwnership(t *testing.T) {
 	if _, err := os.Lstat(fixture.paths.BootHoldMarker); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("package handoff retained boot hold marker: %v", err)
 	}
+	if _, err := os.Lstat(system.Paths.NetworkBootMarker); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("package handoff retained producer boot marker: %v", err)
+	}
+	for _, unit := range journal.Summary.NetworkProducers {
+		path, pathErr := netgate.DropInPath(system.Paths.SystemdDir, unit)
+		if pathErr != nil {
+			t.Fatal(pathErr)
+		}
+		if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("package handoff retained producer gate %s: %v", unit, statErr)
+		}
+	}
 	if got := mustRead(t, fixture.paths.GRUBGenerated); string(got) != string(initialGRUB()) {
 		t.Fatalf("package handoff did not restore exact generated config: %q", got)
 	}
@@ -1178,6 +1286,111 @@ func TestManagedBootPackageHandoffRestoresOnlyBootOwnership(t *testing.T) {
 	journal.Status, journal.Phase = "rollback_reboot_required", PhaseFailed
 	if reboot, err := system.HandoffBootPolicy(context.Background(), journal); err != nil || !reboot {
 		t.Fatalf("exact package boot handoff was not idempotent: %t %v", reboot, err)
+	}
+}
+
+func TestManagedBootPackageHandoffBeforeRebootRestoresProducerTransaction(t *testing.T) {
+	fixture, system, journal := preparedBootState(t)
+	reboot, err := system.HandoffBootPolicy(context.Background(), journal)
+	if err != nil || reboot {
+		t.Fatalf("pre-reboot package handoff failed: reboot=%t err=%v", reboot, err)
+	}
+	for _, path := range []string{system.Paths.BootHoldMarker, system.Paths.NetworkBootMarker} {
+		if _, statErr := os.Lstat(path); !errors.Is(statErr, os.ErrNotExist) {
+			t.Fatalf("pre-reboot handoff retained marker %s: %v", path, statErr)
+		}
+	}
+	if got := mustRead(t, fixture.paths.GRUBGenerated); !bytes.Equal(got, initialGRUB()) {
+		t.Fatalf("pre-reboot handoff did not restore generated boot config: %q", got)
+	}
+}
+
+func TestManagedBootPackageHandoffRefusesIncompleteProducerEvidence(t *testing.T) {
+	t.Run("complete-effective-graph", func(t *testing.T) {
+		fixture, system, journal := preparedBootState(t)
+		journal.Status = "complete"
+		if err := os.Remove(system.Paths.BootHoldMarker); err != nil {
+			t.Fatal(err)
+		}
+		fixture.base.outputs = map[string][]byte{
+			"systemctl show --property=Requires,BindsTo,After ifup@nftfw-probe.service": []byte("Requires=nftfw-enforcement-ready.service\nBindsTo=\nAfter=network-pre.target\n"),
+		}
+		if _, err := system.HandoffBootPolicy(context.Background(), journal); err == nil ||
+			err.Error() != "SETUP_BOOT_HANDOFF_STATE_INVALID" {
+			t.Fatalf("incomplete effective producer graph accepted: %v", err)
+		}
+	})
+
+	t.Run("boot-marker", func(t *testing.T) {
+		_, system, journal := preparedBootState(t)
+		if err := os.Remove(system.Paths.NetworkBootMarker); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := system.HandoffBootPolicy(context.Background(), journal); err == nil ||
+			err.Error() != "SETUP_BOOT_HANDOFF_STATE_INVALID" {
+			t.Fatalf("missing producer marker accepted: %v", err)
+		}
+	})
+
+	t.Run("post-reboot-hold", func(t *testing.T) {
+		fixture, system, journal := preparedBootState(t)
+		writeFixture(t, fixture.paths.ProcBootID, []byte(testBootID2+"\n"), 0o600)
+		path := filepath.Join(system.Paths.GeneratorDir, "ifup@.service.d", netgate.HoldDropInName)
+		if err := os.Remove(path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := system.HandoffBootPolicy(context.Background(), journal); err == nil ||
+			err.Error() != "SETUP_BOOT_HANDOFF_STATE_INVALID" {
+			t.Fatalf("missing generated producer hold accepted: %v", err)
+		}
+	})
+}
+
+func TestManagedBootRollbackHandoffRefusesIncompleteProducerRestore(t *testing.T) {
+	for _, test := range []struct {
+		name   string
+		mutate func(*testing.T, *bootFixture, *System, *Journal)
+		code   string
+	}{
+		{
+			name: "initramfs-verification", code: "SETUP_BOOT_HANDOFF_STATE_INVALID",
+			mutate: func(_ *testing.T, fixture *bootFixture, system *System, _ *Journal) {
+				fixture.fail = system.Paths.InitramfsManager
+			},
+		},
+		{
+			name: "invalid-producer-identity", code: "SETUP_BOOT_HANDOFF_STATE_INVALID",
+			mutate: func(_ *testing.T, _ *bootFixture, _ *System, journal *Journal) {
+				journal.Summary.NetworkProducers = []string{"foreign.service"}
+			},
+		},
+		{
+			name: "producer-not-in-backup", code: "SETUP_BOOT_HANDOFF_STATE_INVALID",
+			mutate: func(_ *testing.T, _ *bootFixture, _ *System, journal *Journal) {
+				journal.Summary.NetworkProducers = []string{
+					"NetworkManager.service", "ifup@.service", "networking.service",
+				}
+			},
+		},
+		{
+			name: "daemon-reload", code: "SETUP_BOOT_HANDOFF_RELOAD_FAILED",
+			mutate: func(_ *testing.T, fixture *bootFixture, _ *System, _ *Journal) {
+				fixture.fail = "systemctl"
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			fixture, system, journal := preparedBootState(t)
+			if reboot, err := system.HandoffBootPolicy(context.Background(), journal); err != nil || reboot {
+				t.Fatalf("initial exact handoff failed: reboot=%t err=%v", reboot, err)
+			}
+			journal.Status, journal.Phase = "rollback_reboot_required", PhaseFailed
+			test.mutate(t, fixture, system, &journal)
+			if _, err := system.HandoffBootPolicy(context.Background(), journal); err == nil ||
+				err.Error() != test.code {
+				t.Fatalf("incomplete rollback producer restore accepted: %v", err)
+			}
+		})
 	}
 }
 
@@ -1195,6 +1408,11 @@ func TestManagedBootHoldResumeReleaseHandshake(t *testing.T) {
 	writeFixture(t, fixture.paths.ProcCmdline, []byte("root=/dev/test ro ipv6.disable=1\n"), 0o600)
 	writeFixture(t, fixture.paths.IPv6DisableParam, []byte("Y\n"), 0o600)
 	fixture.initramfsGuard = true
+	journal, err := (FileJournal{Path: journalPath}).Read()
+	if err != nil {
+		t.Fatal(err)
+	}
+	writeNetworkHoldFixtures(t, system, journal.Summary.NetworkProducers)
 
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
@@ -1342,6 +1560,23 @@ func TestManagedBootHoldInvalidStateFailsClosed(t *testing.T) {
 	}
 	if _, err := os.Lstat(fixture.paths.BootHoldRelease); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("stale exact release state remains: %v", err)
+	}
+}
+
+func TestManagedBootHoldRefusesMissingProducerOwnership(t *testing.T) {
+	fixture, system, journal := preparedBootState(t)
+	if err := os.Remove(system.Paths.NetworkBootMarker); err != nil {
+		t.Fatal(err)
+	}
+	writeFixture(t, fixture.paths.BootHoldReady, []byte(bootHoldReadyData), 0o600)
+	store := FileJournal{Path: filepath.Join(system.Paths.StateDir, "setup", "journal.json")}
+	if err := system.WaitBootHold(context.Background(), store); err == nil ||
+		err.Error() != "SETUP_BOOT_HOLD_STATE_INVALID" {
+		t.Fatalf("missing producer ownership released network hold: %v", err)
+	}
+	if _, err := system.PendingBootStatus(context.Background(), journal); err == nil ||
+		err.Error() != "SETUP_BOOT_STATUS_INVALID" {
+		t.Fatalf("missing producer ownership reported resumable: %v", err)
 	}
 }
 

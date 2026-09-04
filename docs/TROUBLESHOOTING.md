@@ -17,6 +17,14 @@ permissions must be repaired before retrying.
 Do not disable a firewall manager, delete state, flush nftables, or remove
 routes to bypass a refusal. Confirm the host is in `SUPPORTED-PLATFORMS.md`.
 
+`SETUP_NETWORK_PRODUCER_INSPECTION_FAILED`, `_UNSAFE`, `_UNSUPPORTED`, or
+`_AMBIGUOUS` means NFTFW could not prove one closed-set Debian network owner
+and all installed direct service/template entry points. Canonical ifupdown,
+NetworkManager, dhcpcd, and systemd-networkd are supported; custom unit
+fragments, multiple enabled/active primaries, ConnMan, netctl, wicked, and wicd
+are refused. Do not mask a second manager or edit a vendor unit merely to pass
+discovery. Resolve the host's ownership explicitly, then rerun the dry-run.
+
 `SETUP_GUARD_CHECK_FAILED` means the exact temporary fail-closed guard did not
 pass the installed nftables parser. NFTFW does not apply that guard and rolls
 the backup-bound setup transaction back. Inspect `nftfw setup status` and the
@@ -88,9 +96,10 @@ test machine must disable that firmware option-ROM path before the reboot.
 Deleting entries after the failed verification or bypassing the parser is not
 a recovery procedure.
 
-`SETUP_RESUME_GUARD_*`, `SETUP_BOOT_HOLD_*`, or
-`SETUP_DOCKER_HOLD_*` means an exact guard, journal, generator fragment, or
-runtime handshake could not be proved. Preserve the journal and backup. A
+`SETUP_RESUME_GUARD_*`, `SETUP_BOOT_HOLD_*`, `SETUP_DOCKER_HOLD_*`, or
+`SETUP_NETWORK_PRODUCER_HOLD_*` means an exact guard, journal, generator
+fragment, producer marker, or runtime handshake could not be proved. Preserve
+the journal and backup. A
 manual nft delete, service override, or Docker start would erase the safe
 classification and is not a recovery procedure.
 
@@ -120,8 +129,13 @@ sudo /usr/lib/nftfw/initramfs/nftfw-initramfs-manage verify-enabled
 ```
 
 The verified committed-recovery path repeats early readiness, rebuilds and
-checks every installed initramfs, then publishes the final `Requisite` edges.
-An archive-listing, checksum, staged-order, ownership, or rebuild error is a
+checks every installed initramfs, then publishes the final daemon/rollback
+`Requisite` edges and exact network-producer
+`Requires`/`BindsTo`/`After` gates. A
+`SETUP_NETWORK_PRODUCER_STATE_CHANGED` or
+`SETUP_FINAL_DEPENDENCY_VERIFY_FAILED` result means the discovered manager set,
+owned file, or effective systemd graph changed; do not copy the drop-ins by
+hand. An archive-listing, checksum, staged-order, ownership, or rebuild error is a
 real failure; do not treat unreadable initramfs content as proof that the
 guard is absent.
 

@@ -25,7 +25,8 @@ func validObservation() Observation {
 		InstalledVersion: "2.0.3", ExistingState: true,
 		OSID: "debian", OSVersion: "13", Architecture: "amd64",
 		NetworkValid: true, UplinkMatches: true, LANNetworkCount: 1,
-		ManagementTCP: []int{2222, 22}, IPv6Mode: "disabled",
+		NetworkProducers: []string{"ifup@.service", "networking.service"},
+		ManagementTCP:    []int{2222, 22}, IPv6Mode: "disabled",
 		ResolverMode: "none", ResolverValid: true, RoutingValid: true, ExposureValid: true,
 		FirewallOwned: true, StateValid: true, StateSchema: CurrentStateSchema,
 		Generation: 7, PolicyChecksum: strings.Repeat("a", 64),
@@ -75,6 +76,7 @@ Live policy: VERIFIED
 Provenance: VERIFIED (active 3)
 Pending generation: FALSE
 Network: verified-single-ipv4, LAN networks 1
+Network producers: 2 supported, readiness gating proposed
 Management TCP: 22,2222
 Resolver: NONE
 IPv6: DISABLED
@@ -92,14 +94,15 @@ Units: 8
   nftfw-vpn.service: active TRUE, enabled TRUE
   nftfw-web.service: active TRUE, enabled TRUE
   nftfwd.service: active TRUE, enabled TRUE
-Ownership changes: 6 REQUIRE SEPARATE APPROVAL
+Ownership changes: 7 REQUIRE SEPARATE APPROVAL
   boot: advanced NFTFW units -> managed early protection; interruption none until separately approved reboot; separate approval TRUE
   firewall: advanced NFTFW -> managed NFTFW; interruption safe apply; no management or public-service interruption expected after validation; separate approval TRUE
+  network-producers: existing Debian network manager -> readiness-gated managed ownership; interruption none until separately approved reboot; separate approval TRUE
   resolver: existing resolver owner -> managed VPN resolver; interruption bounded DNS interruption; separate approval TRUE
   routing: existing policy routes -> managed policy routes; interruption coupled to VPN and Internet transfer; separate approval TRUE
   sysctl: existing host values -> managed IPv6 and forwarding values; interruption none expected after validation; separate approval TRUE
   vpn: existing WireGuard owner -> managed nftfw-vpn; interruption brief VPN and Internet interruption; separate approval TRUE
-Backup inputs: 7
+Backup inputs: 8
   backup: advanced configuration
   backup: generation database
   backup: enforcement pointer and snapshots
@@ -107,6 +110,7 @@ Backup inputs: 7
   backup: WireGuard profile and routing state
   backup: systemd unit states
   backup: resolver and sysctl state
+  backup: network-producer unit fragments and dependency drop-ins
 Rollback boundaries: 5
   rollback: before ownership transfer
   rollback: after fail-closed guard
@@ -121,7 +125,7 @@ Detailed log: sudo journalctl -u nftfwd (the planner writes no log)
 	if first.Human() != wantHuman {
 		t.Fatalf("human worksheet changed:\n%s", first.Human())
 	}
-	if got := fmt.Sprintf("%x", sha256.Sum256(firstJSON)); got != "262d8ed3fe417121ff7e277d72ab33c11f7538a185d6eb73d0d45a5a56920ca9" {
+	if got := fmt.Sprintf("%x", sha256.Sum256(firstJSON)); got != "9f8a26ce01ce5912cb1eee04c6bbaccf9a29f81baa1fac8dcd164b639504731e" {
 		t.Fatalf("JSON worksheet golden digest changed: %s", got)
 	}
 	if first.Schema != Schema || first.Status != "READY_FOR_SEPARATE_LIVE_PLAN" ||
@@ -186,6 +190,9 @@ func TestPlannerRefusesEveryUnsupportedClassification(t *testing.T) {
 		{"version", "ADOPTION_PACKAGE_VERSION_UNSUPPORTED", func(o *Observation) { o.InstalledVersion = "2.0.2" }},
 		{"profile", "ADOPTION_PROFILE_UNSUPPORTED", func(o *Observation) { o.Profile.IPv4DefaultRoute = false }},
 		{"network", "ADOPTION_NETWORK_AMBIGUOUS", func(o *Observation) { o.UplinkMatches = false }},
+		{"network-producer", "ADOPTION_NETWORK_PRODUCER_UNSUPPORTED", func(o *Observation) {
+			o.NetworkProducers = []string{"connman.service"}
+		}},
 		{"exposure", "ADOPTION_EXPOSURE_UNSUPPORTED", func(o *Observation) { o.ExposureValid = false }},
 		{"owner", "ADOPTION_FIREWALL_OWNERSHIP_AMBIGUOUS", func(o *Observation) { o.FirewallOwned = false }},
 		{"foreign", "ADOPTION_FIREWALL_OWNERSHIP_AMBIGUOUS", func(o *Observation) { o.ForeignNFTables = true }},

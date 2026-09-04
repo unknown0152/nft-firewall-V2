@@ -38,7 +38,9 @@ func (f *fakeExecutor) Prepare(context.Context, string) (Plan, error) {
 	if f.prepareErr != nil {
 		err = f.prepareErr
 	}
-	return Plan{Summary: Summary{Schema: "nftfw.setup-plan.v1"}}, err
+	return Plan{Summary: Summary{
+		Schema: "nftfw.setup-plan.v1", NetworkProducers: []string{"networking.service"},
+	}}, err
 }
 func (f *fakeExecutor) Backup(context.Context, Plan) (string, error) {
 	return "/backup", f.call("backup")

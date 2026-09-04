@@ -1,3 +1,4 @@
 [Unit]
 Requires=nftfw-enforcement-ready.service
+BindsTo=nftfw-enforcement-ready.service
 After=nftfw-enforcement-ready.service

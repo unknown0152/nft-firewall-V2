@@ -41,6 +41,14 @@ NFTFW's Docker and forwarding ownership, asks for the restart confirmation,
 and only then releases Docker. Any missing, additional, changed, or
 contradictory table/hold state fails closed.
 
+The special setup boot also gates every supported direct Debian network
+producer, including `ifup@.service` device-hotplug instances, on that same
+pre-network hold. This closes the path where udev could start DHCP without
+pulling the passive `network-pre.target`. After commit, NFTFW publishes exact
+`Requires=`, `BindsTo=`, and `After=` edges from every detected supported
+producer to `nftfw-enforcement-ready.service`. A failed, skipped, stopped, or
+missing verifier therefore leaves direct producer activation inactive.
+
 After resume, setup deliberately starts `nftfwd` before publishing its final
 `Requisite=nftfw-early.service` drop-ins. After commit it starts and verifies
 early enforcement, verifies the checksum-bound initramfs deny guard, and only
@@ -66,26 +74,21 @@ E-R2, tagging, and final publication approval are complete, local Stage E-R
 candidate artifacts are deliberately quarantined and cannot run or install.
 The last published stable line remains 2.0.3.
 
-The E-R2 run for source `2c757ed28a2efe0fa9f539ec7f00d95f56daece7`
-passed fourteen disposable package, network, Docker, recovery, managed-setup,
-and retry subjects before repeated boot validation exposed an intermittent
-systemd runtime-directory race. On the third normal boot,
-`nftfw-enforcement-ready.service` reached mount namespace construction before
-`/run/nftfw` existed and exited `226/NAMESPACE`; SSH remained blocked, so the
-failure was secure but the candidate was not reliable. No tag was created and
-the live host was unchanged.
+The E-R2 run for source `53e53f0dbce141df33d8f2120be5757ab789773b`
+passed the independent package/runtime subjects and twenty consecutive normal
+boots. Its adverse ambiguous-state boot correctly failed readiness, but Debian
+udev directly activated `ifup@enp0s1.service`; that template bypassed the
+passive `network-pre.target` and emitted DHCP/ARP frames. The run hard-stopped,
+no tag was created, and the live host was unchanged.
 
-Amendment AC makes readiness and independently timer-activated recovery units
-consistent owners of the shared `root:nftfw-web`, mode-`0750`, preserved
-runtime directory. Early restore uses explicit early-boot dependencies and is
-co-scheduled with readiness from `sysinit.target`; protected consumers require
-the nonmutating verifier, which still has no activating dependency on early
-restore and still refuses missing or failed enforcement. Source contracts and
-destructive-guest-only regressions cover absent-directory starts, injected
-early failure, concurrent owners, and twenty consecutive ROM-less boots with
-zero pre-marker packets. The complete renewed
-E-R2 matrix must repeat every row for the eventual frozen candidate. This tree
-remains source-only and is not yet a release.
+Amendment AD adds a closed Debian 13 producer inventory, transient setup-boot
+gates, post-commit final readiness gates, topology revalidation, exact backup
+and rollback, package handoff, status, adoption, and operator-backup coverage.
+Known alternate managers, custom fragments for supported entry points,
+contradictory observations, or multiple primary ownership refuse before
+mutation. The complete renewed E-R2 matrix must repeat every prior row
+and prove zero frames for failed readiness across every supported direct
+producer. This tree remains source-only and is not yet a release.
 
 ## Supported clean-host setup
 
@@ -97,6 +100,11 @@ The one-file path intentionally supports a narrow first matrix:
 - local console or directly connected private LAN management;
 - one strict wg-quick-style profile with one peer and `0.0.0.0/0`;
 - nftables JSON support and no competing firewall owner;
+- exactly one active/enabled supported primary network manager from
+  ifupdown/networking, NetworkManager, dhcpcd, or systemd-networkd; installed
+  supported direct service/template entry points are inventoried, while
+  ConnMan, netctl, wicked, wicd, custom unit fragments, and ambiguous ownership
+  are refused;
 - one unambiguous local Debian GRUB installation (`grub-pc` on BIOS or the
   matching GRUB EFI family), writable local boot storage, and no systemd-boot,
   UKI, extlinux, alternate GRUB tree, or existing IPv6-disable argument;

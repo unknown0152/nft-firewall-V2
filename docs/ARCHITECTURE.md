@@ -185,16 +185,18 @@ phase-recorded transaction:
 
 ```text
 profile/discovery/plan (no journal, no mutation)
+  -> closed network-producer inventory and exact drop-in target validation
   -> durable journal containing the prepared summary
   -> checksum backup -> native initramfs + fixed GRUB fragment
   -> verify generated entries -> reboot_required -> explicit operator reboot
-  -> initramfs deny guard -> checksum-bound LAN/endpoint resume guard
+  -> initramfs deny guard -> direct-producer boot hold
+  -> checksum-bound LAN/endpoint resume guard
   -> Docker service/socket hold + same-profile identity verification
   -> temporary guard -> install/check candidate
   -> durable Docker/forwarding ownership -> confirmation -> release/restart
   -> daemon start without final Requisite -> safe apply -> tunnel
   -> validation -> commit -> early restore/readiness
-  -> verify initramfs guard -> publish final Requisite -> boot
+  -> verify initramfs guard -> publish final Requisite and producer gates -> boot
 ```
 
 The explicit `handoff` phase is after the commit linearization point. It first
@@ -204,6 +206,29 @@ publishes the managed initramfs marker, rebuilds and inspects every installed
 initramfs, and finally writes the daemon/rollback `Requisite=` drop-ins. A
 handoff interruption recovers forward from the committed generation; it never
 rolls committed state back to make the dependency graph easier to satisfy.
+
+`network-pre.target` is passive and cannot by itself contain every Debian
+device-hotplug transaction. Managed setup therefore inventories a closed set
+of Debian 13 network producer entry points: `NetworkManager.service`,
+`dhcpcd.service`, `dhcpcd@.service`, `ifup@.service`, `networking.service`, and
+`systemd-networkd.service`. It requires exactly one active or enabled primary,
+accepts only canonical vendor fragments and strict property observations, and
+refuses known alternate managers or ambiguous ownership before the initial
+journal. Template units are inspected and later verified through an inert
+probe instance.
+
+During the explicit setup reboot, the generator places exact transient
+`Requires=`/`After=` edges from each supported direct entry point to
+`nftfw-setup-boot-hold.service`. Once enforcement is committed, the handoff
+publishes each exact `Requires=`, `BindsTo=`, and `After=` drop-in atomically,
+reloads systemd, and verifies the effective graph against the nonmutating
+`nftfw-enforcement-ready.service`. `BindsTo=` combined with `After=` is
+intentional: a condition-skipped or manually stopped readiness verifier must
+keep a producer inactive. Readiness does not require or start `nftfw-early`; a
+direct producer can start only verification, never replay early restoration
+outside the common boot transaction. Every owned marker/drop-in is part of the
+prepared summary, exact backup, watchdog recovery, rollback, and package
+handoff.
 
 The initial boot-policy preflight accepts only one locally installed Debian
 GRUB family and a protected, writable local boot filesystem. Setup backs up

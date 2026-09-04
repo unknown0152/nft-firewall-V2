@@ -192,6 +192,15 @@ if [[ -e "$STATE_DIR/state.db" || -L "$STATE_DIR/state.db" ]]; then
     echo "Refusing legacy state at $STATE_DIR/state.db; no 2.0.2 migration was executed." >&2
     exit 1
 fi
+retained_network_gate=
+for producer in NetworkManager.service dhcpcd.service dhcpcd@.service \
+    ifup@.service networking.service systemd-networkd.service; do
+    candidate_gate=/etc/systemd/system/$producer.d/50-nftfw-enforcement-ready.conf
+    if [[ -e $candidate_gate || -L $candidate_gate ]]; then
+        retained_network_gate=$candidate_gate
+        break
+    fi
+done
 if [[ -e "$BIN_DIR/nftfw" || -L "$BIN_DIR/nftfw" ]]; then
     if ! protected_root_file "$BIN_DIR/nftfw" || [[ ! -x "$BIN_DIR/nftfw" ]]; then
         echo "Refusing to execute an unprotected installed NFTFW binary: $BIN_DIR/nftfw" >&2
@@ -238,6 +247,7 @@ if [[ -e "$BIN_DIR/nftfw" || -L "$BIN_DIR/nftfw" ]]; then
 elif [[ -e "$DATABASE" || -L "$DATABASE" || \
         -e "$STATE_DIR/enforcement-enabled" || -L "$STATE_DIR/enforcement-enabled" || \
         -e "$STATE_DIR/provenance-ledger.db" || -L "$STATE_DIR/provenance-ledger.db" || \
+        -n $retained_network_gate || \
         -e /etc/systemd/system/nftfwd.service || -L /etc/systemd/system/nftfwd.service || \
         -e /usr/lib/systemd/system/nftfwd.service || -L /usr/lib/systemd/system/nftfwd.service ]]; then
     echo "Refusing an in-place source upgrade whose installed NFT Firewall version cannot be established." >&2

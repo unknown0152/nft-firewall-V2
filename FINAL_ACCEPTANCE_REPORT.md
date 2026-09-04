@@ -11,16 +11,16 @@ Release approval status: STAGE_R_CANDIDATE_ONLY
 | Build date | `@BUILD_DATE@` |
 | Build disposition | `@RELEASE_DISPOSITION@` |
 | Artifact label | `@RELEASE_ARTIFACT_LABEL@` |
-| Source-only Stage E-R | AMENDMENT AC SOURCE GATES PASS; CANDIDATES PENDING |
-| Privileged Stage E-R2 | NOT AUTHORIZED for the Amendment AC working tree |
+| Source-only Stage E-R | AMENDMENT AD SOURCE GATES PASS; CANDIDATES PENDING |
+| Privileged Stage E-R2 | NOT AUTHORIZED for the Amendment AD working tree |
 | Publication | NOT AUTHORIZED |
 | Deployment | NOT AUTHORIZED |
 
 ## Source decision
 
-The 2.1.0 working source has passed the Amendment AC gate set and is accepted
+The 2.1.0 working source has passed the Amendment AD gate set and is accepted
 for a clean source freeze and the two intrinsically nondeployable candidate
-builds. The retained Amendment E-through-Z source scope
+builds. The retained Amendment E-through-AD source scope
 includes Go 1.27, one-file managed setup, strict VPN import, managed routing,
 strict managed Docker IPv4 bridge adoption and forwarding ownership,
 the explicit dry-run-only existing-host adoption planner, CLI/dashboard
@@ -52,6 +52,16 @@ disposable source fixtures prove condition-skipped and failed early enforcement
 remain blocked, 150 absent-directory starts succeed, concurrent owners cannot
 remove or chown-break shared state, and twenty consecutive ROM-less boots
 release SSH only after verification with zero pre-marker packets.
+Amendment AD adds closed-set Debian direct network-producer ownership. Managed
+setup accepts one canonical primary, inventories every installed supported
+service/template, rejects known alternate/custom/ambiguous state before
+mutation, gates every supported entry point during the setup reboot, and after
+commit publishes each exact readiness drop-in atomically before verifying the
+effective `Requires=`/`BindsTo=`/`After=` graph. The transaction, operator
+backup, status, adoption, recovery, rollback, and package handoff all retain
+the same exact producer identity. An offline marked systemd guest proves direct
+ordinary and template activation cannot bypass failed, skipped, or stopped
+readiness.
 
 The candidate binaries permit only their quarantine-safe behavior, candidate
 daemon/web processes refuse startup, and candidate Debian packages refuse
@@ -123,6 +133,12 @@ live installation, firewall application, VPN interruption, or deployment.
   enforcement starts and commits. It establishes early/readiness and verifies
   every initramfs before publishing final edges or enabling boot consumers;
   every post-commit failure follows the recover-forward path.
+- Direct network producers are discovered from a closed canonical Debian 13
+  set before mutation. The special reboot holds every supported entry point;
+  committed operation verifies one readiness require/bind/order edge per
+  selected producer; and exact rollback/package removal restores every prior
+  drop-in or absence. Direct ordinary/template starts, failed readiness,
+  condition skip, and readiness teardown pass in an offline systemd guest.
 - Managed disabled setup accepts one exact local Debian GRUB family, publishes
   one root-only `ipv6.disable=1` fragment, verifies every generated Linux
   entry, and stops before ordinary mutation. It resumes only after an explicit
@@ -191,8 +207,11 @@ disabled. Its E-R2 replacement passed fourteen subjects and then failed closed
 on the intermittent readiness runtime-directory race. Amendment AC corrects
 that shared systemd ownership and directly coupled boot-transaction ordering
 boundary. Its source run passes twenty consecutive ROM-less boots. The
-replacement clean freeze and two quarantined candidate builds may
-proceed. E-R2, tagging, publication, installation, and deployment remain
-outside this report.
+next E-R2 repeated the normal boots, then hard-stopped when an adverse failed-
+readiness boot let a direct ifupdown hotplug instance emit bootstrap DHCP/ARP
+frames. Amendment AD closes that producer boundary, and its focused offline
+systemd semantics plus complete source gates pass. The replacement clean
+freeze and two quarantined candidate builds may proceed. E-R2, tagging,
+publication, installation, and deployment remain outside this report.
 
-R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED FOR THE AMENDMENT AC CORRECTION
+R2 PRIVILEGED PACKAGE/BOOT/NETWORK/DOCKER/OVPN EVIDENCE: NOT EXECUTED FOR THE AMENDMENT AD CORRECTION

@@ -21,6 +21,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
 	"github.com/unknown0152/nft-firewall-v2/internal/containers"
 	"github.com/unknown0152/nft-firewall-v2/internal/intent"
+	"github.com/unknown0152/nft-firewall-v2/internal/netgate"
 	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
 	"github.com/unknown0152/nft-firewall-v2/internal/wgconfig"
@@ -43,6 +44,7 @@ type Paths struct {
 	Enforcement  string
 	DockerDaemon string
 	DockerDropIn string
+	SystemdDir   string
 }
 
 type Record struct {
@@ -53,16 +55,18 @@ type Record struct {
 }
 
 type Manifest struct {
-	Schema    string    `json:"schema"`
-	CreatedAt time.Time `json:"created_at"`
-	Managed   bool      `json:"managed"`
-	Files     []Record  `json:"files"`
+	Schema           string    `json:"schema"`
+	CreatedAt        time.Time `json:"created_at"`
+	Managed          bool      `json:"managed"`
+	NetworkProducers []string  `json:"network_producers"`
+	Files            []Record  `json:"files"`
 }
 
 type Creator struct {
-	Paths   Paths
-	LockDir string
-	Now     func() time.Time
+	Paths            Paths
+	LockDir          string
+	Now              func() time.Time
+	NetworkProducers []string
 }
 
 func (c Creator) Create(ctx context.Context, destination string) (Manifest, error) {
@@ -119,6 +123,17 @@ func (c Creator) Create(ctx context.Context, destination string) (Manifest, erro
 	managedIntent, err := intent.Load(c.Paths.Intent)
 	if err != nil {
 		return Manifest{}, errors.New("BACKUP_INTENT_INVALID")
+	}
+	producerPaths, err := netgate.DropInPaths(c.Paths.SystemdDir, c.NetworkProducers)
+	if err != nil {
+		return Manifest{}, errors.New("BACKUP_NETWORK_PRODUCER_STATE_INVALID")
+	}
+	for index, source := range producerPaths {
+		target := filepath.Join(temporary, "systemd", "network-producers",
+			c.NetworkProducers[index]+".d", netgate.DropInName)
+		if err := copyProtected(source, target); err != nil {
+			return Manifest{}, errors.New("BACKUP_NETWORK_PRODUCER_STATE_INVALID")
+		}
 	}
 	if managedIntent.DockerEnabled {
 		for _, item := range []struct {
@@ -179,6 +194,7 @@ func (c Creator) Create(ctx context.Context, destination string) (Manifest, erro
 	}
 	manifest := Manifest{
 		Schema: Schema, CreatedAt: now().UTC(), Managed: true,
+		NetworkProducers: append([]string(nil), c.NetworkProducers...),
 	}
 	manifest.Files, err = inventory(temporary, "manifest.json")
 	if err != nil {
@@ -222,7 +238,7 @@ func Verify(ctx context.Context, directory string) (Manifest, error) {
 	decoder := json.NewDecoder(file)
 	decoder.DisallowUnknownFields()
 	if decoder.Decode(&manifest) != nil || manifest.Schema != Schema || !manifest.Managed ||
-		manifest.CreatedAt.IsZero() {
+		manifest.CreatedAt.IsZero() || netgate.ValidateUnits(manifest.NetworkProducers) != nil {
 		return Manifest{}, errors.New("BACKUP_MANIFEST_INVALID")
 	}
 	actual, err := inventory(directory, "manifest.json")
@@ -231,6 +247,9 @@ func Verify(ctx context.Context, directory string) (Manifest, error) {
 	}
 	if !recordsEqual(manifest.Files, actual) {
 		return Manifest{}, errors.New("BACKUP_CONTENT_MISMATCH")
+	}
+	if !networkProducerRecordsExact(manifest.Files, manifest.NetworkProducers) {
+		return Manifest{}, errors.New("BACKUP_NETWORK_PRODUCER_STATE_INVALID")
 	}
 	if _, err := config.Load(filepath.Join(directory, "nftfw.toml")); err != nil {
 		return Manifest{}, errors.New("BACKUP_CONFIG_INVALID")
@@ -247,6 +266,13 @@ func Verify(ctx context.Context, directory string) (Manifest, error) {
 			filepath.Join(directory, "systemd", "nftfwd-docker-access.conf"),
 		); err != nil {
 			return Manifest{}, errors.New("BACKUP_DOCKER_DROPIN_INVALID")
+		}
+	}
+	for _, unit := range manifest.NetworkProducers {
+		path := filepath.Join(directory, "systemd", "network-producers",
+			unit+".d", netgate.DropInName)
+		if err := netgate.ValidateBackupDropIn(path); err != nil {
+			return Manifest{}, errors.New("BACKUP_NETWORK_PRODUCER_STATE_INVALID")
 		}
 	}
 	if _, _, err := wgconfig.ReadManaged(filepath.Join(directory, "nftfw0.conf")); err != nil {
@@ -271,6 +297,26 @@ func Verify(ctx context.Context, directory string) (Manifest, error) {
 		return Manifest{}, errors.New("BACKUP_LEDGER_INVALID")
 	}
 	return manifest, nil
+}
+
+func networkProducerRecordsExact(records []Record, units []string) bool {
+	expected := make(map[string]bool, len(units))
+	for _, unit := range units {
+		expected[filepath.ToSlash(filepath.Join(
+			"systemd", "network-producers", unit+".d", netgate.DropInName,
+		))] = true
+	}
+	seen := make(map[string]bool, len(expected))
+	for _, record := range records {
+		if !strings.HasPrefix(record.Path, "systemd/network-producers/") {
+			continue
+		}
+		if !expected[record.Path] || seen[record.Path] {
+			return false
+		}
+		seen[record.Path] = true
+	}
+	return len(seen) == len(expected)
 }
 
 func validateDestination(path string) error {

@@ -71,6 +71,40 @@ else
     printf '%s\n' "$network_expected" >"$network_fragment"
 fi
 
+# network-pre.target is passive and Debian device hotplug may start ifup@
+# without pulling it. Gate every supported direct producer on the hold itself
+# for this setup boot. Package installation remains inert because this
+# generator exits above when the managed setup marker is absent.
+for producer in \
+    NetworkManager.service \
+    dhcpcd.service \
+    dhcpcd@.service \
+    ifup@.service \
+    networking.service \
+    systemd-networkd.service; do
+    producer_dir=$normal/$producer.d
+    if [ -L "$producer_dir" ]; then
+        exit 1
+    elif [ ! -e "$producer_dir" ]; then
+        mkdir "$producer_dir"
+    elif [ ! -d "$producer_dir" ]; then
+        exit 1
+    fi
+    producer_fragment=$producer_dir/50-nftfw-setup-hold.conf
+    producer_expected='[Unit]
+Requires=nftfw-setup-boot-hold.service
+After=nftfw-setup-boot-hold.service'
+    if [ -L "$producer_fragment" ]; then
+        exit 1
+    elif [ -f "$producer_fragment" ]; then
+        [ "$(cat "$producer_fragment")" = "$producer_expected" ] || exit 1
+    elif [ -e "$producer_fragment" ]; then
+        exit 1
+    else
+        printf '%s\n' "$producer_expected" >"$producer_fragment"
+    fi
+done
+
 for consumer in docker.service docker.socket; do
     dropin_dir=$normal/$consumer.d
     if [ -L "$dropin_dir" ]; then

@@ -1062,8 +1062,10 @@ class SystemdGraphContracts(unittest.TestCase):
             # copies of this final post-commit edge.
             ("Requisite", "nftfw-early.service"): 2,
             # One reusable template is installed explicitly for each audited
-            # network consumer during the later host handoff.
+            # network consumer during the later host handoff. BindsTo plus
+            # After also blocks a condition-skipped readiness verifier.
             ("Requires", "nftfw-enforcement-ready.service"): 1,
+            ("BindsTo", "nftfw-enforcement-ready.service"): 1,
         }
         for (directive, target), expected_count in expected_dependencies.items():
             templates = self._dependency_templates(directive, target)
@@ -1078,10 +1080,23 @@ class SystemdGraphContracts(unittest.TestCase):
                 unit = parse_unit(relative)
                 self.assertEqual(words(unit, "Unit", directive), {target})
                 self.assertEqual(words(unit, "Unit", "After"), {target})
+                readiness_pair = (
+                    target == "nftfw-enforcement-ready.service"
+                    and directive in {"Requires", "BindsTo"}
+                )
+                if readiness_pair:
+                    self.assertEqual(
+                        words(unit, "Unit", "Requires"),
+                        {"nftfw-enforcement-ready.service"},
+                    )
+                    self.assertEqual(
+                        words(unit, "Unit", "BindsTo"),
+                        {"nftfw-enforcement-ready.service"},
+                    )
                 if directive == "Requires":
                     self.assertFalse(values(unit, "Unit", "Requisite"))
                 for key in self.ACTIVATING_KEYS:
-                    if key == directive:
+                    if key == directive or readiness_pair and key in {"Requires", "BindsTo"}:
                         continue
                     self.assertFalse(
                         values(unit, "Unit", key),
@@ -2353,6 +2368,130 @@ class AmendmentXContracts(unittest.TestCase):
         pcap = read("tests/packaging/managed_boot_pcap.py")
         self.assertIn("--expect-zero-guest", pcap)
         self.assertIn("failed boot identity emitted a guest frame", pcap)
+
+
+class AmendmentADContracts(unittest.TestCase):
+    PRODUCERS = (
+        "NetworkManager.service",
+        "dhcpcd.service",
+        "dhcpcd@.service",
+        "ifup@.service",
+        "networking.service",
+        "systemd-networkd.service",
+    )
+
+    def test_closed_network_producer_inventory_fails_closed(self) -> None:
+        source = read("internal/netgate/netgate.go")
+        tests = read("internal/netgate/netgate_test.go")
+        for unit in self.PRODUCERS:
+            self.assertIn(f'unit: "{unit}"', source)
+        for unit in (
+            "connman.service",
+            "netctl.service",
+            "wicked.service",
+            "wicd.service",
+        ):
+            self.assertIn(f'"{unit}"', source)
+        for refusal in (
+            "SETUP_NETWORK_PRODUCER_INSPECTION_FAILED",
+            "SETUP_NETWORK_PRODUCER_UNSAFE",
+            "SETUP_NETWORK_PRODUCER_UNSUPPORTED",
+            "SETUP_NETWORK_PRODUCER_AMBIGUOUS",
+            "SETUP_NETWORK_PRODUCER_STATE_CHANGED",
+        ):
+            self.assertIn(refusal, source + read("internal/setup/system.go"))
+        self.assertIn("TestDiscoverSupportsEveryClosedDebianPrimary", tests)
+        self.assertIn("TestDiscoverRefusesEveryKnownUnsupportedManager", tests)
+
+    def test_final_gate_has_exact_effective_readiness_edges(self) -> None:
+        source = read("internal/netgate/netgate.go")
+        example = read("packaging/systemd/nftfw-consumer-final-ready.conf.example")
+        exact = (
+            "[Unit]\n"
+            "Requires=nftfw-enforcement-ready.service\n"
+            "BindsTo=nftfw-enforcement-ready.service\n"
+            "After=nftfw-enforcement-ready.service\n"
+        )
+        self.assertIn(exact, source)
+        for edge in (
+            "Requires=nftfw-enforcement-ready.service",
+            "BindsTo=nftfw-enforcement-ready.service",
+            "After=nftfw-enforcement-ready.service",
+        ):
+            self.assertIn(edge, example)
+        self.assertIn('"--property=Requires,BindsTo,After"', source)
+        self.assertIn(
+            '[]string{"Requires", "BindsTo", "After"}',
+            source,
+        )
+
+    def test_setup_transaction_owns_publish_recovery_and_exact_restore(self) -> None:
+        system = read("internal/setup/system.go")
+        engine = read("internal/setup/engine.go")
+        command = read("cmd/nftfw/managed.go")
+        backup = read("internal/operatorbackup/backup.go")
+        adoption = read("internal/adoption/adoption.go")
+        for expected in (
+            "netgate.Discover",
+            "netgate.ValidateDropInTarget",
+            "netgate.BootMarkerData",
+            "netgate.ValidateHoldDropIns",
+            "netgate.VerifyEffective",
+            "NetworkBootMarker",
+            "restoreBackupFiles",
+            '"systemctl", "daemon-reload"',
+        ):
+            self.assertIn(expected, system)
+        self.assertIn('NetworkProducers  []string `json:"network_producers"`', engine)
+        self.assertIn("managedNetworkGateState", command)
+        self.assertIn("BACKUP_NETWORK_PRODUCER_STATE_INVALID", command + backup)
+        self.assertIn('Area: "network-producers"', adoption)
+        self.assertIn("ADOPTION_NETWORK_PRODUCER_UNSUPPORTED", adoption)
+
+    def test_special_setup_boot_gates_direct_entry_points(self) -> None:
+        generator = read("packaging/systemd/nftfw-setup-boot-hold-generator")
+        fixture = read("tests/packaging/setup_boot_hold_generator.sh")
+        for unit in self.PRODUCERS:
+            self.assertIn(unit, generator)
+            self.assertIn(unit, fixture)
+        for edge in (
+            "Requires=nftfw-setup-boot-hold.service",
+            "After=nftfw-setup-boot-hold.service",
+        ):
+            self.assertIn(edge, generator)
+            self.assertIn(edge, fixture)
+        self.assertIn("foreign direct-producer hold fragment was accepted", fixture)
+        self.assertIn("symlinked direct-producer hold fragment was accepted", fixture)
+
+    def test_package_handoff_detects_only_closed_owned_gate_paths(self) -> None:
+        for relative in (
+            "packaging/deb/prerm",
+            "scripts/uninstall.sh",
+            "scripts/package-rollback.sh",
+        ):
+            source = read(relative)
+            self.assertNotIn("find /etc/systemd/system", source)
+            self.assertIn("50-nftfw-enforcement-ready.conf", source)
+            for unit in self.PRODUCERS:
+                self.assertIn(unit, source)
+            self.assertIn("setup boot-handoff", source)
+
+    def test_disposable_direct_activation_semantics_are_bounded(self) -> None:
+        relative = "tests/packaging/network_producer_gate_disposable.sh"
+        path = ROOT / relative
+        source = read(relative)
+        self.assertEqual(path.stat().st_mode & 0o777, 0o755)
+        for expected in (
+            "/run/nftfw-disposable-test-guest",
+            "0:0:600:1",
+            "ConditionPathExists=",
+            "failed readiness allowed ordinary producer activation",
+            "skipped readiness allowed direct template activation",
+            "BindsTo did not stop an active producer",
+            "NETWORK_PRODUCER_GATE_DISPOSABLE_PASS",
+        ):
+            self.assertIn(expected, source)
+        self.assertNotIn("/etc/systemd/system", source)
 
 
 class AmendmentABContracts(unittest.TestCase):

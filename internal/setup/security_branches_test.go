@@ -588,7 +588,7 @@ func TestBootAndDockerHoldRecoveryRefusalBranches(t *testing.T) {
 func TestManagedFinalizationSecurityFailureBranches(t *testing.T) {
 	t.Run("missing-managed-plan", func(t *testing.T) {
 		system, _ := testSystem(t, &systemRunner{})
-		plan := Plan{Summary: Summary{BootPolicy: ManagedBootPolicy}}
+		plan := Plan{Summary: Summary{BootPolicy: ManagedBootPolicy, NetworkProducers: testNetworkProducers()}}
 		if err := system.PublishFinalDependencies(context.Background(), plan); err == nil ||
 			err.Error() != "SETUP_BOOT_HOLD_STATE_INVALID" {
 			t.Fatalf("managed handoff without private identity was accepted: %v", err)
@@ -597,7 +597,7 @@ func TestManagedFinalizationSecurityFailureBranches(t *testing.T) {
 	t.Run("missing-backup", func(t *testing.T) {
 		system, _ := testSystem(t, &systemRunner{})
 		plan := Plan{
-			Summary:     Summary{BootPolicy: ManagedBootPolicy},
+			Summary:     Summary{BootPolicy: ManagedBootPolicy, NetworkProducers: testNetworkProducers()},
 			PrivateData: &prepared{BackupDir: filepath.Join(system.Paths.StateDir, "setup", "backups", "missing")},
 		}
 		if err := system.PublishFinalDependencies(context.Background(), plan); err == nil ||

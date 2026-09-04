@@ -27,6 +27,13 @@
 - Co-schedule early restore and readiness independently from `sysinit.target`
   and make protected consumers require the nonmutating verifier, without
   giving readiness an activating edge to early restoration.
+- Inventory the closed set of Debian 13 direct network-producer services and
+  templates, including ifupdown hotplug instances. Gate the special setup boot
+  on the protected hold and publish post-commit `Requires=`/`BindsTo=`/`After=`
+  readiness edges so failed or condition-skipped verification cannot release a
+  directly activated DHCP/interface producer. Refuse unsupported, custom, or
+  ambiguous ownership before mutation and include the exact gate state in
+  backup, watchdog recovery, rollback, uninstall, status, and adoption plans.
 - Extend the additive status-v2 and read-only dashboard views with managed
   mode, public exposure, and LAN policy.
 - Preserve 2.0.3 advanced TOML, schema-6 state, generations, snapshots,

@@ -11,6 +11,8 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+
+	"github.com/unknown0152/nft-firewall-v2/internal/netgate"
 )
 
 const (
@@ -86,6 +88,7 @@ type Observation struct {
 	Architecture     string
 
 	NetworkValid       bool
+	NetworkProducers   []string
 	UplinkMatches      bool
 	LANNetworkCount    int
 	ManagementTCP      []int
@@ -151,6 +154,7 @@ type NetworkSummary struct {
 	Resolver         string `json:"resolver"`
 	IPv6Mode         string `json:"ipv6_mode"`
 	IPv6DefaultRoute bool   `json:"ipv6_default_route"`
+	ProducerCount    int    `json:"producer_count"`
 }
 
 type DockerSummary struct {
@@ -228,6 +232,7 @@ func (p Planner) Plan(ctx context.Context, vpnPath string) (Plan, error) {
 			Uplink: "verified-single-ipv4", LANNetworkCount: observation.LANNetworkCount,
 			ManagementTCP: management, Resolver: observation.ResolverMode,
 			IPv6Mode: observation.IPv6Mode, IPv6DefaultRoute: observation.IPv6DefaultRoute,
+			ProducerCount: len(observation.NetworkProducers),
 		},
 		Docker: DockerSummary{
 			Present:            observation.DockerPresent,
@@ -273,6 +278,9 @@ func validate(o Observation) error {
 	}
 	if !o.NetworkValid || !o.UplinkMatches || o.LANNetworkCount < 1 {
 		return fail("ADOPTION_NETWORK_AMBIGUOUS")
+	}
+	if netgate.ValidateUnits(o.NetworkProducers) != nil {
+		return fail("ADOPTION_NETWORK_PRODUCER_UNSUPPORTED")
 	}
 	if !o.ExposureValid {
 		return fail("ADOPTION_EXPOSURE_UNSUPPORTED")
@@ -382,6 +390,7 @@ func ownershipChanges(dockerPresent, dockerRestart bool) []OwnershipChange {
 		{Area: "resolver", Current: "existing resolver owner", Proposed: "managed VPN resolver", Interruption: "bounded DNS interruption", SeparateApprovalRequired: true},
 		{Area: "sysctl", Current: "existing host values", Proposed: "managed IPv6 and forwarding values", Interruption: "none expected after validation", SeparateApprovalRequired: true},
 		{Area: "boot", Current: "advanced NFTFW units", Proposed: "managed early protection", Interruption: "none until separately approved reboot", SeparateApprovalRequired: true},
+		{Area: "network-producers", Current: "existing Debian network manager", Proposed: "readiness-gated managed ownership", Interruption: "none until separately approved reboot", SeparateApprovalRequired: true},
 	}
 	if dockerPresent {
 		interruption := "none"
@@ -404,6 +413,7 @@ func backupInputs(dockerPresent bool) []string {
 		"advanced configuration", "generation database", "enforcement pointer and snapshots",
 		"monotonic provenance ledger", "WireGuard profile and routing state",
 		"systemd unit states", "resolver and sysctl state",
+		"network-producer unit fragments and dependency drop-ins",
 	}
 	if dockerPresent {
 		result = append(result, "Docker daemon, socket-access, and network ownership state")
@@ -436,6 +446,7 @@ func (p Plan) Human() string {
 	line("Provenance", strings.ToUpper(p.State.Provenance)+" (active "+strconv.Itoa(p.State.ActiveProvenance)+")")
 	line("Pending generation", boolText(p.State.PendingGeneration))
 	line("Network", p.Network.Uplink+", LAN networks "+strconv.Itoa(p.Network.LANNetworkCount))
+	line("Network producers", strconv.Itoa(p.Network.ProducerCount)+" supported, readiness gating proposed")
 	line("Management TCP", formatPorts(p.Network.ManagementTCP))
 	line("Resolver", strings.ToUpper(p.Network.Resolver))
 	line("IPv6", strings.ToUpper(p.Network.IPv6Mode))

@@ -160,6 +160,11 @@ accepts package replacement only for an exact `complete` or `rolled_back`
 managed boot journal. Finish the same profile-only setup command, or complete
 `nftfw setup rollback` (including any required reboot), before retrying the
 package upgrade. Do not replace the binary, generator, or hold units manually.
+The preflight also treats any closed-set network-producer readiness drop-in as
+managed transaction evidence. A fresh install refuses a retained gate, while
+an upgrade requires the installed helper to prove its exact journal and gate
+ownership before package replacement. Package installation itself never
+creates or activates those host-network drop-ins.
 
 The monotonic provenance ledger has a different lifecycle. A generation-state
 backup never replaces or rewinds it. Preserve a protected copy as evidence;
@@ -176,6 +181,13 @@ enable, disable, start, stop, or restart NFTFW units. An inactive installation
 remains inactive. An active daemon continues running its previous process image
 until an administrator performs the separately reviewed migration/readiness
 checks and explicitly restarts it.
+
+On a completed managed host, `nftfw config show --effective` and operator
+backup verify every detected supported network producer has the exact
+`Requires=`/`BindsTo=`/`After=` dependency on enforcement readiness. A newly
+installed, removed, custom, or second network manager is topology drift and
+must be resolved before restart or migration; never bypass this by deleting an
+owned drop-in.
 
 After an approved upgrade, verify without claiming the new executable is
 active merely because files were replaced:

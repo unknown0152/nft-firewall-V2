@@ -18,6 +18,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/api"
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
 	"github.com/unknown0152/nft-firewall-v2/internal/intent"
+	"github.com/unknown0152/nft-firewall-v2/internal/netgate"
 	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/reconcile"
 	"github.com/unknown0152/nft-firewall-v2/internal/routing"
@@ -37,6 +38,7 @@ func managedTestKey(fill byte) string {
 func withManagedTestEnvironment(t *testing.T) (string, string) {
 	t.Helper()
 	oldDockerDaemon, oldDockerDropIn := managedDockerDaemon, managedDockerDropIn
+	oldSystemdDir, oldNetworkGateState := managedSystemdDir, managedNetworkGateState
 	oldAdoptionPlan := managedAdoptionPlan
 	oldSetupRollbackAcquire := setupRollbackAcquire
 	oldSetupRecoverySystem := setupRecoverySystem
@@ -57,6 +59,8 @@ func withManagedTestEnvironment(t *testing.T) (string, string) {
 	t.Cleanup(func() {
 		managedDockerDaemon = oldDockerDaemon
 		managedDockerDropIn = oldDockerDropIn
+		managedSystemdDir = oldSystemdDir
+		managedNetworkGateState = oldNetworkGateState
 		managedIntentPath = oldValues[0].(string)
 		managedConfigPath = oldValues[1].(string)
 		managedVPNPath = oldValues[2].(string)
@@ -111,6 +115,10 @@ func withManagedTestEnvironment(t *testing.T) (string, string) {
 	managedDockerDropIn = filepath.Join(
 		root, "etc/systemd/system/nftfwd.service.d/docker-access.conf",
 	)
+	managedSystemdDir = filepath.Join(root, "etc/systemd/system")
+	managedNetworkGateState = func(context.Context) ([]string, error) {
+		return []string{"ifup@.service", "networking.service"}, nil
+	}
 	managedChangeDir = filepath.Join(managedStateRoot, "managed-change")
 	managedChangeJournal = filepath.Join(managedChangeDir, "journal.json")
 	managedChangeOldIntent = filepath.Join(managedChangeDir, "old-intent.toml")
@@ -174,6 +182,20 @@ Endpoint = vpn.example.test:51820
 	}
 	if err := os.MkdirAll(managedRuntimeRoot, 0o700); err != nil {
 		t.Fatal(err)
+	}
+	producerPaths, err := netgate.DropInPaths(
+		managedSystemdDir, []string{"ifup@.service", "networking.service"},
+	)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range producerPaths {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(netgate.DropInData), 0o644); err != nil {
+			t.Fatal(err)
+		}
 	}
 	source := filepath.Join(root, "provider.conf")
 	if err := os.WriteFile(source, []byte(profileText), 0o600); err != nil {
@@ -402,6 +424,37 @@ func TestExistingManagedSetupAndTunnelCommands(t *testing.T) {
 	}
 	if err := tunnelCommand([]string{"status", "--json"}); err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestManagedCommandsFailClosedOnNetworkProducerState(t *testing.T) {
+	root, source := withManagedTestEnvironment(t)
+	managedNetworkGateState = func(context.Context) ([]string, error) {
+		return nil, errors.New("injected producer gate failure")
+	}
+	if err := managedConfigShow([]string{"--effective", "--json"}); err == nil ||
+		err.Error() != "CONFIG_NETWORK_PRODUCER_STATE_INVALID" {
+		t.Fatalf("config accepted invalid producer gate state: %v", err)
+	}
+	if err := managedBackupCommand([]string{
+		"create", filepath.Join(root, "backups", "invalid-producer"), "--json",
+	}); err == nil || err.Error() != "BACKUP_NETWORK_PRODUCER_STATE_INVALID" {
+		t.Fatalf("backup accepted invalid producer gate state: %v", err)
+	}
+	const hash = "0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"
+	managedAPICall = func(_ context.Context, _ string, request api.Request) (api.Response, error) {
+		if request.Op != "status" {
+			return api.Response{}, errors.New("unexpected")
+		}
+		return api.Response{OK: true, Data: health.Snapshot{
+			Schema: health.StatusSchema, Status: "HEALTHY", Active: true,
+			PolicyMatch: true, KillSwitchEnforced: true,
+			PolicyHash: hash, PolicyChecksum: hash, Managed: true,
+		}}, nil
+	}
+	if existing, _, err := existingManagedSetup(context.Background(), source); err == nil ||
+		err.Error() != "SETUP_ALREADY_MANAGED_RECOVERY_REQUIRED" || existing {
+		t.Fatalf("idempotent setup accepted invalid producer gate state: existing=%t err=%v", existing, err)
 	}
 }
 

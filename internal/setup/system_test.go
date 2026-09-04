@@ -20,6 +20,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/discovery"
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
 	"github.com/unknown0152/nft-firewall-v2/internal/intent"
+	"github.com/unknown0152/nft-firewall-v2/internal/netgate"
 	"github.com/unknown0152/nft-firewall-v2/internal/reconcile"
 	"github.com/unknown0152/nft-firewall-v2/internal/routing"
 	"github.com/unknown0152/nft-firewall-v2/internal/wgconfig"
@@ -33,6 +34,10 @@ type systemRunner struct {
 }
 
 type systemRunnerFunc func(context.Context, []byte, string, ...string) ([]byte, error)
+
+func testNetworkProducers() []string {
+	return []string{"ifup@.service", "networking.service"}
+}
 
 func (f systemRunnerFunc) Run(ctx context.Context, input []byte, name string, args ...string) ([]byte, error) {
 	return f(ctx, input, name, args...)
@@ -71,6 +76,15 @@ func (r *systemRunner) Run(_ context.Context, input []byte, name string, args ..
 		return []byte("LoadState=loaded\nActiveState=active\n"), nil
 	case command == "systemctl show --property=LoadState,ActiveState docker.socket":
 		return []byte("LoadState=not-found\nActiveState=inactive\n"), nil
+	case command == "systemctl show --property=Id,LoadState,ActiveState,UnitFileState,FragmentPath networking.service":
+		return []byte("Id=networking.service\nLoadState=loaded\nActiveState=active\nUnitFileState=enabled\nFragmentPath=/usr/lib/systemd/system/networking.service\n"), nil
+	case command == "systemctl show --property=Id,LoadState,ActiveState,UnitFileState,FragmentPath ifup@nftfw-probe.service":
+		return []byte("Id=ifup@nftfw-probe.service\nLoadState=loaded\nActiveState=inactive\nUnitFileState=static\nFragmentPath=/usr/lib/systemd/system/ifup@.service\n"), nil
+	case strings.HasPrefix(command, "systemctl show --property=Id,LoadState,ActiveState,UnitFileState,FragmentPath "):
+		unit := strings.TrimPrefix(command, "systemctl show --property=Id,LoadState,ActiveState,UnitFileState,FragmentPath ")
+		return []byte("Id=" + unit + "\nLoadState=not-found\nActiveState=inactive\nUnitFileState=\nFragmentPath=\n"), nil
+	case strings.HasPrefix(command, "systemctl show --property=Requires,BindsTo,After "):
+		return []byte("Requires=nftfw-enforcement-ready.service\nBindsTo=nftfw-enforcement-ready.service\nAfter=network-pre.target nftfw-enforcement-ready.service\n"), nil
 	case strings.HasPrefix(command, "systemctl show --property=LoadState,ActiveState nftfw-") ||
 		command == "systemctl show --property=LoadState,ActiveState nftfwd.service":
 		return []byte("LoadState=loaded\nActiveState=inactive\n"), nil
@@ -140,6 +154,8 @@ func testSystem(t testing.TB, runner *systemRunner) (*System, Paths) {
 		InitramfsGate:     filepath.Join(root, "etc/initramfs-tools/scripts/init-top/udev"),
 		InitramfsManager:  filepath.Join(root, "usr/lib/nftfw/initramfs/nftfw-initramfs-manage"),
 		BootHoldMarker:    filepath.Join(root, "etc/nftfw/setup-boot-hold-v1"),
+		NetworkBootMarker: filepath.Join(root, "etc/nftfw/setup-network-producers-v1"),
+		GeneratorDir:      filepath.Join(root, "run/systemd/generator"),
 		BootHoldReady:     filepath.Join(root, "run/nftfw/setup-boot-hold-ready"),
 		BootHoldRelease:   filepath.Join(root, "run/nftfw/setup-boot-release"),
 		DockerHoldReady:   filepath.Join(root, "run/nftfw/setup-docker-hold-ready"),
@@ -148,6 +164,12 @@ func testSystem(t testing.TB, runner *systemRunner) (*System, Paths) {
 		DockerHoldSocket:  filepath.Join(root, "run/systemd/generator/docker.socket.d/50-nftfw-setup-hold.conf"),
 		ControlSocket:     filepath.Join(root, "run/nftfw/control.sock"),
 		StatusSocket:      filepath.Join(root, "run/nftfw/status.sock"),
+	}
+	if err := os.MkdirAll(paths.SystemdDir, 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(paths.NetworkBootMarker), 0o750); err != nil {
+		t.Fatal(err)
 	}
 	profile := setupProfile(t)
 	system := &System{
@@ -231,7 +253,7 @@ func configuredDockerPlan(
 		Summary: Summary{
 			Schema: "nftfw.setup-plan.v1", VPNInterface: "nftfw0",
 			DockerMode: "enabled", DockerNetworks: []string{"media"},
-			DockerRestart: changed, ResolverMode: "none",
+			DockerRestart: changed, ResolverMode: "none", NetworkProducers: testNetworkProducers(),
 		},
 		PrivateData: &prepared{
 			Intent: intent.Intent{
@@ -321,6 +343,8 @@ func TestInstallDefersFinalDependenciesUntilCommittedHandoff(t *testing.T) {
 	for _, path := range []string{
 		filepath.Join(paths.SystemdDir, "nftfwd.service.d", "50-nftfw-final-early.conf"),
 		filepath.Join(paths.SystemdDir, "nftfw-rollback.service.d", "50-nftfw-final-early.conf"),
+		filepath.Join(paths.SystemdDir, "ifup@.service.d", netgate.DropInName),
+		filepath.Join(paths.SystemdDir, "networking.service.d", netgate.DropInName),
 		paths.InitramfsMarker, paths.InitramfsOwner, paths.InitramfsLoader, paths.InitramfsGate,
 	} {
 		if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
@@ -333,9 +357,108 @@ func TestInstallDefersFinalDependenciesUntilCommittedHandoff(t *testing.T) {
 	if err := system.PublishFinalDependencies(context.Background(), plan); err != nil {
 		t.Fatal(err)
 	}
+	for _, unit := range plan.Summary.NetworkProducers {
+		path, err := netgate.DropInPath(paths.SystemdDir, unit)
+		if err != nil || netgate.ValidateDropIn(path) != nil {
+			t.Fatalf("final producer gate missing for %s: %v", unit, err)
+		}
+	}
 	joined := strings.Join(runner.commands, "\n")
 	if strings.Index(joined, "systemctl start nftfwd.service") >= strings.Index(joined, "systemctl start nftfw-early.service") {
 		t.Fatalf("runtime did not precede final requisite publication:\n%s", joined)
+	}
+}
+
+func TestNetworkProducerInventoryIsRevalidatedBeforeMutationAndHandoff(t *testing.T) {
+	for _, phase := range []string{"backup", "handoff"} {
+		t.Run(phase, func(t *testing.T) {
+			runner := &systemRunner{}
+			system, _ := testSystem(t, runner)
+			plan, err := system.Prepare(context.Background(), "/provider.conf")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if runner.outputs == nil {
+				runner.outputs = map[string][]byte{}
+			}
+			runner.outputs["systemctl show --property=Id,LoadState,ActiveState,UnitFileState,FragmentPath ifup@nftfw-probe.service"] =
+				[]byte("Id=ifup@nftfw-probe.service\nLoadState=not-found\nActiveState=inactive\nUnitFileState=\nFragmentPath=\n")
+			var runErr error
+			if phase == "backup" {
+				_, runErr = system.Backup(context.Background(), plan)
+			} else {
+				runErr = system.PublishFinalDependencies(context.Background(), plan)
+			}
+			if runErr == nil || runErr.Error() != "SETUP_NETWORK_PRODUCER_STATE_CHANGED" {
+				t.Fatalf("changed producer inventory accepted: %v", runErr)
+			}
+		})
+	}
+}
+
+func TestNetworkProducerRevalidationRefusesInvalidAndUnreadableState(t *testing.T) {
+	for _, test := range []struct {
+		name     string
+		expected []string
+		mutate   func(*systemRunner)
+	}{
+		{name: "invalid-expected", expected: []string{"foreign.service"}},
+		{
+			name: "unreadable-observation", expected: testNetworkProducers(),
+			mutate: func(runner *systemRunner) {
+				runner.outputs = map[string][]byte{
+					"systemctl show --property=Id,LoadState,ActiveState,UnitFileState,FragmentPath networking.service": []byte("truncated\n"),
+				}
+			},
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			runner := &systemRunner{}
+			if test.mutate != nil {
+				test.mutate(runner)
+			}
+			system, _ := testSystem(t, runner)
+			if err := system.revalidateNetworkProducers(context.Background(), test.expected); err == nil {
+				t.Fatal("unsafe producer state was accepted")
+			}
+		})
+	}
+}
+
+func TestNetworkProducerGateRollbackRestoresExactPriorFiles(t *testing.T) {
+	runner := &systemRunner{}
+	system, paths := testSystem(t, runner)
+	prior := []byte("[Unit]\nAfter=local-fs.target\n")
+	priorPath := filepath.Join(paths.SystemdDir, "ifup@.service.d", netgate.DropInName)
+	if err := os.MkdirAll(filepath.Dir(priorPath), 0o750); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(priorPath, prior, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	plan, err := system.Prepare(context.Background(), "/provider.conf")
+	if err != nil {
+		t.Fatal(err)
+	}
+	backup, err := system.Backup(context.Background(), plan)
+	if err != nil {
+		t.Fatal(err)
+	}
+	plan.PrivateData.(*prepared).BackupDir = backup
+	if err := system.PublishFinalDependencies(context.Background(), plan); err != nil {
+		t.Fatal(err)
+	}
+	if err := system.Rollback(context.Background(), plan, Journal{
+		Phase: PhaseHandoff, BackupDir: backup, Summary: plan.Summary,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustRead(t, priorPath); !bytes.Equal(got, prior) {
+		t.Fatalf("prior producer drop-in not restored exactly: %q", got)
+	}
+	absentPath := filepath.Join(paths.SystemdDir, "networking.service.d", netgate.DropInName)
+	if _, err := os.Lstat(absentPath); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("new producer drop-in survived rollback: %v", err)
 	}
 }
 
@@ -844,7 +967,8 @@ func TestFinalDependencyPublicationFailureBranches(t *testing.T) {
 		runner := &systemRunner{}
 		system, paths := testSystem(t, runner)
 		runner.fail = paths.InitramfsManager + " rebuild-enabled"
-		if err := system.PublishFinalDependencies(context.Background(), Plan{}); err == nil ||
+		plan := Plan{Summary: Summary{NetworkProducers: testNetworkProducers()}}
+		if err := system.PublishFinalDependencies(context.Background(), plan); err == nil ||
 			err.Error() != "SETUP_INITRAMFS_GUARD_FAILED" {
 			t.Fatalf("manager error=%v", err)
 		}
@@ -852,23 +976,55 @@ func TestFinalDependencyPublicationFailureBranches(t *testing.T) {
 	t.Run("dependency-target", func(t *testing.T) {
 		runner := &systemRunner{}
 		system, paths := testSystem(t, runner)
+		if err := os.Remove(paths.SystemdDir); err != nil {
+			t.Fatal(err)
+		}
 		if err := os.MkdirAll(filepath.Dir(paths.SystemdDir), 0o700); err != nil {
 			t.Fatal(err)
 		}
 		if err := os.WriteFile(paths.SystemdDir, []byte("not a directory\n"), 0o600); err != nil {
 			t.Fatal(err)
 		}
-		if err := system.PublishFinalDependencies(context.Background(), Plan{}); err == nil ||
+		plan := Plan{Summary: Summary{NetworkProducers: testNetworkProducers()}}
+		if err := system.PublishFinalDependencies(context.Background(), plan); err == nil ||
 			err.Error() != "SETUP_FINAL_DEPENDENCY_PUBLISH_FAILED" {
 			t.Fatalf("unsafe dependency target error=%v", err)
+		}
+	})
+	t.Run("producer-target", func(t *testing.T) {
+		runner := &systemRunner{}
+		system, paths := testSystem(t, runner)
+		plan, err := system.Prepare(context.Background(), "/provider.conf")
+		if err != nil {
+			t.Fatal(err)
+		}
+		parent := filepath.Join(paths.SystemdDir, "ifup@.service.d")
+		if err := os.WriteFile(parent, []byte("not a directory\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := system.PublishFinalDependencies(context.Background(), plan); err == nil ||
+			err.Error() != "SETUP_FINAL_DEPENDENCY_PUBLISH_FAILED" {
+			t.Fatalf("unsafe producer target error=%v", err)
 		}
 	})
 	t.Run("reload", func(t *testing.T) {
 		runner := &systemRunner{fail: "systemctl daemon-reload"}
 		system, _ := testSystem(t, runner)
-		if err := system.PublishFinalDependencies(context.Background(), Plan{}); err == nil ||
+		plan := Plan{Summary: Summary{NetworkProducers: testNetworkProducers()}}
+		if err := system.PublishFinalDependencies(context.Background(), plan); err == nil ||
 			err.Error() != "SETUP_FINAL_DEPENDENCY_RELOAD_FAILED" {
 			t.Fatalf("dependency reload error=%v", err)
+		}
+	})
+	t.Run("effective-graph", func(t *testing.T) {
+		runner := &systemRunner{outputs: map[string][]byte{
+			"systemctl show --property=Requires,BindsTo,After ifup@nftfw-probe.service": []byte("Requires=nftfw-enforcement-ready.service\nBindsTo=nftfw-enforcement-ready.service\nAfter=network-pre.target\n"),
+		}}
+		system, _ := testSystem(t, runner)
+		plan := Plan{Summary: Summary{NetworkProducers: testNetworkProducers()}}
+		if err := system.PublishFinalDependencies(context.Background(), plan); err == nil ||
+			err.Error() != "SETUP_FINAL_DEPENDENCY_VERIFY_FAILED" {
+			t.Fatalf("missing effective producer ordering accepted: %v", err)
 		}
 	})
 }
@@ -2517,7 +2673,7 @@ func TestRollbackReportsEachIncompleteRecoveryClass(t *testing.T) {
 			Phase: PhaseInstall, BackupDir: filepath.Join(t.TempDir(), "missing"),
 			Summary: Summary{
 				Schema: "nftfw.setup-plan.v1", VPNInterface: intent.VPNInterface,
-				ResolverMode: string(routing.ResolverNone),
+				ResolverMode: string(routing.ResolverNone), NetworkProducers: testNetworkProducers(),
 			},
 		})
 		if err == nil || !strings.Contains(err.Error(), "RESTORE") {

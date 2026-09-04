@@ -13,6 +13,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
 	"github.com/unknown0152/nft-firewall-v2/internal/containers"
 	"github.com/unknown0152/nft-firewall-v2/internal/intent"
+	"github.com/unknown0152/nft-firewall-v2/internal/netgate"
 	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/state"
 	"github.com/unknown0152/nft-firewall-v2/internal/wgconfig"
@@ -43,6 +44,7 @@ func backupFixture(t testing.TB) (Creator, string) {
 		DockerDropIn: filepath.Join(
 			root, "etc/systemd/system/nftfwd.service.d/docker-access.conf",
 		),
+		SystemdDir: filepath.Join(root, "etc/systemd/system"),
 	}
 	value := intent.Intent{
 		Schema: intent.Schema, Managed: true, Uplink: "eth0",
@@ -126,12 +128,25 @@ Endpoint = vpn.example.test:51820
 	if err := os.WriteFile(paths.Enforcement, []byte(strings.Repeat("a", 64)+"\n"), 0o600); err != nil {
 		t.Fatal(err)
 	}
+	producers := []string{"ifup@.service", "networking.service"}
+	producerPaths, err := netgate.DropInPaths(paths.SystemdDir, producers)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range producerPaths {
+		if err := os.MkdirAll(filepath.Dir(path), 0o750); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(netgate.DropInData), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
 	lockDir := filepath.Join(root, "run/nftfw")
 	if err := os.MkdirAll(lockDir, 0o700); err != nil {
 		t.Fatal(err)
 	}
 	return Creator{
-		Paths: paths, LockDir: lockDir,
+		Paths: paths, LockDir: lockDir, NetworkProducers: producers,
 		Now: func() time.Time {
 			return time.Date(2026, 8, 26, 12, 0, 0, 0, time.UTC)
 		},
@@ -256,12 +271,54 @@ func TestVerifyRejectsInvalidDockerOwnershipFiles(t *testing.T) {
 			if err := os.WriteFile(test.path(destination), []byte(test.data), 0o600); err != nil {
 				t.Fatal(err)
 			}
-			rewriteBackupManifest(t, destination, manifest.CreatedAt)
+			rewriteBackupManifest(t, destination, manifest.CreatedAt, manifest.NetworkProducers)
 			if _, err := Verify(context.Background(), destination); err == nil ||
 				err.Error() != test.code {
 				t.Fatalf("invalid Docker ownership backup accepted: %v", err)
 			}
 		})
+	}
+}
+
+func TestVerifyRejectsInvalidNetworkProducerGate(t *testing.T) {
+	creator, destination := backupFixture(t)
+	manifest, err := creator.Create(context.Background(), destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(
+		destination, "systemd", "network-producers", "ifup@.service.d", netgate.DropInName,
+	)
+	if err := os.WriteFile(path, []byte("[Unit]\nRequires=nftfw-enforcement-ready.service\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rewriteBackupManifest(t, destination, manifest.CreatedAt, manifest.NetworkProducers)
+	if _, err := Verify(context.Background(), destination); err == nil ||
+		err.Error() != "BACKUP_NETWORK_PRODUCER_STATE_INVALID" {
+		t.Fatalf("invalid network-producer gate accepted: %v", err)
+	}
+}
+
+func TestVerifyRejectsUnlistedNetworkProducerGate(t *testing.T) {
+	creator, destination := backupFixture(t)
+	manifest, err := creator.Create(context.Background(), destination)
+	if err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(
+		destination, "systemd", "network-producers",
+		"NetworkManager.service.d", netgate.DropInName,
+	)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(netgate.DropInData), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	rewriteBackupManifest(t, destination, manifest.CreatedAt, manifest.NetworkProducers)
+	if _, err := Verify(context.Background(), destination); err == nil ||
+		err.Error() != "BACKUP_NETWORK_PRODUCER_STATE_INVALID" {
+		t.Fatalf("unlisted network-producer gate accepted: %v", err)
 	}
 }
 
@@ -272,7 +329,7 @@ func TestCreatorRejectsRelativeDestination(t *testing.T) {
 	}
 }
 
-func rewriteBackupManifest(t *testing.T, directory string, createdAt time.Time) {
+func rewriteBackupManifest(t *testing.T, directory string, createdAt time.Time, producers []string) {
 	t.Helper()
 	path := filepath.Join(directory, "manifest.json")
 	if err := os.Remove(path); err != nil {
@@ -283,7 +340,8 @@ func rewriteBackupManifest(t *testing.T, directory string, createdAt time.Time) 
 		t.Fatal(err)
 	}
 	if err := writeManifest(path, Manifest{
-		Schema: Schema, CreatedAt: createdAt, Managed: true, Files: files,
+		Schema: Schema, CreatedAt: createdAt, Managed: true,
+		NetworkProducers: producers, Files: files,
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -312,7 +370,7 @@ func TestVerifyRejectsSemanticallyInvalidProtectedFiles(t *testing.T) {
 			); err != nil {
 				t.Fatal(err)
 			}
-			rewriteBackupManifest(t, destination, manifest.CreatedAt)
+			rewriteBackupManifest(t, destination, manifest.CreatedAt, manifest.NetworkProducers)
 			if _, err := Verify(context.Background(), destination); err == nil ||
 				err.Error() != test.code {
 				t.Fatalf("unexpected verification result: %v", err)

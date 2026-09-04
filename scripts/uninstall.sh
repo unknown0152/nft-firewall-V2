@@ -16,8 +16,18 @@ if [[ -L $setup_journal ]]; then
     echo "Refusing uninstall: setup journal is an unsafe link." >&2
     exit 1
 fi
+network_gate_present=false
+for producer in NetworkManager.service dhcpcd.service dhcpcd@.service \
+    ifup@.service networking.service systemd-networkd.service; do
+    producer_gate=/etc/systemd/system/$producer.d/50-nftfw-enforcement-ready.conf
+    if [[ -e $producer_gate || -L $producer_gate ]]; then
+        network_gate_present=true
+        break
+    fi
+done
 if [[ -e /etc/default/grub.d/90-nftfw-ipv6-disabled.cfg || \
     -L /etc/default/grub.d/90-nftfw-ipv6-disabled.cfg || \
+    $network_gate_present == true || \
     ( -f $setup_journal && $(grep -Fc '"boot_policy": "debian-grub-ipv6-disabled-v1"' "$setup_journal") -ge 1 ) ]]; then
     [[ -x /usr/lib/nftfw/nftfw ]] || {
         echo "Refusing uninstall: managed boot-policy helper is missing." >&2

@@ -20,6 +20,13 @@ images, and aborts uninstall. Do not reboot after that failure until
 This prevents package or source removal from silently retaining a deny guard
 without its verified root-filesystem handoff.
 
+The same handoff validates the managed network-producer set, restores every
+captured `50-nftfw-enforcement-ready.conf` to its exact prior bytes or absence,
+restores the producer setup marker, and reloads systemd before the helper is
+removed. A changed, symlinked, missing, or unprovable producer gate makes
+uninstall stop for recovery; do not delete the gate manually while readiness
+still defines network activation.
+
 Configuration and operational state remain under `/etc/nftfw` and
 `/var/lib/nftfw`. `--purge-state` is an explicit destructive request and
 should be used only after a verified backup.

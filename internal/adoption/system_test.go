@@ -36,6 +36,15 @@ func absentUnitShow(unit string) []byte {
 	return []byte(fmt.Sprintf("Id=%s\nNames=%s\nLoadState=not-found\nActiveState=inactive\nUnitFileState=\nFragmentPath=\n", unit, unit))
 }
 
+func networkProducerShow(probe, unit, active, enabled string) []byte {
+	return []byte(fmt.Sprintf("Id=%s\nLoadState=loaded\nActiveState=%s\nUnitFileState=%s\nFragmentPath=/usr/lib/systemd/system/%s\n",
+		probe, active, enabled, unit))
+}
+
+func absentNetworkProducerShow(unit string) []byte {
+	return []byte(fmt.Sprintf("Id=%s\nLoadState=not-found\nActiveState=inactive\nUnitFileState=\nFragmentPath=\n", unit))
+}
+
 func TestExposureSummaryUsesVPNIngressAndTrustedServices(t *testing.T) {
 	value := config.Defaults()
 	value.Interfaces = []config.Interface{
@@ -558,6 +567,18 @@ func TestSystemInspectorExactSchema6FixtureIsNonMutating(t *testing.T) {
 			return []byte(`[{"dst":"default","dev":"eth0"}]`), nil
 		case "sysctl -n net.ipv4.ip_forward":
 			return []byte("0\n"), nil
+		}
+		if name == "systemctl" && len(args) == 3 && args[0] == "show" &&
+			args[1] == "--property=Id,LoadState,ActiveState,UnitFileState,FragmentPath" {
+			probe := args[2]
+			switch probe {
+			case "networking.service":
+				return networkProducerShow(probe, "networking.service", "active", "enabled"), nil
+			case "ifup@nftfw-probe.service":
+				return networkProducerShow(probe, "ifup@.service", "inactive", "static"), nil
+			default:
+				return absentNetworkProducerShow(probe), nil
+			}
 		}
 		if name == "systemctl" && len(args) >= 3 && args[0] == "is-active" {
 			return nil, errors.New("inactive")

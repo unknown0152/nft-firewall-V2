@@ -27,6 +27,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/discovery"
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
 	"github.com/unknown0152/nft-firewall-v2/internal/intent"
+	"github.com/unknown0152/nft-firewall-v2/internal/netgate"
 	"github.com/unknown0152/nft-firewall-v2/internal/policy"
 	"github.com/unknown0152/nft-firewall-v2/internal/reconcile"
 	"github.com/unknown0152/nft-firewall-v2/internal/routing"
@@ -64,6 +65,8 @@ type Paths struct {
 	EFIFirmwareDir     string
 	EFIBootManager     string
 	BootHoldMarker     string
+	NetworkBootMarker  string
+	GeneratorDir       string
 	BootHoldReady      string
 	BootHoldRelease    string
 	DockerHoldReady    string
@@ -103,6 +106,8 @@ func DefaultPaths() Paths {
 		EFIFirmwareDir:     "/sys/firmware/efi",
 		EFIBootManager:     "/usr/bin/efibootmgr",
 		BootHoldMarker:     "/etc/nftfw/setup-boot-hold-v1",
+		NetworkBootMarker:  "/etc/nftfw/setup-network-producers-v1",
+		GeneratorDir:       "/run/systemd/generator",
 		BootHoldReady:      "/run/nftfw/setup-boot-hold-ready",
 		BootHoldRelease:    "/run/nftfw/setup-boot-release",
 		DockerHoldReady:    "/run/nftfw/setup-docker-hold-ready",
@@ -254,6 +259,22 @@ func (s *System) Prepare(ctx context.Context, vpnPath string) (Plan, error) {
 	if err := cleanSnapshot.ValidateCleanHost(); err != nil {
 		return Plan{}, err
 	}
+	networkProducers, err := netgate.Discover(ctx, s.Runner)
+	if err != nil {
+		return Plan{}, err
+	}
+	producerPaths, err := netgate.DropInPaths(s.Paths.SystemdDir, networkProducers)
+	if err != nil {
+		return Plan{}, err
+	}
+	for _, path := range producerPaths {
+		if err := netgate.ValidateDropInTarget(path); err != nil {
+			return Plan{}, err
+		}
+	}
+	if err := netgate.ValidateBootMarkerTarget(s.Paths.NetworkBootMarker); err != nil {
+		return Plan{}, err
+	}
 	resolve := s.Resolve
 	if resolve == nil {
 		resolve = resolveIPv4
@@ -397,7 +418,8 @@ func (s *System) Prepare(ctx context.Context, vpnPath string) (Plan, error) {
 			PublicTCP:     managedIntent.PublicTCP, PublicUDP: managedIntent.PublicUDP,
 			IPv6Mode: "disabled", DockerMode: dockerMode,
 			DockerNetworks: dockerNames, DockerRestart: dockerChanged,
-			ResolverMode: string(resolverMode), SourceModeWarning: profileSummary.SourceWorldReadable,
+			ResolverMode: string(resolverMode), NetworkProducers: networkProducers,
+			SourceModeWarning: profileSummary.SourceWorldReadable,
 		},
 		PrivateData: private,
 	}
@@ -441,6 +463,9 @@ func (s *System) Prepare(ctx context.Context, vpnPath string) (Plan, error) {
 
 func (s *System) Backup(ctx context.Context, plan Plan) (string, error) {
 	s.defaults()
+	if err := s.revalidateNetworkProducers(ctx, plan.Summary.NetworkProducers); err != nil {
+		return "", err
+	}
 	private, err := privatePlan(plan)
 	if err != nil {
 		return "", err
@@ -522,6 +547,11 @@ func (s *System) PrepareBoot(ctx context.Context, plan Plan) error {
 	if _, err := s.Runner.Run(ctx, nil, s.Paths.InitramfsManager, "rebuild-enabled"); err != nil {
 		return errors.New("SETUP_INITRAMFS_GUARD_FAILED")
 	}
+	producerMarker, err := netgate.BootMarkerData(plan.Summary.NetworkProducers)
+	if err != nil || writeAtomic(s.Paths.NetworkBootMarker, producerMarker, 0o600) != nil ||
+		netgate.ValidateBootMarker(s.Paths.NetworkBootMarker, plan.Summary.NetworkProducers) != nil {
+		return errors.New("SETUP_NETWORK_PRODUCER_MARKER_PUBLISH_FAILED")
+	}
 	if err := publishBootHoldMarker(s.Paths.BootHoldMarker); err != nil {
 		return err
 	}
@@ -565,6 +595,12 @@ func (s *System) VerifyBootResume(ctx context.Context, plan Plan) error {
 	if _, err := s.Runner.Run(ctx, nil, s.Paths.InitramfsManager, "verify-enabled"); err != nil {
 		return errors.New("SETUP_INITRAMFS_GUARD_FAILED")
 	}
+	if err := netgate.ValidateBootMarker(s.Paths.NetworkBootMarker, plan.Summary.NetworkProducers); err != nil {
+		return errors.New("SETUP_NETWORK_PRODUCER_MARKER_INVALID")
+	}
+	if err := netgate.ValidateHoldDropIns(s.Paths.GeneratorDir, plan.Summary.NetworkProducers); err != nil {
+		return errors.New("SETUP_NETWORK_PRODUCER_HOLD_INVALID")
+	}
 	return nil
 }
 
@@ -578,6 +614,9 @@ func (s *System) PendingBootStatus(ctx context.Context, journal Journal) (string
 	if err != nil || manifest.Boot == nil || !validBootBackup(*manifest.Boot) {
 		return "", errors.New("SETUP_BOOT_STATUS_INVALID")
 	}
+	if err := netgate.ValidateBootMarker(s.Paths.NetworkBootMarker, journal.Summary.NetworkProducers); err != nil {
+		return "", errors.New("SETUP_BOOT_STATUS_INVALID")
+	}
 	observation, err := inspectManagedGRUBRuntime(ctx, s.Runner, s.Paths)
 	if err != nil {
 		return "", errors.New(errorCode(err))
@@ -587,6 +626,9 @@ func (s *System) PendingBootStatus(ctx context.Context, journal Journal) (string
 	}
 	if observation.BootID == manifest.Boot.PreBootID {
 		return "reboot_required", nil
+	}
+	if err := netgate.ValidateHoldDropIns(s.Paths.GeneratorDir, journal.Summary.NetworkProducers); err != nil {
+		return "", errors.New("SETUP_BOOT_STATUS_INVALID")
 	}
 	if err := verifyRunningBoot(s.Paths, manifest.Boot.PreBootID); err != nil {
 		return "", errors.New(errorCode(err))
@@ -635,9 +677,10 @@ func (s *System) FinalizeBootRollback(ctx context.Context, journal Journal) erro
 	return nil
 }
 
-// HandoffBootPolicy removes only the managed pre-driver boot ownership during
-// package removal or an exact downgrade. It deliberately leaves firewall,
-// VPN, Docker, and ordinary managed configuration to their separate lifecycle.
+// HandoffBootPolicy removes the managed pre-driver boot ownership and the
+// final network-producer readiness gates during package removal or an exact
+// downgrade. It deliberately leaves firewall, VPN, Docker, and ordinary
+// managed configuration to their separate lifecycle.
 func (s *System) HandoffBootPolicy(ctx context.Context, journal Journal) (bool, error) {
 	s.defaults()
 	if journal.Summary.BootPolicy != ManagedBootPolicy || journal.BackupDir == "" ||
@@ -659,6 +702,15 @@ func (s *System) HandoffBootPolicy(ctx context.Context, journal Journal) (bool, 
 		if _, verifyErr := s.Runner.Run(ctx, nil, s.Paths.InitramfsManager, "verify-disabled"); verifyErr != nil {
 			return false, errors.New("SETUP_BOOT_HANDOFF_STATE_INVALID")
 		}
+		producerFiles, producerErr := netgate.DropInPaths(s.Paths.SystemdDir, journal.Summary.NetworkProducers)
+		if producerErr != nil || restoreBackupFiles(journal.BackupDir, append(
+			producerFiles, s.Paths.NetworkBootMarker,
+		)) != nil {
+			return false, errors.New("SETUP_BOOT_HANDOFF_STATE_INVALID")
+		}
+		if _, reloadErr := s.Runner.Run(ctx, nil, "systemctl", "daemon-reload"); reloadErr != nil {
+			return false, errors.New("SETUP_BOOT_HANDOFF_RELOAD_FAILED")
+		}
 		if removeErr := s.removeResumeGuard(ctx); removeErr != nil {
 			return false, removeErr
 		}
@@ -679,15 +731,34 @@ func (s *System) HandoffBootPolicy(ctx context.Context, journal Journal) (bool, 
 	if err != nil || !verifyPreparedBoot(observation, *manifest.Boot) {
 		return false, errors.New("SETUP_BOOT_HANDOFF_STATE_INVALID")
 	}
+	if journal.Status == "complete" {
+		if err := netgate.VerifyEffective(ctx, s.Runner, s.Paths.SystemdDir, journal.Summary.NetworkProducers); err != nil {
+			return false, errors.New("SETUP_BOOT_HANDOFF_STATE_INVALID")
+		}
+	} else if netgate.ValidateBootMarker(
+		s.Paths.NetworkBootMarker, journal.Summary.NetworkProducers,
+	) != nil {
+		return false, errors.New("SETUP_BOOT_HANDOFF_STATE_INVALID")
+	} else if observation.BootID != manifest.Boot.PreBootID &&
+		netgate.ValidateHoldDropIns(s.Paths.GeneratorDir, journal.Summary.NetworkProducers) != nil {
+		return false, errors.New("SETUP_BOOT_HANDOFF_STATE_INVALID")
+	}
 	if _, err := s.Runner.Run(ctx, nil, s.Paths.InitramfsManager, "disable"); err != nil {
 		return false, errors.New("SETUP_BOOT_HANDOFF_INITRAMFS_FAILED")
 	}
-	if err := restoreBackupFiles(journal.BackupDir, []string{
+	producerFiles, err := netgate.DropInPaths(s.Paths.SystemdDir, journal.Summary.NetworkProducers)
+	if err != nil {
+		return false, errors.New("SETUP_BOOT_HANDOFF_STATE_INVALID")
+	}
+	if err := restoreBackupFiles(journal.BackupDir, append([]string{
 		s.Paths.InitramfsMarker, s.Paths.InitramfsOwner, s.Paths.InitramfsLoader,
 		s.Paths.InitramfsGate, s.Paths.GRUBFragment, s.Paths.GRUBGenerated,
-		s.Paths.BootHoldMarker,
-	}); err != nil {
+		s.Paths.BootHoldMarker, s.Paths.NetworkBootMarker,
+	}, producerFiles...)); err != nil {
 		return false, err
+	}
+	if _, err := s.Runner.Run(ctx, nil, "systemctl", "daemon-reload"); err != nil {
+		return false, errors.New("SETUP_BOOT_HANDOFF_RELOAD_FAILED")
 	}
 	restored, err := inspectManagedGRUB(ctx, s.Runner, s.Paths, false)
 	if err != nil || restored.Prepared || restored.MountSHA256 != manifest.Boot.MountSHA256 ||
@@ -747,7 +818,11 @@ func (s *System) WaitBootHold(ctx context.Context, store JournalStore) error {
 	}
 	if ready {
 		journal, readErr := store.Read()
-		if readErr != nil || s.verifyResumeNetworkState(ctx, journal) != nil {
+		if readErr != nil || netgate.ValidateBootMarker(
+			s.Paths.NetworkBootMarker, journal.Summary.NetworkProducers,
+		) != nil || netgate.ValidateHoldDropIns(
+			s.Paths.GeneratorDir, journal.Summary.NetworkProducers,
+		) != nil || s.verifyResumeNetworkState(ctx, journal) != nil {
 			return errors.New("SETUP_BOOT_HOLD_STATE_INVALID")
 		}
 		return nil
@@ -756,6 +831,13 @@ func (s *System) WaitBootHold(ctx context.Context, store JournalStore) error {
 	for {
 		journal, readErr := store.Read()
 		status := ""
+		if readErr == nil && (netgate.ValidateBootMarker(
+			s.Paths.NetworkBootMarker, journal.Summary.NetworkProducers,
+		) != nil || netgate.ValidateHoldDropIns(
+			s.Paths.GeneratorDir, journal.Summary.NetworkProducers,
+		) != nil) {
+			readErr = errors.New("SETUP_NETWORK_PRODUCER_HOLD_INVALID")
+		}
 		if readErr == nil && rebootRequiredJournal(journal) && journal.Summary.BootPolicy == ManagedBootPolicy {
 			status, readErr = s.PendingBootStatus(ctx, journal)
 		}
@@ -789,6 +871,10 @@ func (s *System) WaitBootHold(ctx context.Context, store JournalStore) error {
 func (s *System) activateResumeGuard(ctx context.Context, journal Journal) error {
 	if !rebootRequiredJournal(journal) || validateRetiredBackupPath(s.Paths.StateDir, journal.BackupDir) != nil {
 		return errors.New("SETUP_RESUME_GUARD_STATE_INVALID")
+	}
+	if err := netgate.ValidateBootMarker(s.Paths.NetworkBootMarker, journal.Summary.NetworkProducers); err != nil ||
+		netgate.ValidateHoldDropIns(s.Paths.GeneratorDir, journal.Summary.NetworkProducers) != nil {
+		return errors.New("SETUP_NETWORK_PRODUCER_HOLD_INVALID")
 	}
 	manifest, err := readBackup(journal.BackupDir)
 	if err != nil || manifest.Boot == nil || !validBootBackup(*manifest.Boot) {
@@ -834,6 +920,10 @@ func (s *System) verifyResumeNetworkState(ctx context.Context, journal Journal) 
 	if err != nil || !ready || !rebootRequiredJournal(journal) ||
 		validateRetiredBackupPath(s.Paths.StateDir, journal.BackupDir) != nil {
 		return errors.New("SETUP_RESUME_GUARD_STATE_INVALID")
+	}
+	if netgate.ValidateBootMarker(s.Paths.NetworkBootMarker, journal.Summary.NetworkProducers) != nil ||
+		netgate.ValidateHoldDropIns(s.Paths.GeneratorDir, journal.Summary.NetworkProducers) != nil {
+		return errors.New("SETUP_NETWORK_PRODUCER_HOLD_INVALID")
 	}
 	manifest, err := readBackup(journal.BackupDir)
 	if err != nil {
@@ -1730,6 +1820,9 @@ func (s *System) GenerationCommitted(ctx context.Context, generation uint64) (bo
 // make that runtime start impossible while nftfw-early is still inactive.
 func (s *System) PublishFinalDependencies(ctx context.Context, plan Plan) error {
 	s.defaults()
+	if err := s.revalidateNetworkProducers(ctx, plan.Summary.NetworkProducers); err != nil {
+		return err
+	}
 	for _, unit := range []string{"nftfw-early.service", "nftfw-enforcement-ready.service"} {
 		if _, err := s.Runner.Run(ctx, nil, "systemctl", "start", unit); err != nil {
 			return errors.New("SETUP_EARLY_ENFORCEMENT_FAILED")
@@ -1750,15 +1843,30 @@ func (s *System) PublishFinalDependencies(ctx context.Context, plan Plan) error 
 			return errors.New("SETUP_FINAL_DEPENDENCY_PUBLISH_FAILED")
 		}
 	}
+	producerPaths, err := netgate.DropInPaths(s.Paths.SystemdDir, plan.Summary.NetworkProducers)
+	if err != nil {
+		return errors.New("SETUP_FINAL_DEPENDENCY_PUBLISH_FAILED")
+	}
+	for _, path := range producerPaths {
+		if err := netgate.ValidateDropInTarget(path); err != nil ||
+			writeAtomic(path, []byte(netgate.DropInData), 0o644) != nil {
+			return errors.New("SETUP_FINAL_DEPENDENCY_PUBLISH_FAILED")
+		}
+	}
 	if _, err := s.Runner.Run(ctx, nil, "systemctl", "daemon-reload"); err != nil {
 		return errors.New("SETUP_FINAL_DEPENDENCY_RELOAD_FAILED")
+	}
+	if err := netgate.VerifyEffective(ctx, s.Runner, s.Paths.SystemdDir, plan.Summary.NetworkProducers); err != nil {
+		return errors.New("SETUP_FINAL_DEPENDENCY_VERIFY_FAILED")
 	}
 	if plan.Summary.BootPolicy == ManagedBootPolicy {
 		private, err := privatePlan(plan)
 		if err != nil || private.BackupDir == "" {
 			return errors.New("SETUP_BOOT_HOLD_STATE_INVALID")
 		}
-		if err := restoreBackupFiles(private.BackupDir, []string{s.Paths.BootHoldMarker}); err != nil {
+		if err := restoreBackupFiles(private.BackupDir, []string{
+			s.Paths.BootHoldMarker, s.Paths.NetworkBootMarker,
+		}); err != nil {
 			return errors.New("SETUP_BOOT_HOLD_RESTORE_FAILED")
 		}
 		if err := s.removeResumeGuard(ctx); err != nil {
@@ -1858,6 +1966,9 @@ func (s *System) Rollback(ctx context.Context, plan Plan, journal Journal) error
 		summary = journal.Summary
 	}
 	if summary.Schema != "nftfw.setup-plan.v1" {
+		return errors.New("SETUP_ROLLBACK_PLAN_INVALID")
+	}
+	if netgate.ValidateUnits(summary.NetworkProducers) != nil {
 		return errors.New("SETUP_ROLLBACK_PLAN_INVALID")
 	}
 	route, err := managedRollbackRoute(summary)
@@ -1968,7 +2079,10 @@ func phaseMayHaveTunnel(phase Phase) bool {
 	}
 }
 
-func (s *System) RecoverCommitted(ctx context.Context, plan Plan, _ Journal) error {
+func (s *System) RecoverCommitted(ctx context.Context, plan Plan, journal Journal) error {
+	if plan.PrivateData == nil {
+		plan.PrivateData = &prepared{BackupDir: journal.BackupDir}
+	}
 	if err := s.PublishFinalDependencies(ctx, plan); err != nil {
 		return err
 	}
@@ -2070,6 +2184,12 @@ func (s *System) defaults() {
 	if s.Paths.BootHoldMarker == "" {
 		s.Paths.BootHoldMarker = defaults.BootHoldMarker
 	}
+	if s.Paths.NetworkBootMarker == "" {
+		s.Paths.NetworkBootMarker = defaults.NetworkBootMarker
+	}
+	if s.Paths.GeneratorDir == "" {
+		s.Paths.GeneratorDir = defaults.GeneratorDir
+	}
 	if s.Paths.BootHoldReady == "" {
 		s.Paths.BootHoldReady = defaults.BootHoldReady
 	}
@@ -2136,13 +2256,31 @@ func (s *System) touchedFiles(plan Plan) []string {
 		filepath.Join(s.Paths.SystemdDir, "nftfwd.service.d", "50-nftfw-final-early.conf"),
 		filepath.Join(s.Paths.SystemdDir, "nftfw-rollback.service.d", "50-nftfw-final-early.conf"),
 	}
+	if producerPaths, err := netgate.DropInPaths(s.Paths.SystemdDir, plan.Summary.NetworkProducers); err == nil {
+		result = append(result, producerPaths...)
+	}
 	if plan.Summary.BootPolicy == ManagedBootPolicy {
-		result = append(result, s.Paths.GRUBFragment, s.Paths.GRUBGenerated, s.Paths.BootHoldMarker)
+		result = append(result, s.Paths.GRUBFragment, s.Paths.GRUBGenerated,
+			s.Paths.BootHoldMarker, s.Paths.NetworkBootMarker)
 	}
 	if plan.Summary.DockerMode == "enabled" {
 		result = append(result, s.Paths.DockerDaemon, s.Paths.DockerDropIn)
 	}
 	return result
+}
+
+func (s *System) revalidateNetworkProducers(ctx context.Context, expected []string) error {
+	if err := netgate.ValidateUnits(expected); err != nil {
+		return err
+	}
+	observed, err := netgate.Discover(ctx, s.Runner)
+	if err != nil {
+		return err
+	}
+	if !reflect.DeepEqual(observed, expected) {
+		return errors.New("SETUP_NETWORK_PRODUCER_STATE_CHANGED")
+	}
+	return nil
 }
 
 func privatePlan(plan Plan) (*prepared, error) {

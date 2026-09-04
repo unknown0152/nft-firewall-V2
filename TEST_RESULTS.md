@@ -1,11 +1,11 @@
 # NFT Firewall V2 2.1.0 Source Test Results
 
-Source disposition: **AMENDMENT AC SOURCE VALIDATED; CANDIDATES PENDING**
+Source disposition: **AMENDMENT AD SOURCE VALIDATED; CANDIDATES PENDING**
 
-Validation date: 2026-09-03
+Validation date: 2026-09-04
 
 Reopened source baseline:
-`2c757ed28a2efe0fa9f539ec7f00d95f56daece7`
+`53e53f0dbce141df33d8f2120be5757ab789773b`
 
 This tracked report is the pre-build source snapshot. The later frozen commit,
 candidate build evidence, candidate comparison, R2 evidence, tag, and any
@@ -46,19 +46,23 @@ publication decision must remain external and checksummed.
 | Amendment AC systemd source contract | PASS; every independently activatable `/run/nftfw` writer owns the exact preserved `root:nftfw-web`, mode-`0750` directory; early/readiness are independent `sysinit.target` wants; the VPN remains a non-owner behind readiness `Requires=`/`After=` without giving readiness an activating edge to early restore |
 | Amendment AC disposable runtime-directory regression | PASS; condition-skipped and injected-failed early enforcement remain blocked without namespace failure, 150 absent-directory service starts pass, and concurrent owners preserve the shared directory and peer state |
 | Amendment AC repeated-boot source regression | PASS; twenty consecutive unique ROM-less boots retain exact installed readiness identity, early/readiness success, readiness-before-SSH timing, application verification, transient-guard cleanup, no namespace failure or NFTFW ordering cycle, zero frames before every initramfs marker, and post-readiness traffic; complete renewed E-R2 must repeat this candidate-bound |
+| Baseline E-R2 adverse producer boot | **FAIL / HARD STOP** after the clean build/runtime and twenty-normal-boot rows passed; failed readiness kept SSH/application consumers stopped, but udev directly activated `ifup@enp0s1.service` and emitted DHCP/ARP bootstrap frames; no tag or host change occurred |
+| Amendment AD producer inventory and lifecycle | PASS; closed supported set, one-primary/canonical-fragment validation, known alternate/custom/ambiguous refusal, pre-mutation target checks, exact setup marker/generated holds, post-commit readiness gates, topology drift, backup, committed recovery, exact rollback, package handoff, status, operator backup, and adoption contracts |
+| Amendment AD direct systemd semantics | PASS in an offline marked Debian guest; ordinary and template direct activation waits for readiness, failed and condition-skipped readiness executes no producer payload, stopping readiness tears down the bound producer, and the effective `Requires=`/`BindsTo=`/`After=` graph is exact; complete capture-backed E-R2 remains pending |
 | Disposable native initramfs package lifecycle | PASS in W7; inert install, exact native ownership/order, idempotence, tamper/foreign refusal, disabled restoration, and purge cleanup |
 | Zero-pre-readiness-packet boot | **FAIL / HARD STOP in W11**; two guest-originated IPv6 MLD/DAD frames were captured before readiness although the post-boot sysctls were disabled. Init-top is not a sufficient pre-driver boundary |
 | Amendment X direct GRUB transaction | PASS; strict BIOS/EFI identity, conflicting manager/mount/mode/link/race refusal, normalized mount identity, generated-entry argument parser, explicit two-pass resume, failed update, exact rollback, package handoff, and redacted status |
 | Amendment X disposable GRUB/reboot/capture matrix | PASS; failed update, pre/post-reboot process death, rollback finalization, package removal/restored boot, two consecutive managed boots with zero packets before readiness and traffic after readiness, and contradictory identity with zero guest packets |
 | Static amd64/arm64 CI package build and inspection | PASS; cross-binary composite identity is matched as an exact contiguous byte sequence and does not depend on tool-specific printable-run boundaries |
 | Dependency/license inventory | PASS, 29 non-main modules |
-| Overall statement coverage | PASS, 79.1% |
-| `internal/setup` coverage | PASS, 90.1% |
+| Overall statement coverage | PASS, 79.3% |
+| `internal/setup` coverage | PASS, 90.0% |
+| `internal/netgate` coverage | PASS, 92.3% |
 | `internal/bootguard` coverage | PASS, 91.2% |
 | `internal/wgconfig` coverage | PASS, 90.6% |
 | `internal/intent` coverage | PASS, 92.6% |
 | `internal/routing` coverage | PASS, 90.6% |
-| `internal/adoption` coverage | PASS, 91.0% |
+| `internal/adoption` coverage | PASS, 90.7% |
 
 ## Functional source coverage
 
@@ -214,9 +218,15 @@ proof now passes the unchanged budget. Its next E-R2 passed eleven subjects and
 then stopped at EFI identity verification. Amendment AB preserves the strict
 network-boot refusal, makes exact singleton dispatch structurally unique, and
 passes the focused parser plus real-reboot resume regression using a fixture
-whose virtual NIC cannot regenerate firmware network options. This tracked
-snapshot precedes the replacement clean freeze and independent quarantined
-candidate builds.
+whose virtual NIC cannot regenerate firmware network options. Amendment AC
+then corrected the runtime-directory race and its source run passed twenty
+normal boots. The following E-R2 repeated those normal boots but hard-stopped
+when the adverse ambiguous-state boot let a directly activated ifupdown
+template emit bootstrap frames after readiness failed. Amendment AD closes
+that direct-producer boundary; its unit, restrictive-root, generator,
+real-systemd semantic, full quality, coverage, fuzz, analyzer, benchmark, and
+source-contract gates pass. This tracked snapshot precedes the replacement
+clean freeze and independent quarantined candidate builds.
 
 | Gate | Result |
 | --- | --- |
@@ -231,6 +241,7 @@ candidate builds.
 | Amendment AA installed status/dashboard performance | Source-only timing/resource PASS without an independent provider assignment; strict healthy-protected E-R2 repeat NOT EXECUTED |
 | Amendment AB EFI reboot/resume | Source-only direct disposable PASS; complete E-R2 repeat NOT EXECUTED |
 | Amendment AC twenty consecutive boot handoffs | PASS in the source-only disposable run; 20 unique boot IDs, zero pre-marker packets on all 20, readiness-before-SSH, post-readiness traffic, stopped clean overlay; the complete candidate-bound E-R2 repeat remains NOT EXECUTED |
+| Amendment AD direct network-producer gating | PASS in the source-only offline systemd guest; complete real-service, hotplug, adverse-boot, and capture-backed E-R2 repeat NOT EXECUTED |
 | Disposable exact-2.0.3 adoption-planner no-mutation matrix | NOT EXECUTED |
 | Real-provider VPN test | NOT EXECUTED |
 | Local release tag | NOT CREATED |
@@ -238,4 +249,5 @@ candidate builds.
 | Current-server installation/adoption | NOT AUTHORIZED |
 
 Privileged scripts mutate disposable network, package, Docker, or boot state.
-They require the separately identity-bound Stage E-R2 approval.
+Except for the explicitly source-approved isolated fixtures reported above,
+they require the separately identity-bound Stage E-R2 approval.

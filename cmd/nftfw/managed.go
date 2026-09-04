@@ -24,6 +24,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
 	"github.com/unknown0152/nft-firewall-v2/internal/health"
 	"github.com/unknown0152/nft-firewall-v2/internal/intent"
+	"github.com/unknown0152/nft-firewall-v2/internal/netgate"
 	"github.com/unknown0152/nft-firewall-v2/internal/operatorbackup"
 	"github.com/unknown0152/nft-firewall-v2/internal/reconcile"
 	"github.com/unknown0152/nft-firewall-v2/internal/routing"
@@ -46,6 +47,7 @@ var (
 	managedSysctl       = "/etc/sysctl.d/90-nftfw-managed.conf"
 	managedDockerDaemon = "/etc/docker/daemon.json"
 	managedDockerDropIn = "/etc/systemd/system/nftfwd.service.d/docker-access.conf"
+	managedSystemdDir   = "/etc/systemd/system"
 	managedStateRoot    = "/var/lib/nftfw"
 	managedRuntimeRoot  = "/run/nftfw"
 
@@ -84,6 +86,17 @@ var (
 		}}
 		return (adoption.Planner{Inspector: inspector}).Plan(ctx, vpnPath)
 	}
+	managedNetworkGateState = func(ctx context.Context) ([]string, error) {
+		runner := routing.ExecRunner{}
+		units, err := netgate.Discover(ctx, runner)
+		if err != nil {
+			return nil, err
+		}
+		if err := netgate.VerifyEffective(ctx, runner, managedSystemdDir, units); err != nil {
+			return nil, err
+		}
+		return units, nil
+	}
 )
 
 type setupRecoveryExecutor interface {
@@ -117,6 +130,7 @@ func setupCommand(args []string) error {
 			}, true)
 		}
 		fmt.Printf("Setup: %s\nPhase: %s\nTransaction: %s\n", status, journal.Phase, journal.Transaction)
+		fmt.Printf("Network producers: %d readiness-gated\n", len(journal.Summary.NetworkProducers))
 		if journal.ErrorCode != "" {
 			fmt.Printf("Last error: %s\n", journal.ErrorCode)
 		}
@@ -726,6 +740,10 @@ func managedConfigShow(args []string) error {
 	if err != nil {
 		return err
 	}
+	networkProducers, err := managedNetworkGateState(context.Background())
+	if err != nil {
+		return errors.New("CONFIG_NETWORK_PRODUCER_STATE_INVALID")
+	}
 	result := map[string]any{
 		"schema": "nftfw.effective-managed-config.v1", "managed": true,
 		"uplink": value.Uplink, "vpn_interface": value.VPNInterface,
@@ -733,9 +751,10 @@ func managedConfigShow(args []string) error {
 		"lan_allow_tcp": value.LANAllowTCP, "lan_allow_udp": value.LANAllowUDP,
 		"public_tcp": value.PublicTCP, "public_udp": value.PublicUDP,
 		"ipv6_mode": "disabled", "resolver_mode": value.ResolverMode,
-		"docker_enabled":  value.DockerEnabled,
-		"docker_networks": dockerNetworkNames(value.DockerNetworks),
-		"zone_count":      len(generated.Zones), "policy_count": len(generated.Policies),
+		"docker_enabled":    value.DockerEnabled,
+		"docker_networks":   dockerNetworkNames(value.DockerNetworks),
+		"network_producers": networkProducers,
+		"zone_count":        len(generated.Zones), "policy_count": len(generated.Policies),
 	}
 	if has(args, "--json") {
 		return printJSONOr(result, true)
@@ -750,6 +769,7 @@ func managedConfigShow(args []string) error {
 		displayPorts(value.PublicTCP), displayPorts(value.PublicUDP))
 	fmt.Printf("IPv6: disabled\nResolver: %s\nDocker integration: %t\n",
 		value.ResolverMode, value.DockerEnabled)
+	fmt.Printf("Network producers: %s (readiness-gated)\n", strings.Join(networkProducers, ", "))
 	if value.DockerEnabled {
 		fmt.Printf("Docker networks: %s\nIPv4 forwarding owner: NFTFW\n",
 			strings.Join(dockerNetworkNames(value.DockerNetworks), ", "))
@@ -796,6 +816,10 @@ func managedBackupCommand(args []string) error {
 			return err
 		}
 		defer release()
+		networkProducers, err := managedNetworkGateState(context.Background())
+		if err != nil {
+			return errors.New("BACKUP_NETWORK_PRODUCER_STATE_INVALID")
+		}
 		creator := operatorbackup.Creator{
 			Paths: operatorbackup.Paths{
 				Config: managedConfigPath, Intent: managedIntentPath, VPN: managedVPNPath,
@@ -806,8 +830,9 @@ func managedBackupCommand(args []string) error {
 				Enforcement:  managedEnforcement,
 				DockerDaemon: managedDockerDaemon,
 				DockerDropIn: managedDockerDropIn,
+				SystemdDir:   managedSystemdDir,
 			},
-			LockDir: managedRuntimeRoot,
+			LockDir: managedRuntimeRoot, NetworkProducers: networkProducers,
 		}
 		manifest, err := creator.Create(context.Background(), destination)
 		if err != nil {
@@ -1155,6 +1180,10 @@ func existingManagedSetup(ctx context.Context, sourceVPN string) (bool, manageds
 	if err != nil || tunnel["healthy"] != true {
 		return false, managedsetup.Summary{}, errors.New("SETUP_ALREADY_MANAGED_RECOVERY_REQUIRED")
 	}
+	networkProducers, err := managedNetworkGateState(ctx)
+	if err != nil {
+		return false, managedsetup.Summary{}, errors.New("SETUP_ALREADY_MANAGED_RECOVERY_REQUIRED")
+	}
 	dockerMode := "disabled"
 	if value.DockerEnabled {
 		dockerMode = "enabled"
@@ -1167,7 +1196,7 @@ func existingManagedSetup(ctx context.Context, sourceVPN string) (bool, manageds
 		PublicUDP:     append([]int(nil), value.PublicUDP...),
 		IPv6Mode:      "disabled", BootPolicy: managedsetup.ManagedBootPolicy, DockerMode: dockerMode,
 		DockerNetworks: dockerNetworkNames(value.DockerNetworks),
-		ResolverMode:   value.ResolverMode,
+		ResolverMode:   value.ResolverMode, NetworkProducers: networkProducers,
 	}, nil
 }
 
@@ -1247,6 +1276,7 @@ func printSetupSummary(summary managedsetup.Summary) {
 	fmt.Printf("NFT Firewall V2 managed setup plan\nUplink: %s\nVPN interface: %s\nLAN networks: %s\nManagement TCP: %s\nIPv4 Internet: VPN ONLY\nIPv6: %s\nPublic exposure: NONE\nDocker: %s\n",
 		summary.Uplink, summary.VPNInterface, strings.Join(summary.LANNetworks, ", "),
 		displayPorts(summary.ManagementTCP), strings.ToUpper(summary.IPv6Mode), summary.DockerMode)
+	fmt.Printf("Network producers: %d (readiness-gated)\n", len(summary.NetworkProducers))
 	if summary.SourceModeWarning {
 		fmt.Println("Warning: the source VPN file is world-readable; the managed copy will be root-only mode 0600.")
 	}
@@ -1277,6 +1307,7 @@ func printProtectedSummary(summary managedsetup.Summary, idempotent bool) {
 		fmt.Printf("Public exposure UDP: %s\n", displayPorts(summary.PublicUDP))
 	}
 	fmt.Println("LAN management: PRESERVED")
+	fmt.Printf("Network producers: PROTECTED (%d readiness-gated)\n", len(summary.NetworkProducers))
 	fmt.Println("Boot protection: READY")
 	fmt.Println("Rollback: VERIFIED")
 	if idempotent {

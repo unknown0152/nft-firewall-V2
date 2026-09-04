@@ -359,6 +359,14 @@ until setup owns their configuration and forwarding. A crash after the table
 swap but before the ready marker is recoverable by exact revalidation; zero,
 two, changed, or additional tables remain blocked.
 
+The boot-hold generator also attaches that hold directly to every supported
+Debian network-producer service/template. This is required because udev may
+start an `ifup@<interface>.service` hotplug instance without pulling the
+passive `network-pre.target`. A missing, corrupt, unsafe, or changed
+`setup-network-producers-v1` marker or generated producer fragment keeps the
+hold active. Do not start `ifup@`, networking, NetworkManager, dhcpcd, or
+systemd-networkd manually while setup is at this midpoint.
+
 The initramfs loader is an explicit prerequisite of initramfs-tools' udev
 script. It verifies the kernel-wide disable contract, never re-enables
 loopback, checks the embedded rules checksum, and applies
@@ -393,10 +401,12 @@ cannot activate snapshot restoration. The verifier, required by
 `network-pre.target`, is the fail-closed success dependency. Both early and
 readiness are independently wanted by `sysinit.target`, ensuring the boot
 transaction contains both jobs even when a network consumer would otherwise
-be condition-skipped. Final consumer drop-ins use `Requires=` plus `After=` on
-readiness so a direct consumer transaction cannot be skipped. Readiness has no
-activating edge to early restore, so the consumer can start only the
-nonmutating verifier and cannot start snapshot restoration.
+be condition-skipped. Final consumer and direct-producer drop-ins use
+`Requires=`, `BindsTo=`, and `After=` on readiness. The combined binding keeps
+a producer inactive when readiness fails, is condition-skipped, becomes stale,
+or is manually stopped. Readiness has no activating edge to early restore, so
+the producer can start only the nonmutating verifier and cannot start snapshot
+restoration.
 
 Early restore and readiness both establish the same preserved
 `RuntimeDirectory=nftfw` identity (`root:nftfw-web`, mode `0750`) before their
@@ -443,7 +453,9 @@ bound. A rollback that never allocated a generation remains at zero.
 Package removal, the source uninstaller, and exact-2.0.3 downgrade invoke the
 same narrow boot handoff before the 2.1.0 helper disappears. They refuse a
 foreign or changed fragment/generated configuration or an unverifiable
-initramfs. When they print `rollback_reboot_required`, a reboot is still
+initramfs, and restore every captured producer dependency drop-in plus the
+setup producer marker to its exact prior bytes or absence before reloading
+systemd. When they print `rollback_reboot_required`, a reboot is still
 mandatory even though the on-disk next boot has already been restored.
 Package-only boot handoff is not a complete firewall rollback and therefore
 does not publish retained setup generation evidence as retryable.

@@ -15,6 +15,7 @@ import (
 	"github.com/unknown0152/nft-firewall-v2/internal/config"
 	"github.com/unknown0152/nft-firewall-v2/internal/containers"
 	"github.com/unknown0152/nft-firewall-v2/internal/discovery"
+	"github.com/unknown0152/nft-firewall-v2/internal/netgate"
 	"github.com/unknown0152/nft-firewall-v2/internal/nft"
 	"github.com/unknown0152/nft-firewall-v2/internal/provenance"
 	"github.com/unknown0152/nft-firewall-v2/internal/routing"
@@ -183,6 +184,10 @@ func (s SystemInspector) inspectOnce(ctx context.Context, vpnPath string) (inspe
 	if err != nil {
 		return inspected{}, err
 	}
+	networkProducers, err := netgate.Discover(ctx, netgateReadAdapter{s.Runner})
+	if err != nil {
+		return inspected{}, fail("ADOPTION_NETWORK_PRODUCER_UNSUPPORTED")
+	}
 	resolver, resolverErr := routing.DetectResolver(
 		ctx, routingReadAdapter{s.Runner}, len(profile.DNS) > 0,
 	)
@@ -226,7 +231,7 @@ func (s SystemInspector) inspectOnce(ctx context.Context, vpnPath string) (inspe
 	fingerprint := digestStrings(
 		profileDigest, configDigest, discoveryDigest, ledgerDigest, routeDigest,
 		installedVersion, digestValue(units), digestValue(committed),
-		digestValue(pointer), livePolicyFingerprint, dockerDaemonDigest,
+		digestValue(pointer), livePolicyFingerprint, dockerDaemonDigest, digestValue(networkProducers),
 	)
 	return inspected{Observation: Observation{
 		InstalledVersion: installedVersion, Managed: managed, ExistingState: true,
@@ -251,6 +256,7 @@ func (s SystemInspector) inspectOnce(ctx context.Context, vpnPath string) (inspe
 		IPv4Forwarding:        ipv4Forwarding && forwardingValid,
 		DockerRestartRequired: dockerRestartRequired,
 		PublicTCP:             publicTCP, PublicUDP: publicUDP, Units: units,
+		NetworkProducers: networkProducers,
 		Profile: ProfileSummary{
 			AddressCount: profileSummary.AddressCount, DNSCount: profileSummary.DNSCount,
 			HasMTU: profileSummary.HasMTU, HasPresharedKey: profileSummary.HasPresharedKey,
@@ -415,6 +421,15 @@ func (s SystemInspector) ipv4Forwarding(ctx context.Context) (bool, bool) {
 type routingReadAdapter struct{ Runner }
 
 func (a routingReadAdapter) Run(ctx context.Context, input []byte, name string, args ...string) ([]byte, error) {
+	if len(input) != 0 {
+		return nil, errors.New("read-only adoption runner rejects stdin")
+	}
+	return a.Runner.Run(ctx, name, args...)
+}
+
+type netgateReadAdapter struct{ Runner }
+
+func (a netgateReadAdapter) Run(ctx context.Context, input []byte, name string, args ...string) ([]byte, error) {
 	if len(input) != 0 {
 		return nil, errors.New("read-only adoption runner rejects stdin")
 	}

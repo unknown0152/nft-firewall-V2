@@ -99,6 +99,18 @@ for shadow_root in /etc/systemd/system-generators /run/systemd/system-generators
     fi
 done
 
+network_gate_present=false
+network_gate_path=
+for producer in NetworkManager.service dhcpcd.service dhcpcd@.service \
+    ifup@.service networking.service systemd-networkd.service; do
+    candidate_gate=/etc/systemd/system/$producer.d/50-nftfw-enforcement-ready.conf
+    if [ -e "$candidate_gate" ] || [ -L "$candidate_gate" ]; then
+        network_gate_present=true
+        network_gate_path=$candidate_gate
+        break
+    fi
+done
+
 old_version=${2:-}
 case "$action" in
     upgrade)
@@ -112,6 +124,7 @@ case "$action" in
                 "$database" \
                 "$state_dir/enforcement-enabled" \
                 "$state_dir/provenance-ledger.db" \
+                /etc/nftfw/setup-network-producers-v1 \
                 /usr/lib/nftfw/nftfw \
                 /usr/lib/systemd/system/nftfwd.service \
                 /usr/lib/systemd/system-generators/nftfw-setup-boot-hold-generator; do
@@ -121,6 +134,11 @@ case "$action" in
                     exit 1
                 fi
             done
+            if [ "$network_gate_present" = true ]; then
+                echo "Refusing retained or shadowing NFTFW state on a fresh install: $network_gate_path" >&2
+                echo "A separately reviewed recovery/import contract is required." >&2
+                exit 1
+            fi
             exit 0
         fi
         ;;
@@ -148,6 +166,9 @@ fi
 if [ "$action" = upgrade ] && \
     { [ -e /etc/nftfw/setup-boot-hold-v1 ] || \
       [ -L /etc/nftfw/setup-boot-hold-v1 ] || \
+      [ -e /etc/nftfw/setup-network-producers-v1 ] || \
+      [ -L /etc/nftfw/setup-network-producers-v1 ] || \
+      [ "$network_gate_present" = true ] || \
       [ -e /etc/default/grub.d/90-nftfw-ipv6-disabled.cfg ] || \
       [ -L /etc/default/grub.d/90-nftfw-ipv6-disabled.cfg ] || \
       [ -L "$state_dir/setup/journal.json" ] || \

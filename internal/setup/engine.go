@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"reflect"
 	"time"
+
+	"github.com/unknown0152/nft-firewall-v2/internal/netgate"
 )
 
 type Phase string
@@ -57,6 +59,7 @@ type Summary struct {
 	DockerNetworks    []string `json:"docker_networks,omitempty"`
 	DockerRestart     bool     `json:"docker_restart_required"`
 	ResolverMode      string   `json:"resolver_mode"`
+	NetworkProducers  []string `json:"network_producers"`
 	SourceModeWarning bool     `json:"source_mode_warning"`
 }
 
@@ -138,7 +141,8 @@ func (e Engine) Run(ctx context.Context, vpnPath string) (Plan, error) {
 	if err != nil {
 		return Plan{}, errors.New(errorCode(err))
 	}
-	if plan.Summary.Schema != "nftfw.setup-plan.v1" {
+	if plan.Summary.Schema != "nftfw.setup-plan.v1" ||
+		netgate.ValidateUnits(plan.Summary.NetworkProducers) != nil {
 		return Plan{}, errors.New("SETUP_PLAN_INVALID")
 	}
 	now := time.Now
@@ -406,7 +410,8 @@ func rebootRequiredJournal(journal Journal) bool {
 		(journal.Status == "reboot_required" || journal.Status == "resume_ready") &&
 		!journal.Committed && journal.Generation == 0 && journal.BackupDir != "" &&
 		filepath.IsAbs(journal.BackupDir) && filepath.Clean(journal.BackupDir) == journal.BackupDir &&
-		journal.Summary.Schema == "nftfw.setup-plan.v1" && journal.ErrorCode == ""
+		journal.Summary.Schema == "nftfw.setup-plan.v1" &&
+		netgate.ValidateUnits(journal.Summary.NetworkProducers) == nil && journal.ErrorCode == ""
 }
 
 func errorCode(err error) string {
